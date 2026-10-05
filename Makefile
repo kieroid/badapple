@@ -104,20 +104,15 @@ $(BLOB): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS)
 L41KA ?= build/l41ka
 LAIKA ?= build/venv/bin/python $(L41KA)/scripts/laikadbg.py
 
-# Takes the phone from DFU to a PongoOS shell. Skip "exploit" if the DFU serial
-# string already ends in PWND:[usbliter8].
+# Do not run the stages as separate laikadbg commands. Opening the board calls
+# set_configuration(), which re-enumerates it and drops the downstream link, so
+# a one-shot "exploit" fires at nothing, returns 0, and leaves pwned false.
+# tools/chain.py holds one session open across all the stages instead.
 pongo:
-	$(LAIKA) info
-	$(LAIKA) exploit
-	$(LAIKA) setup-iboot
-	$(LAIKA) load-pongo
+	build/venv/bin/python tools/chain.py pongo
 
-# pongo-file is the laikadbg equivalent of typing /send at the PongoOS prompt,
-# and bootm boots whatever that upload left in the loader buffer as a raw m1n1
-# image. m1n1 then parses the device tree, kernel and initramfs appended to it.
 boot: $(BLOB)
-	$(LAIKA) pongo-file $(BLOB)
-	$(LAIKA) pongo-command bootm
+	build/venv/bin/python tools/chain.py boot $(BLOB)
 
 clean:
 	rm -f $(DTB) $(PP) $(BLOB)

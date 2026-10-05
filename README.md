@@ -182,6 +182,41 @@ m1n1 also needs no changes for a single core boot: an unknown MIDR falls back to
 a null chicken init, `tunables_apply_static` defaults to doing nothing, and an
 unrecognised chip in `smp.c` just skips starting the secondaries.
 
+## Current blocker: setup-iboot does not reach laika-dfu
+
+The device stages are `dfu`, `pwned-dfu`, `recovery`, `laika-dfu`, `pongo`.
+`load-pongo` requires `laika-dfu`, and laikaDFU is a payload that runs on the
+phone, injected into iBoot by l41ka's patchfinder. Nothing in l41ka's opcode
+table moves `recovery` forward, so `setup-iboot` is meant to land in
+`laika-dfu` directly.
+
+On this phone it lands in `recovery` instead:
+
+    exploit         -> pwned-dfu, pwned: true          works
+    setup-iboot     -> recovery, pid 0x1281, pwned: false
+    load-pongo      -> ProtocolError: wrong device type (0x02000002)
+
+So SecureROM is pwned, but the boot that follows runs the phone's own signed
+iBSS and iBEC and comes up as ordinary recovery mode with the laikaDFU hook
+absent. l41ka's error log stays empty (`present: 0`), so its firmware does not
+consider this a fault.
+
+Leading theory is that the patchfinder did not match this iBoot build. It is
+pattern based rather than version keyed, its README calls it a first attempt
+aiming at "universal SOC support", and l41ka's tested matrix is T8020 on iOS
+18.7.9 only.
+
+Things that would move this along, cheapest first:
+
+1. Find out which iOS is actually installed, and if it is not 18.7.9, get it
+   there. Recovery mode does not report the OS version.
+2. Capture l41ka's CDC debug output during `setup-iboot`. Note that `cdc_acm`
+   claims the board's debug interface, so `laikadbg.py --cdc` returned nothing
+   and reading `/dev/ttyACM0` directly is the better route.
+3. Supply a patchfinder built for this iBoot, which l41ka supports via
+   `laikadbg.py iboot-patchfinder <path>`. Both IPSWs here contain the iBSS and
+   iBEC to work against. This is the expensive option.
+
 ## Known gaps and the order to attack them
 
 1. **SMP.** m1n1 has no `cpu_start_off` for T8020, hence `maxcpus=1`. Fixing
