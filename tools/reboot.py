@@ -21,8 +21,20 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "build" / "m1n1" / "proxyclient"))
 sys.path.insert(0, str(ROOT / "build" / "l41ka" / "scripts"))
 
-COMBO = ("Hold Side + Volume Down for 10s, release Side, keep holding\n"
-         "  Volume Down about 5s more. Black screen means DFU.")
+# iPhone XS Max has no home button, so it needs the three step sequence. Side
+# plus Volume Down held together is the iPhone 7 era combo and does not work
+# here. The first two presses must be quick taps, not holds.
+FORCE_RESTART = """force restart:
+    1. press and quickly release Volume Up
+    2. press and quickly release Volume Down
+    3. press and hold Side until it restarts, 10 to 20s"""
+
+DFU = """then DFU:
+    1. quick press Volume Up
+    2. quick press Volume Down
+    3. hold Side until the screen goes black, about 10s
+    4. still holding Side, also hold Volume Down for 5s
+    5. release Side, keep holding Volume Down about 10s"""
 
 
 def m1n1_tty():
@@ -79,8 +91,10 @@ def main():
         except Exception as error:  # noqa: BLE001
             print(f"{attempt.__name__}: {error}")
 
-    print("\nNothing responded, so it has to be the buttons:")
-    print(" ", COMBO)
+    print("\nNothing responded, so it has to be the buttons.")
+    print(FORCE_RESTART)
+    print(DFU)
+    print("\nIf the buttons do nothing at all, let the battery run down.")
 
 
 if __name__ == "__main__":
