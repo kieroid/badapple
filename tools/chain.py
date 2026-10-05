@@ -80,9 +80,18 @@ def do_boot(client, blob):
     L.stream_upload(client, blob, L.DEVICE_PONGO_BEGIN_UPLOAD_FILE,
                     L.DEVICE_PONGO_FINISH_UPLOAD_FILE, 1, 128 * 1024 * 1024,
                     TIMEOUT_MS)
+    # A stalled pipe here is the expected result, not an error: PongoOS takes
+    # the command and jumps to m1n1, so it stops servicing USB mid-transfer.
+    # Watch the phone screen from this point, the console is the framebuffer
+    # m1n1 inherits from iBoot.
     print("bootm")
-    client.request(L.DEVICE_PONGO_SEND_COMMAND,
-                   struct.pack("<I", TIMEOUT_MS) + b"bootm", TIMEOUT_MS)
+    try:
+        client.request(L.DEVICE_PONGO_SEND_COMMAND,
+                       struct.pack("<I", TIMEOUT_MS) + b"bootm", TIMEOUT_MS)
+    except Exception as error:  # noqa: BLE001
+        print(f"  usb went away: {error}")
+        print("  that is what a successful handoff looks like, watch the screen")
+        return
     L.drain_pongo_output(client, TIMEOUT_MS)
 
 

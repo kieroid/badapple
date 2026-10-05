@@ -38,7 +38,7 @@ KBUILD := LLVM=1 ARCH=arm64
 # secondaries would never come up anyway. Drop it once SMP works.
 BOOTARGS ?= earlycon console=tty0 loglevel=7 maxcpus=1
 
-.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot clean
+.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot boot-m1n1 clean
 check: $(DTB)
 
 $(DTB): $(DTS) dts/t8020.dtsi dts/t8020-pmgr.dtsi
@@ -113,6 +113,13 @@ pongo:
 
 boot: $(BLOB)
 	build/venv/bin/python tools/chain.py boot $(BLOB)
+
+# Bisect target. Sends m1n1 on its own, with no device tree, kernel or
+# initramfs appended, so m1n1 comes up to its own prompt and draws to the
+# framebuffer instead of handing off. Proves whether m1n1 runs on T8020 at all,
+# and it is 1 MB rather than 12 MB so it uploads in a few seconds.
+boot-m1n1: $(M1N1)
+	build/venv/bin/python tools/chain.py boot $(M1N1)
 
 clean:
 	rm -f $(DTB) $(PP) $(BLOB)
