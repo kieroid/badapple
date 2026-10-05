@@ -1,0 +1,49 @@
+diff --git a/src/fb.c b/src/fb.c
+index 2b85d9a..fc5c389 100644
+--- a/src/fb.c
++++ b/src/fb.c
+@@ -503,7 +503,13 @@ void fb_shutdown(bool restore_logo)
+         return;
+ 
+     console.active = false;
+-    fb_clear_console();
++    /*
++     * Deliberately not clearing the console. On a phone the framebuffer is the
++     * only console without a serial cable on the Lightning pins, and Linux
++     * prints nothing visible until simpledrm and fbcon are up. Leaving the
++     * text in place means a kernel that dies before that still leaves m1n1's
++     * log readable, instead of handing back a screen with just the logo.
++     */
+     if (restore_logo) {
+         fb_restore_logo();
+         free(orig_logo.ptr);
+diff --git a/src/main.c b/src/main.c
+index d4e828c..36ad32b 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -31,6 +31,9 @@
+ #include "wdt.h"
+ #include "xnuboot.h"
+ 
++/* Seconds to hold the log on the framebuffer before vectoring to Linux. */
++#define HANDOFF_PAUSE_SECS 20
++
+ struct vector_args next_stage;
+ 
+ const char version_tag[] = "##m1n1_ver##" BUILD_TAG;
+@@ -193,6 +196,15 @@ void m1n1_main(void)
+ 
+     printf("Preparing to run next stage at %p...\n", next_stage.entry);
+ 
++    /*
++     * Hold the log on screen before handing off. Everything above this point
++     * is the only record of what m1n1 decided, and on a phone there is no
++     * serial console to read it back from afterwards.
++     */
++    printf("Pausing %d seconds so the log can be read...\n", HANDOFF_PAUSE_SECS);
++    iodev_console_flush();
++    mdelay(HANDOFF_PAUSE_SECS * 1000);
++
+     nvme_shutdown();
+     exception_shutdown();
+ #ifndef BRINGUP

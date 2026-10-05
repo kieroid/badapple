@@ -1,0 +1,72 @@
+diff --git a/src/exception.c b/src/exception.c
+index ded20c4..cc5da4b 100644
+--- a/src/exception.c
++++ b/src/exception.c
+@@ -355,8 +355,8 @@ void exc_sync(u64 *regs)
+             break;
+         case GUARD_OFF:
+         default:
+-            printf("Unhandled exception, rebooting...\n");
+-            flush_and_reboot();
++            printf("Unhandled exception, halting...\n");
++            flush_and_halt();
+     }
+ 
+     exc_count++;
+@@ -472,8 +472,8 @@ void exc_serr(u64 *regs)
+         print_regs(regs, 0);
+ 
+     if ((exc_guard & GUARD_TYPE_MASK) == GUARD_OFF) {
+-        printf("Unhandled exception, rebooting...\n");
+-        flush_and_reboot();
++        printf("Unhandled exception, halting...\n");
++        flush_and_halt();
+     }
+ 
+     exc_count++;
+diff --git a/src/utils.c b/src/utils.c
+index feeca69..801e6af 100644
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -140,6 +140,14 @@ void flush_and_reboot(void)
+     reboot();
+ }
+ 
++void flush_and_halt(void)
++{
++    printf("\n*** Halted so this stays readable. Hold Side + Volume Down to reset. ***\n");
++    iodev_console_flush();
++    while (1)
++        sysop("wfe");
++}
++
+ void spin_init(spinlock_t *lock)
+ {
+     lock->lock = -1;
+diff --git a/src/utils.h b/src/utils.h
+index 429db16..2b74425 100644
+--- a/src/utils.h
++++ b/src/utils.h
+@@ -421,6 +421,13 @@ u64 ticks_to_usecs(u64 ticks);
+ 
+ void reboot(void) __attribute__((noreturn));
+ void flush_and_reboot(void) __attribute__((noreturn));
++/*
++ * Like flush_and_reboot, but stop instead of rebooting, so whatever was just
++ * printed stays on the framebuffer long enough to read. On a phone that
++ * framebuffer is the only console available without a serial cable on the
++ * Lightning pins, and a reboot takes the message with it.
++ */
++void flush_and_halt(void) __attribute__((noreturn));
+ 
+ u64 timeout_calculate(u32 usec);
+ bool timeout_expired(u64 timeout);
+@@ -447,7 +454,7 @@ void spin_unlock(spinlock_t *lock);
+ #define panic(fmt, ...)                                                                            \
+     do {                                                                                           \
+         debug_printf(fmt, ##__VA_ARGS__);                                                          \
+-        flush_and_reboot();                                                                        \
++        flush_and_halt();                                                                          \
+     } while (0)
+ 
+ static inline int poll32(u64 addr, u32 mask, u32 target, u32 timeout)
