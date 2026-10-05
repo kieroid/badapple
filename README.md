@@ -232,3 +232,38 @@ Things that would move this along, cheapest first:
 5. **Notch.** m1n1 only trims the notch for T8015 board ids 0x6 and 0xe, and
    this phone has no `partially-occluded-display` in its ADT `/product`, so the
    framebuffer will include the notch area. Cosmetic.
+
+## m1n1 needs a T8020 USB complex case
+
+m1n1 picks its USB complex register layout by compatible string, trying
+`s5l8960x`, then `t8015`, then falling through to `t8011`. Our ADT says:
+
+    /arm-io/usb-complex  compatible: ['usb-complex,t8020', 'usb-complex,t8011']
+
+so a T8020 silently got T8011's DMA remap offsets, `0x18/0x24/0x74/0x84`. That
+fallback is not good enough: T8015 carries the same `t8011` fallback and still
+needs its own offsets, and T8020 has a different controller set again, with
+`usb-device`, `usb-ehci0` and `usb-ohci0` but no second EHCI.
+
+The real offsets are in the ADT, in `/arm-io/usb-complex usb_widget_with_mask`,
+as three (offset, value, mask) triplets:
+
+    offset 0x028  value 0x00000088  mask 0x030000ff
+    offset 0x038  value 0x00000088  mask 0x030000ff
+    offset 0x048  value 0x00000088  mask 0x030000ff
+
+The mask covers bits 0-7 and 24-25, which is exactly m1n1's T8011 bit layout
+(`USBX_REMAP_TO_DRAM_BITS_T8011` is `0x3000088`), so only the offsets differ.
+`patches/m1n1-0001-t8020-usb-complex.patch` adds a `USBCOMPLEX_T8020` case
+writing the T8011 values to 0x28, 0x38 and 0x48.
+
+Why this is worth suspecting as a crash cause: writing remap-enable bits to the
+wrong registers leaves USB DMA un-remapped, so transfers land at wrong physical
+addresses. That corrupts memory rather than faulting cleanly, which matches a
+crash that happens a while after the logo and some console output.
+
+It also explains why m1n1 with no payload rebooted instead of hanging.
+`run_actions()` ends in `uartproxy_run()`, which blocks forever, but only if
+USB came up. If it returns, `main()` falls through to `panic("Nothing to do!")`,
+and a panic on an iDevice reboots. So m1n1 alone staying on screen is the
+signal that USB init is fixed.

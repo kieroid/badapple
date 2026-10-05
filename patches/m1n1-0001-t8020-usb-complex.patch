@@ -1,0 +1,69 @@
+diff --git a/src/usb.c b/src/usb.c
+index fce0d5d..fb1bba2 100644
+--- a/src/usb.c
++++ b/src/usb.c
+@@ -354,6 +354,15 @@ int usb_complex_init(struct usb_complex_config *config)
+             write32(config->USBComplexBase + USBX_USBDEV_REMAP_CTL_T8015,
+                     USBX_REMAP_TO_DRAM_BITS_T8011);
+             break;
++        case USBCOMPLEX_T8020:
++            write32(config->USBComplexBase + USBX_CTL_T8011, USBX_CTL_EN_T8011);
++            write32(config->USBComplexBase + USBX_WIDGET0_REMAP_CTL_T8020,
++                    USBX_REMAP_TO_DRAM_BITS_T8011);
++            write32(config->USBComplexBase + USBX_WIDGET1_REMAP_CTL_T8020,
++                    USBX_REMAP_TO_DRAM_BITS_T8011);
++            write32(config->USBComplexBase + USBX_WIDGET2_REMAP_CTL_T8020,
++                    USBX_REMAP_TO_DRAM_BITS_T8011);
++            break;
+         default:
+             printf("usb: Unsupported complex type!\n");
+             return -1;
+@@ -454,8 +463,10 @@ int usb_complex_init_adt(void)
+         type = USBCOMPLEX_S5L8960X;
+     } else if (adt_is_compatible(adt, usbComplex_offset, "usb-complex,t8015")) {
+         type = USBCOMPLEX_T8015;
++    } else if (adt_is_compatible(adt, usbComplex_offset, "usb-complex,t8020")) {
++        type = USBCOMPLEX_T8020;
+     }
+-    // This must be last because of the fallback compatible to usb-complex,t8011 on t8015
++    // This must be last because of the fallback compatible to usb-complex,t8011 on t8015 and t8020
+     else if (adt_is_compatible(adt, usbComplex_offset, "usb-complex,t8011")) {
+         type = USBCOMPLEX_T8011;
+     } else {
+diff --git a/src/usb_complex.h b/src/usb_complex.h
+index 58f33ca..9ffb973 100644
+--- a/src/usb_complex.h
++++ b/src/usb_complex.h
+@@ -51,6 +51,24 @@
+ #define USBX_EHCI1_REMAP_CTL_T8015  0x38
+ #define USBX_USBDEV_REMAP_CTL_T8015 0x48
+ 
++/*
++ * T8020 registers.
++ *
++ * The ADT lists these in /arm-io/usb-complex usb_widget_with_mask as three
++ * (offset, value, mask) triplets: offsets 0x28, 0x38 and 0x48, value 0x88,
++ * mask 0x030000ff. That mask covers bits 0-7 and 24-25, which is exactly the
++ * T8011 bit layout, so the values are shared and only the offsets differ.
++ * T8020 has three widgets, for usb-device, usb-ehci0 and usb-ohci0, with no
++ * second EHCI. m1n1 writes the same value to each, so which widget is which
++ * does not matter here.
++ *
++ * Do not lean on the usb-complex,t8011 fallback compatible for these. T8015
++ * carries the same fallback and still needs its own offsets.
++ */
++#define USBX_WIDGET0_REMAP_CTL_T8020 0x28
++#define USBX_WIDGET1_REMAP_CTL_T8020 0x38
++#define USBX_WIDGET2_REMAP_CTL_T8020 0x48
++
+ /* USB PHY registers */
+ 
+ #define USBX_OTG_CTL       0x00
+@@ -95,6 +113,7 @@ enum usb_complex_type {
+     USBCOMPLEX_S5L8960X,
+     USBCOMPLEX_T8011,
+     USBCOMPLEX_T8015,
++    USBCOMPLEX_T8020,
+ };
+ 
+ struct usb_complex_config {

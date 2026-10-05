@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Drive the whole pre-boot chain in one l41ka USB session.
+"""Drive the whole pre-boot chain, surviving the board dropping off USB.
 
-Why this exists: laikadbg.py runs one command per process, and opening the
-board calls set_configuration(), which re-enumerates it and drops whatever
-downstream connection it had. The first poll after any invocation therefore
-always reports device_type "none". Running "exploit" as a one-shot command
-fires it at nothing, which looks like success (rc 0) and leaves pwned false.
+Two things make this harder than calling laikadbg.py a few times:
 
-So open the board once, wait for the phone to actually be there, and only then
-walk the stages. Each stage waits for the link to come back, because the phone
-re-enumerates as it moves between dfu, pwned-dfu, laika-dfu and pongo.
+Opening the board calls set_configuration(), which re-enumerates it and drops
+whatever downstream connection it had. The first poll after any invocation
+therefore reports device_type "none". Running "exploit" as a one-shot command
+fires it at nothing, returns 0, and leaves pwned false, which reads as success.
+
+The board also re-enumerates by itself after some stages, which kills the
+session mid-poll with ENODEV. So rather than a fixed sequence, look at the
+stage the phone is actually in and pick the one action that moves it forward.
+Reopen the board whenever it vanishes and look again. Every action is chosen
+from observed state, so resuming is safe and this can be re-run at any point.
+
+Stages: dfu -> pwned-dfu -> laika-dfu -> pongo. "recovery" is a dead end,
+it means l41ka's iBoot patchfinder did not install laikaDFU.
 
 Usage:
-    chain.py pongo              exploit, patch iBoot, load PongoOS
-    chain.py boot <blob>        upload a blob and run bootm
-    chain.py pongo <blob>       both, in one session
+    chain.py pongo              get to a PongoOS shell
+    chain.py boot <image>       upload an image and run bootm
 """
 
 import struct
@@ -28,21 +33,25 @@ sys.path.insert(0, str(L41KA))
 import laikadbg as L  # noqa: E402
 
 TIMEOUT_MS = 60000
+GONE = (OSError, L.ProtocolError, RuntimeError)
 
 
-def poll(client, want, tries=20, delay=2.0):
-    """Wait for an open downstream link whose type is one of want."""
-    if isinstance(want, str):
-        want = (want,)
-    last = None
-    for _ in range(tries):
-        last = L.connection_from_payload(
-            client.request(L.PI_POLL_FOR_DEVICE, timeout_ms=TIMEOUT_MS))
-        if last["open"] and last["device_type"] in want:
-            print(f"  link: {last['device_type']}")
-            return last
-        time.sleep(delay)
-    raise SystemExit(f"timed out waiting for {'/'.join(want)}, last state {last}")
+def open_board(tries=20, delay=2.0):
+    """Wait for the board to come back after it re-enumerates."""
+    for attempt in range(tries):
+        try:
+            return L.LaikaClient()
+        except Exception:  # noqa: BLE001
+            if attempt == 0:
+                print("  waiting for the board to come back")
+            time.sleep(delay)
+    raise SystemExit("board never came back")
+
+
+def stage(client):
+    state = L.connection_from_payload(
+        client.request(L.PI_POLL_FOR_DEVICE, timeout_ms=TIMEOUT_MS))
+    return state["device_type"] if state["open"] else "none"
 
 
 def info(client):
@@ -50,60 +59,103 @@ def info(client):
         client.request(L.DEVICE_DFU_INFO, timeout_ms=TIMEOUT_MS))
 
 
-def do_pongo(client):
-    poll(client, ("dfu", "pwned-dfu"))
-    d = info(client)
-    print(f"  {d['product_type']} cpid {d['cpid']} bdid {d['bdid']} pwned {d['pwned']}")
+def to_pongo(deadline):
+    """Walk the phone to a PongoOS shell, whatever stage it starts from."""
+    seen = None
+    while time.monotonic() < deadline:
+        client = open_board()
+        try:
+            here = stage(client)
+            if here != seen:
+                print(f"  stage: {here}")
+                seen = here
 
-    if not d["pwned"]:
-        print("exploit")
-        client.request(L.DEVICE_DFU_EXPLOIT, timeout_ms=TIMEOUT_MS)
-        poll(client, "pwned-dfu")
-        d = info(client)
-        if not d["pwned"]:
-            raise SystemExit("exploit ran but pwned is still false")
-    print(f"  pwned: {d['pwned']}")
+            if here == "pongo":
+                return
+            if here == "none":
+                time.sleep(2.0)
+            elif here == "dfu":
+                d = info(client)
+                print(f"  {d['product_type']} cpid {d['cpid']} bdid {d['bdid']}")
+                print("exploit")
+                client.request(L.DEVICE_DFU_EXPLOIT, timeout_ms=TIMEOUT_MS)
+            elif here == "pwned-dfu":
+                print("setup-iboot")
+                client.request(
+                    L.DEVICE_PWNED_DFU_SEND_EMBEDDED_IBOOT_PATCHFINDER_AND_BOOT,
+                    timeout_ms=TIMEOUT_MS)
+            elif here == "laika-dfu":
+                print("load-pongo")
+                client.request(L.DEVICE_LAIKADFU_SEND_EMBEDDED_PONGOOS,
+                               timeout_ms=TIMEOUT_MS)
+            elif here == "recovery":
+                raise SystemExit(
+                    "stuck in recovery: the iBoot patchfinder did not install "
+                    "laikaDFU, so there is no way forward from here")
+            else:
+                raise SystemExit(f"unexpected stage {here}")
+        except GONE as error:
+            print(f"  board went away ({error}), reopening")
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+    raise SystemExit("gave up before reaching pongo")
 
-    print("setup-iboot")
-    client.request(L.DEVICE_PWNED_DFU_SEND_EMBEDDED_IBOOT_PATCHFINDER_AND_BOOT,
-                   timeout_ms=TIMEOUT_MS)
-    poll(client, ("laika-dfu", "recovery", "pwned-dfu"))
 
-    print("load-pongo")
-    client.request(L.DEVICE_LAIKADFU_SEND_EMBEDDED_PONGOOS, timeout_ms=TIMEOUT_MS)
-    poll(client, "pongo")
+def boot(image, deadline):
+    while time.monotonic() < deadline:
+        client = open_board()
+        try:
+            here = stage(client)
+            if here != "pongo":
+                print(f"  stage: {here}, waiting for pongo")
+                time.sleep(2.0)
+                continue
 
+            print(f"upload {image} ({image.stat().st_size} bytes)")
+            L.stream_upload(client, image, L.DEVICE_PONGO_BEGIN_UPLOAD_FILE,
+                            L.DEVICE_PONGO_FINISH_UPLOAD_FILE, 1,
+                            128 * 1024 * 1024, TIMEOUT_MS)
 
-def do_boot(client, blob):
-    poll(client, "pongo")
-    print(f"upload {blob} ({blob.stat().st_size} bytes)")
-    L.stream_upload(client, blob, L.DEVICE_PONGO_BEGIN_UPLOAD_FILE,
-                    L.DEVICE_PONGO_FINISH_UPLOAD_FILE, 1, 128 * 1024 * 1024,
-                    TIMEOUT_MS)
-    # A stalled pipe here is the expected result, not an error: PongoOS takes
-    # the command and jumps to m1n1, so it stops servicing USB mid-transfer.
-    # Watch the phone screen from this point, the console is the framebuffer
-    # m1n1 inherits from iBoot.
-    print("bootm")
-    try:
-        client.request(L.DEVICE_PONGO_SEND_COMMAND,
-                       struct.pack("<I", TIMEOUT_MS) + b"bootm", TIMEOUT_MS)
-    except Exception as error:  # noqa: BLE001
-        print(f"  usb went away: {error}")
-        print("  that is what a successful handoff looks like, watch the screen")
-        return
-    L.drain_pongo_output(client, TIMEOUT_MS)
+            # A stalled pipe here is the expected result, not an error: PongoOS
+            # takes the command and jumps, so it stops servicing USB mid
+            # transfer. Watch the phone screen from this point, the console is
+            # the framebuffer m1n1 inherits from iBoot.
+            print("bootm")
+            try:
+                client.request(L.DEVICE_PONGO_SEND_COMMAND,
+                               struct.pack("<I", TIMEOUT_MS) + b"bootm",
+                               TIMEOUT_MS)
+            except GONE as error:
+                print(f"  usb went away: {error}")
+                print("  that is what a successful handoff looks like")
+                return
+            L.drain_pongo_output(client, TIMEOUT_MS)
+            return
+        except GONE as error:
+            print(f"  board went away ({error}), reopening")
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+    raise SystemExit("gave up before booting")
 
 
 def main():
-    stage = sys.argv[1] if len(sys.argv) > 1 else "pongo"
-    blob = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+    what = sys.argv[1] if len(sys.argv) > 1 else "pongo"
+    deadline = time.monotonic() + 600
 
-    with L.LaikaClient() as client:
-        if stage == "pongo":
-            do_pongo(client)
-        if blob is not None:
-            do_boot(client, blob)
+    if what == "pongo":
+        to_pongo(deadline)
+        print("pongo shell is up")
+    elif what == "boot":
+        to_pongo(deadline)
+        boot(Path(sys.argv[2]), deadline)
+    else:
+        raise SystemExit(f"usage: {sys.argv[0]} pongo | boot <image>")
 
 
 if __name__ == "__main__":
