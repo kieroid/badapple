@@ -1,5 +1,5 @@
 diff --git a/src/exception.c b/src/exception.c
-index ded20c4..cc5da4b 100644
+index ded20c4..679463e 100644
 --- a/src/exception.c
 +++ b/src/exception.c
 @@ -355,8 +355,8 @@ void exc_sync(u64 *regs)
@@ -13,14 +13,30 @@ index ded20c4..cc5da4b 100644
      }
  
      exc_count++;
-@@ -472,8 +472,8 @@ void exc_serr(u64 *regs)
+@@ -471,9 +471,24 @@ void exc_serr(u64 *regs)
+     if (!(exc_guard & GUARD_SILENT))
          print_regs(regs, 0);
  
++    /*
++     * Bring-up on T8020: report an unhandled SError and keep going rather than
++     * halting.
++     *
++     * An SError is asynchronous and imprecise, so the PC in the dump is only
++     * wherever execution happened to be, in our case inside vsnprintf. What is
++     * reproducible is L2C_ERR_ADR, which reads 0x8ec78c000 on every boot,
++     * exactly the "Top of normal RAM" that memory.c prints. So it is an access
++     * at the top of DRAM boundary. It survived removing the phram log buffer
++     * that first appeared responsible, and it is latched well before it is
++     * taken.
++     *
++     * Halting stops the boot with no way to find out whether the error matters.
++     * Continuing is a deliberate shortcut: if the kernel boots afterwards it
++     * was benign at the boundary, and if things misbehave we know it was not.
++     */
      if ((exc_guard & GUARD_TYPE_MASK) == GUARD_OFF) {
 -        printf("Unhandled exception, rebooting...\n");
 -        flush_and_reboot();
-+        printf("Unhandled exception, halting...\n");
-+        flush_and_halt();
++        printf("Unhandled SError, continuing anyway (T8020 bring-up)\n");
      }
  
      exc_count++;

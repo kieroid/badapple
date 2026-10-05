@@ -67,57 +67,63 @@
 		};
 
 		/*
-		 * iOS reports reg 0 for cpu0 and reg 256 for cpu4, so the second
-		 * cluster is at affinity level 1 rather than level 2 like T8015.
+		 * These must equal MPIDR_EL1 & 0xFFFFFF, which is what m1n1's
+		 * dt_set_cpus matches against. The ADT's reg is not that value:
+		 * it reports 0 for cpu0 and 256 for cpu4, missing the Aff2 bit.
+		 * The boot CPU reported MPIDR 0x80010100, so the real affinity
+		 * for cluster 1 core 0 is 0x10100, and the ADT values are the
+		 * same numbers with 0x10000 missing. Get this wrong and m1n1
+		 * prunes every CPU node, including the one it is running on,
+		 * leaving Linux a device tree with no CPUs at all.
 		 */
-		cpu_e0: cpu@0 {
+		cpu_e0: cpu@10000 {
 			compatible = "apple,tempest";
-			reg = <0x0 0x0>;
+			reg = <0x0 0x10000>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
 		};
 
-		cpu_e1: cpu@1 {
+		cpu_e1: cpu@10001 {
 			compatible = "apple,tempest";
-			reg = <0x0 0x1>;
+			reg = <0x0 0x10001>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
 		};
 
-		cpu_e2: cpu@2 {
+		cpu_e2: cpu@10002 {
 			compatible = "apple,tempest";
-			reg = <0x0 0x2>;
+			reg = <0x0 0x10002>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
 		};
 
-		cpu_e3: cpu@3 {
+		cpu_e3: cpu@10003 {
 			compatible = "apple,tempest";
-			reg = <0x0 0x3>;
+			reg = <0x0 0x10003>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
 		};
 
-		cpu_p0: cpu@100 {
+		cpu_p0: cpu@10100 {
 			compatible = "apple,vortex";
-			reg = <0x0 0x100>;
+			reg = <0x0 0x10100>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_1>;
 		};
 
-		cpu_p1: cpu@101 {
+		cpu_p1: cpu@10101 {
 			compatible = "apple,vortex";
-			reg = <0x0 0x101>;
+			reg = <0x0 0x10101>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
