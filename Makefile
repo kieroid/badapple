@@ -59,8 +59,18 @@ pmgr:
 
 m1n1: $(M1N1)
 
+# USE_CLANG=1 because m1n1 otherwise reaches for aarch64-linux-gnu-gcc, and
+# clang cross compiles to aarch64 without a separate toolchain installed.
+#
+# BUILDSTD=1 builds the Rust core and alloc crates from source instead of
+# expecting a prebuilt aarch64-unknown-none-softfloat target, which is what you
+# want without rustup. m1n1 already exports RUSTC_BOOTSTRAP=1, so the -Z flag
+# this needs works on a stable rustc. It does need the Rust standard library
+# sources: on Gentoo that is the rust-src USE flag.
+BUILDSTD ?= 1
+
 $(M1N1):
-	$(MAKE) -C $(M1N1_SRC) RELEASE=1 CHAINLOADING=1
+	$(MAKE) -C $(M1N1_SRC) RELEASE=1 CHAINLOADING=1 USE_CLANG=1 BUILDSTD=$(BUILDSTD)
 
 kernel: $(IMAGE)
 
