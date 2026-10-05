@@ -229,6 +229,69 @@ core reports MPIDR 0x80010100, so cluster 1 core 0 is 0x10100. With the ADT
 values taken at face value, m1n1 prunes all six CPU nodes including the one it
 is running on, and Linux gets a device tree with no CPUs.
 
+## Where this stopped: the shell is on screen, not on the host
+
+Linux reaches `HoolockLinux test ramdisk shell` reliably, with the gadget bound
+on the phone side:
+
+    dwc2 239100000.usbdev: EPs: 9, dedicated fifos, 2056 entries in SPRAM
+    dwc2 239100000.usbdev: bound driver configfs-gadget.g1
+    [HL-rd]: Starting uwudhcpd with server ip 172.16.42.1, client ip: 172.16.42.2
+
+The phone is 172.16.42.1 and runs a DHCP server; the host is meant to get
+172.16.42.2 and `telnet 172.16.42.1`. That last hop does not work yet.
+
+### Why this is harder here than on A11
+
+The A11 port never hits it. checkm8 runs from the PC, so the phone is attached
+to the PC for the whole boot and the gadget enumerates there naturally.
+usbliter8 needs the RP2350 as the USB host, so our phone is on the jig exactly
+when dwc2 probes at ~0.26s, and it binds its pullup to the jig. Moving the
+cable afterwards does nothing: the device never re-presents itself, so the new
+host never enumerates it.
+
+### What was tried
+
+- **Hot-swapping the cable after boot.** Never enumerated, in any port.
+- **A powered hub and a USB-C adapter**, following the wiki's note that AMD
+  hosts "may require using a USB adapter". Made things worse, nothing
+  enumerated at all, and a `VIA Labs USB Billboard Device` appeared in the
+  chain. The host here is a Ryzen 5 2600.
+- **A 30 second pause in m1n1 before vectoring**, to move the cable before
+  dwc2 probes. This is in `patches/m1n1-0003`. Inconclusive so far.
+- **Rebinding the UDC from a script injected into the initramfs**, writing ""
+  then the controller name to `/sys/kernel/config/usb_gadget/g1/UDC` to toggle
+  the pullup. The gadget *did* enumerate once this way, as
+  `05ac:12a8` with a working CDC interface. But any repacked initramfs panics
+  the kernel on unpack, and this was reverted. Do not re-add it without
+  solving that first.
+
+### The repack problem, unexplained
+
+Appending a second cpio member to Hoolock's initramfs and re-gzipping makes the
+kernel die immediately at unpack. Ruled out: the base archive is 3379712 bytes,
+`mod 512 == 0`, so alignment is fine; the appended member is present with mode
+0755 and a valid `#!` line; `sh -n` passes. The stock initramfs boots every
+time, the repacked one never does. Whatever is wrong is in how the archive is
+assembled, not in the script.
+
+### Next things to try
+
+1. Rebuild the initramfs as a **single** cpio rather than appending a second
+   member, which sidesteps multi-archive semantics entirely.
+2. Configure the host interface by hand once it does enumerate. This needs
+   root, which the agent does not have:
+   `sudo ip link set <iface> up && sudo ip addr add 172.16.42.2/24 dev <iface>`
+3. Failing all that, a serial cable on the Lightning pins makes UART0 readable
+   and sidesteps USB for debugging, though not for a usable shell.
+
+### An unrelated flake worth knowing
+
+The chain intermittently fails with the board dropping off USB mid-`exploit`.
+`chain.py` reopens, finds the phone already in `recovery`, and says so rather
+than continuing. The phone then boots iOS. Just retry; it usually takes on the
+next attempt.
+
 ## Known gaps and the order to attack them
 
 1. **SMP.** m1n1 has no `cpu_start_off` for T8020, hence `maxcpus=1`. Fixing
