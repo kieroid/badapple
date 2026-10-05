@@ -9,7 +9,6 @@
 # boot       send the blob to the PongoOS shell and chainload it
 # boot-m1n1  send m1n1 alone, leaving it in its USB proxy
 # proxy-boot load kernel, dtb and initramfs over m1n1's proxy (cable on the PC)
-# proxy-guest run the blob under m1n1's hypervisor, guest console on the host
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -132,6 +131,12 @@ boot-m1n1: $(M1N1)
 # The point is that m1n1's log arrives as text on the host rather than having
 # to be photographed off the screen, and a failed attempt can be retried
 # without re-running the exploit, as long as m1n1 itself survives.
+#
+# Run ONE proxy session per m1n1 boot. ProxyUtils pins m1n1's heap limit to
+# whatever the heap base was, so the next session's heapblock_alloc aligns the
+# base up past that limit and m1n1 panics with "heapblock: out of memory".
+# Since panic now halts rather than reboots, that looks like a wedged proxy
+# that is still enumerated on USB. Do not run exploratory sessions first.
 # Pick the m1n1 proxy port by USB vendor id rather than guessing ttyACM0,
 # which is the l41ka board. m1n1's proxy is 1209:316d and exposes two ACM
 # interfaces; the first one is the proxy.
@@ -148,14 +153,12 @@ proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS)
 proxy-shell:
 	$(PROXY)/tools/shell.py
 
-# The actual fix for "Linux prints nothing". Runs the blob as a guest under
-# m1n1's hypervisor, which traps the guest's UART writes and prints them on the
-# host, so earlycon output becomes readable without a serial cable on the
-# Lightning pins. --hook-exceptions reports guest faults with registers.
-# A12 implements EL2, which the ADT confirms: /product has-virtualization = 1.
-.PHONY: proxy-guest
-proxy-guest: $(BLOB)
-	$(PROXY)/tools/run_guest.py -r -e -l build/guest.log $(BLOB)
+# There is deliberately no hypervisor target here. m1n1's hypervisor would trap
+# the guest's UART writes and give us Linux's early console for free, but it
+# needs EL2, and PongoOS hands off at EL1: see its own comment in
+# src/kernel/entry.c, "We're in EL1 here", with elevation only on SoCs that
+# have EL3. The ADT's has-virtualization = 1 is about the silicon, not about
+# the exception level we are handed.
 
 clean:
 	rm -f $(DTB) $(PP) $(BLOB)
