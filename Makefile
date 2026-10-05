@@ -9,6 +9,7 @@
 # boot       send the blob to the PongoOS shell and chainload it
 # boot-m1n1  send m1n1 alone, leaving it in its USB proxy
 # proxy-boot load kernel, dtb and initramfs over m1n1's proxy (cable on the PC)
+# reboot     reboot from a parked m1n1 or recovery, no button combo
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -132,11 +133,15 @@ boot-m1n1: $(M1N1)
 # to be photographed off the screen, and a failed attempt can be retried
 # without re-running the exploit, as long as m1n1 itself survives.
 #
-# Run ONE proxy session per m1n1 boot. ProxyUtils pins m1n1's heap limit to
-# whatever the heap base was, so the next session's heapblock_alloc aligns the
-# base up past that limit and m1n1 panics with "heapblock: out of memory".
-# Since panic now halts rather than reboots, that looks like a wedged proxy
-# that is still enumerated on USB. Do not run exploratory sessions first.
+# Run ONE proxy session per m1n1 boot. Observed: three sessions worked, the
+# fourth got no reply to its very first request, while the phone stayed
+# enumerated on USB and the screen's last line was still "Heap limit:
+# 0x811e0c000 (128 MiB)". So m1n1 stops answering after ProxyUtils sets the
+# heap limit, with no panic printed. The likely reason is that ProxyUtils pins
+# the limit to the current heap base and a later allocation cannot fit, but
+# there is no panic text on screen to confirm that, so treat the mechanism as
+# unproven and the one-session rule as the empirical workaround.
+#
 # Pick the m1n1 proxy port by USB vendor id rather than guessing ttyACM0,
 # which is the l41ka board. m1n1's proxy is 1209:316d and exposes two ACM
 # interfaces; the first one is the proxy.
@@ -152,6 +157,12 @@ proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS)
 
 proxy-shell:
 	$(PROXY)/tools/shell.py
+
+# Get out of a parked m1n1 or a recovery prompt without the button combo.
+# Does not reach DFU, nothing in software can: see the note under "pongo".
+.PHONY: reboot
+reboot:
+	build/venv/bin/python tools/reboot.py
 
 # There is deliberately no hypervisor target here. m1n1's hypervisor would trap
 # the guest's UART writes and give us Linux's early console for free, but it
