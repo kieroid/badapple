@@ -7,18 +7,14 @@
 # blob       concatenate m1n1, the device tree, the kernel and the initramfs
 # pongo      drive the phone from DFU to a PongoOS shell with l41ka
 # boot       send the blob to the PongoOS shell and chainload it
-# boot-m1n1  send m1n1 alone, leaving it in its USB proxy
-# proxy-boot load kernel, dtb and initramfs over m1n1's proxy (cable on the PC)
 # reboot     reboot from a parked m1n1 or recovery, no button combo
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
 
-BOARD ?= t8020-d331p
-
-DTS := dts/$(BOARD).dts
-DTB := build/$(BOARD).dtb
-PP  := build/$(BOARD).dts.pp
+DTS := dts/t8020-d331p.dts
+DTB := build/t8020-d331p.dtb
+PP  := build/t8020-d331p.dts.pp
 
 CPPFLAGS := -nostdinc -Iinclude -Idts -undef -D__DTS__ -x assembler-with-cpp
 
@@ -39,9 +35,9 @@ KBUILD := LLVM=1 ARCH=arm64
 # earlycon picks up UART0 through stdout-path.
 # maxcpus=1 is here because m1n1 has no CPU start offset for T8020 yet, so the
 # secondaries would never come up anyway. Drop it once SMP works.
-BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1 initcall_debug
+BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1
 
-.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot boot-m1n1 clean
+.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot reboot clean
 check: $(DTB)
 
 $(DTB): $(DTS) dts/t8020.dtsi dts/t8020-pmgr.dtsi
@@ -78,8 +74,14 @@ $(M1N1):
 
 kernel: $(IMAGE)
 
+# NBD is disabled because nbd_init hangs the boot on this device: with
+# initcall_debug the last line on screen is "calling nbd_init+0x0/0x194" and
+# nothing follows. Hoolock ships it enabled for pmOS netboot, which we do not
+# use. This has to be reapplied after the config copy, otherwise it is silently
+# undone on the next build.
 $(IMAGE):
 	cp $(CONFIG_16K) $(KDIR)/.config
+	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD
 	$(MAKE) -C $(KDIR) $(KBUILD) olddefconfig
 	$(MAKE) -C $(KDIR) $(KBUILD) -j$$(nproc) Image.gz
 
@@ -115,49 +117,11 @@ pongo:
 boot: $(BLOB)
 	build/venv/bin/python tools/chain.py boot $(BLOB)
 
-# Sends m1n1 on its own, with nothing appended, so it ends up in uartproxy_run
-# instead of handing off. Two uses: it proves m1n1 runs on T8020 at all, and it
-# is the first half of the proxy workflow below.
-boot-m1n1: $(M1N1)
-	build/venv/bin/python tools/chain.py boot $(M1N1)
-
-# The fast iteration loop, which avoids the DFU button dance per attempt.
-#
-#   make boot-m1n1          through the jig, leaves m1n1 sitting in its proxy
-#   move the Lightning cable from the jig to this PC
-#   make proxy-boot         loads kernel, dtb and initramfs over USB
-#
-# The point is that m1n1's log arrives as text on the host rather than having
-# to be photographed off the screen, and a failed attempt can be retried
-# without re-running the exploit, as long as m1n1 itself survives.
-#
-# Run ONE proxy session per m1n1 boot. Observed: three sessions worked, the
-# fourth got no reply to its very first request, while the phone stayed
-# enumerated on USB and the screen's last line was still "Heap limit:
-# 0x811e0c000 (128 MiB)". So m1n1 stops answering after ProxyUtils sets the
-# heap limit, with no panic printed. The likely reason is that ProxyUtils pins
-# the limit to the current heap base and a later allocation cannot fit, but
-# there is no panic text on screen to confirm that, so treat the mechanism as
-# unproven and the one-session rule as the empirical workaround.
-#
-# Pick the m1n1 proxy port by USB vendor id rather than guessing ttyACM0,
-# which is the l41ka board. m1n1's proxy is 1209:316d and exposes two ACM
-# interfaces; the first one is the proxy.
-M1N1DEV ?= $(shell for d in /sys/class/tty/ttyACM*; do \
-	p=$$(readlink -f $$d/device); \
-	[ "$$(cat $$p/../idVendor 2>/dev/null)" = "1209" ] && \
-	    echo /dev/$$(basename $$d) && break; done)
-PROXY := M1N1DEVICE=$(M1N1DEV) build/venv/bin/python $(M1N1_SRC)/proxyclient
-
-.PHONY: proxy-boot
-proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS)
-	$(PROXY)/tools/linux.py $(IMAGE) $(DTB) $(INITRAMFS) -b '$(BOOTARGS)'
-
 # Get out of a parked m1n1 or a recovery prompt without the button combo.
 # Does not reach DFU, nothing in software can: see the note under "pongo".
 .PHONY: reboot
 reboot:
-	M1N1DEVICE=$(M1N1DEV) build/venv/bin/python tools/reboot.py
+	build/venv/bin/python tools/reboot.py
 
 # There is deliberately no hypervisor target here. m1n1's hypervisor would trap
 # the guest's UART writes and give us Linux's early console for free, but it

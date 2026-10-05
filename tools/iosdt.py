@@ -46,8 +46,6 @@ def as_u64_pairs(value):
     if isinstance(value, list):
         if all(isinstance(v, dict) for v in value):
             return [(v.get("addr", 0), v.get("size", 0)) for v in value]
-        if all(isinstance(v, int) for v in value):
-            return list(zip(value[0::2], value[1::2]))
     if isinstance(value, dict):
         return [(value.get("addr", 0), value.get("size", 0))]
     return []

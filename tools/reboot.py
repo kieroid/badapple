@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """Reboot the phone without the button combo, whichever stage it is in.
 
-Tries, in order:
+Tries m1n1's proxy if it is up. Deliberately does not use m1n1.setup or
+ProxyUtils: those allocate and pin m1n1's heap limit, which is what burns a
+session. P_REBOOT is sent with no_reply, so only m1n1's receive path has to be
+working.
 
-  1. m1n1's proxy, if it is up. Deliberately does not use m1n1.setup or
-     ProxyUtils: those allocate and pin m1n1's heap limit, which is what burns
-     a session. P_REBOOT is sent with no_reply, so only m1n1's receive path has
-     to be working.
-  2. l41ka, if the phone is on the jig and in recovery.
-
-Neither reaches DFU. There is no software path into DFU on this hardware, so
+This does not reach DFU. There is no software path into DFU on this hardware, so
 the button combo is still the way there. This only saves the combo when all you
 want is to get out of a parked m1n1 or a recovery prompt.
 """
@@ -19,7 +16,6 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "build" / "m1n1" / "proxyclient"))
-sys.path.insert(0, str(ROOT / "build" / "l41ka" / "scripts"))
 
 # iPhone XS Max has no home button, so it needs the three step sequence. Side
 # plus Volume Down held together is the iPhone 7 era combo and does not work
@@ -63,28 +59,8 @@ def try_m1n1():
     return True
 
 
-def try_l41ka():
-    import laikadbg as L
-    client = L.LaikaClient()
-    try:
-        state = L.connection_from_payload(
-            client.request(L.PI_POLL_FOR_DEVICE, timeout_ms=20000))
-        stage = state["device_type"] if state["open"] else "none"
-        print(f"l41ka sees: {stage}")
-        if stage != "recovery":
-            return False
-        client.request(L.DEVICE_RECOVERY_REBOOT, timeout_ms=20000)
-        print("sent")
-        return True
-    finally:
-        try:
-            client.close()
-        except Exception:  # noqa: BLE001
-            pass
-
-
 def main():
-    for attempt in (try_m1n1, try_l41ka):
+    for attempt in (try_m1n1,):
         try:
             if attempt():
                 return

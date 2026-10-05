@@ -19,6 +19,17 @@
 
 	aliases {
 		serial0 = &serial0;
+		/*
+		 * m1n1 looks this up with fdt_get_alias("ausbphy0") and copies
+		 * cfg0-device, cfg1-device, cfg0-host and cfg1-host from the
+		 * ADT's /arm-io/otgphyctrl into the node. Without the alias it
+		 * returns 0 and silently copies nothing, the Linux ausb driver
+		 * then fails of_property_read_u32("apple,cfg0-device") with
+		 * -ENODEV, dwc2 never gets a PHY, no UDC is registered, and the
+		 * gadget dies with "couldn't find an available UDC". A label is
+		 * not enough, it has to be an alias.
+		 */
+		ausbphy0 = &ausbphy0;
 	};
 
 	chosen {
@@ -31,16 +42,21 @@
 		/*
 		 * This is the console you can actually read without a serial
 		 * cable. m1n1 fills in the address and the format properties
-		 * from the framebuffer iBoot already set up, then flips this to
-		 * okay. There is no display driver involved, so the picture
-		 * freezes as handed over.
+		 * from the framebuffer iBoot already set up, then deletes the
+		 * status property to enable it.
 		 *
-		 * No power-domains here, unlike T8015: this tree has no pmgr
-		 * node, so nothing is going to gate the display behind our back.
+		 * The power-domains are load bearing, exactly as on T8015.
+		 * Nothing else claims the display domains, so without this
+		 * apple-pmgr-pwrstate powers them down as unused once boot gets
+		 * far enough, and the screen goes black mid-boot with no error.
+		 * An earlier version of this node left them out on the grounds
+		 * that there was no pmgr node to gate anything; pmgr was added
+		 * later and that reasoning silently stopped being true.
 		 */
 		framebuffer0: framebuffer@0 {
 			compatible = "apple,simple-framebuffer", "simple-framebuffer";
 			reg = <0 0 0 0>; /* To be filled by loader */
+			power-domains = <&ps_disp0_be &ps_mipi_dsi &ps_disp0_hilo &ps_disp0_ppp>;
 			status = "disabled";
 		};
 	};
