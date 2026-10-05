@@ -1,5 +1,5 @@
 diff --git a/src/exception.c b/src/exception.c
-index ded20c4..679463e 100644
+index ded20c4..fa7a5ba 100644
 --- a/src/exception.c
 +++ b/src/exception.c
 @@ -355,8 +355,8 @@ void exc_sync(u64 *regs)
@@ -13,7 +13,7 @@ index ded20c4..679463e 100644
      }
  
      exc_count++;
-@@ -471,9 +471,24 @@ void exc_serr(u64 *regs)
+@@ -471,9 +471,50 @@ void exc_serr(u64 *regs)
      if (!(exc_guard & GUARD_SILENT))
          print_regs(regs, 0);
  
@@ -36,7 +36,33 @@ index ded20c4..679463e 100644
      if ((exc_guard & GUARD_TYPE_MASK) == GUARD_OFF) {
 -        printf("Unhandled exception, rebooting...\n");
 -        flush_and_reboot();
-+        printf("Unhandled SError, continuing anyway (T8020 bring-up)\n");
++        static bool serr_masked = false;
++
++        if (!serr_masked) {
++            serr_masked = true;
++
++            /*
++             * Clear the recursive flag too. print_regs above only clears
++             * ACCESS_FAULT and PIO_FAULT, but our status reads 0x...82, which
++             * is ACCESS_FAULT and RECURSIVE_FAULT. ENABLE_W1C is set as well,
++             * so a read-modify-write of zeroes may not clear anything.
++             */
++            reg_mask(SYS_IMP_APL_L2C_ERR_STS,
++                     L2C_ERR_STS_ACCESS_FAULT | L2C_ERR_STS_PIO_FAULT |
++                         L2C_ERR_STS_RECURSIVE_FAULT,
++                     0);
++
++            /*
++             * Then mask SError outright. Returning from the handler without
++             * the error actually cleared re-asserts it immediately and the
++             * boot spins printing this dump forever, which is what it did.
++             * Masking breaks that loop whether or not the clear above worked.
++             * Linux sets its own DAIF early, so it does not inherit this.
++             */
++            msr(DAIF, mrs(DAIF) | (4 << 6));
++
++            printf("Unhandled SError at top of RAM: masked, continuing (T8020 bring-up)\n");
++        }
      }
  
      exc_count++;
