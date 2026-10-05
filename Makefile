@@ -39,7 +39,7 @@ KBUILD := LLVM=1 ARCH=arm64
 # earlycon picks up UART0 through stdout-path.
 # maxcpus=1 is here because m1n1 has no CPU start offset for T8020 yet, so the
 # secondaries would never come up anyway. Drop it once SMP works.
-BOOTARGS ?= earlycon console=tty0 loglevel=7 maxcpus=1
+BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1 initcall_debug
 
 .PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot boot-m1n1 clean
 check: $(DTB)

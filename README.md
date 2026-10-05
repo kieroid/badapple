@@ -182,40 +182,52 @@ m1n1 also needs no changes for a single core boot: an unknown MIDR falls back to
 a null chicken init, `tunables_apply_static` defaults to doing nothing, and an
 unrecognised chip in `smp.c` just skips starting the secondaries.
 
-## Current blocker: setup-iboot does not reach laika-dfu
+## Status: Linux boots
 
-The device stages are `dfu`, `pwned-dfu`, `recovery`, `laika-dfu`, `pongo`.
-`load-pongo` requires `laika-dfu`, and laikaDFU is a payload that runs on the
-phone, injected into iBoot by l41ka's patchfinder. Nothing in l41ka's opcode
-table moves `recovery` forward, so `setup-iboot` is meant to land in
-`laika-dfu` directly.
+Mainline Linux 7.3.0-rc1 runs on the iPhone XS Max, on one Vortex core, with a
+framebuffer console. The kernel confirms, in its own words, every address taken
+out of the IPSW:
 
-On this phone it lands in `recovery` instead:
+    apple-pmgr-pwrstate 23d200000.power-management:power-controller@0058
+    235200000.serial: ttySAC0 MMIO32:0x0000000235200000 (irq = 35) is a APPLE S5L
+    [drm] Initialized simpledrm 1.0.0 for 8f7cd4000.framebuffer on minor 0
+    Console: switching to colour frame buffer device 155x168
+    Unpacking initramfs...
 
-    exploit         -> pwned-dfu, pwned: true          works
-    setup-iboot     -> recovery, pid 0x1281, pwned: false
-    load-pongo      -> ProtocolError: wrong device type (0x02000002)
+So `pmgr_mini`, UART0, the generated power domains and the handover framebuffer
+are all correct. What is not yet working is the USB gadget, so there is no
+interactive shell: output only.
 
-So SecureROM is pwned, but the boot that follows runs the phone's own signed
-iBSS and iBEC and comes up as ordinary recovery mode with the laikaDFU hook
-absent. l41ka's error log stays empty (`present: 0`), so its firmware does not
-consider this a fault.
+### What it took, in m1n1
 
-Leading theory is that the patchfinder did not match this iBoot build. It is
-pattern based rather than version keyed, its README calls it a first attempt
-aiming at "universal SOC support", and l41ka's tested matrix is T8020 on iOS
-18.7.9 only.
+Six patches, in `patches/`. Three were genuine T8020 bugs, three were about
+being able to see anything at all.
 
-Things that would move this along, cheapest first:
+1. **`0001` USB complex registers.** `usb-complex,t8020` fell through to the
+   `t8011` case and got its DMA remap offsets. The real ones are in the ADT's
+   `usb_widget_with_mask`: 0x28, 0x38, 0x48.
+2. **`0005` A12 MIDR parts.** `midr.h` already defined
+   `MIDR_PART_T8020_VORTEX` and `_TEMPSET` but nothing referenced them, so the
+   lookup fell back to `features_unknown` with `apple_sysregs_unlocked` false,
+   which sent an A12 down an M4-only path reading `CTRR_M4_LWR_EL2` from EL1.
+3. **`0002` SError handling.** An asynchronous SError fires at the top-of-RAM
+   boundary, `L2C_ERR_ADR` 0x8ec78c000, every boot. m1n1's existing clear is
+   `reg_mask(..., ACCESS_FAULT | PIO_FAULT, 0)`, a write of zeroes, but the
+   register is write-1-to-clear: `ENABLE_W1C`, bit 56, is set. So that clear
+   has never worked here. Writing ones to the fault bits, `RECURSIVE_FAULT`
+   included, does. The underlying cause of the error is still unknown.
 
-1. Find out which iOS is actually installed, and if it is not 18.7.9, get it
-   there. Recovery mode does not report the OS version.
-2. Capture l41ka's CDC debug output during `setup-iboot`. Note that `cdc_acm`
-   claims the board's debug interface, so `laikadbg.py --cdc` returned nothing
-   and reading `/dev/ttyACM0` directly is the better route.
-3. Supply a patchfinder built for this iBoot, which l41ka supports via
-   `laikadbg.py iboot-patchfinder <path>`. Both IPSWs here contain the iBSS and
-   iBEC to work against. This is the expensive option.
+The other three, `0003`, `0004` and `0006`, exist because the framebuffer is
+the only console without a serial cable, and a `RELEASE` build defines
+`FB_SILENT_MODE` which silences it exactly when a payload is present.
+
+### Device tree gotcha worth repeating
+
+CPU `reg` must equal `MPIDR_EL1 & 0xFFFFFF`. The ADT's `reg` is **not** that
+number: it reports 0 for cpu0 and 256 for cpu4, omitting the Aff2 bit. The boot
+core reports MPIDR 0x80010100, so cluster 1 core 0 is 0x10100. With the ADT
+values taken at face value, m1n1 prunes all six CPU nodes including the one it
+is running on, and Linux gets a device tree with no CPUs.
 
 ## Known gaps and the order to attack them
 

@@ -18,20 +18,10 @@ index 2b85d9a..fc5c389 100644
          fb_restore_logo();
          free(orig_logo.ptr);
 diff --git a/src/main.c b/src/main.c
-index d4e828c..af9452a 100644
+index d4e828c..b13c427 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -31,6 +31,9 @@
- #include "wdt.h"
- #include "xnuboot.h"
- 
-+/* Seconds to hold the log on the framebuffer before vectoring to Linux. */
-+#define HANDOFF_PAUSE_SECS 150
-+
- struct vector_args next_stage;
- 
- const char version_tag[] = "##m1n1_ver##" BUILD_TAG;
-@@ -172,11 +175,17 @@ void m1n1_main(void)
+@@ -172,11 +172,17 @@ void m1n1_main(void)
      // On idevice we need to always clear, because otherwise it looks scuffed on white devices
      fb_init(!is_mac);
      fb_display_logo();
@@ -53,31 +43,3 @@ index d4e828c..af9452a 100644
  #endif
  
      cpufreq_fixup();
-@@ -193,6 +202,27 @@ void m1n1_main(void)
- 
-     printf("Preparing to run next stage at %p...\n", next_stage.entry);
- 
-+    /*
-+     * Hold the log on screen before handing off. Everything above this point
-+     * is the only record of what m1n1 decided, and on a phone there is no
-+     * serial console to read it back from afterwards.
-+     *
-+     * fb_set_active(true) is the important part. A RELEASE build defines
-+     * FB_SILENT_MODE, so main() activated the console as
-+     * fb_set_active(!cur_boot_args.video.display), which is false whenever the
-+     * display is up. run_actions() turns it back on, but only on the path
-+     * where no payload was found, so booting an actual kernel draws nothing at
-+     * all. Turning it on here also flushes the buffered backlog, by way of
-+     * iodev_console_kick(), so the whole log appears rather than just what
-+     * gets printed from this point on.
-+     */
-+#ifdef USE_FB
-+    fb_set_active(true);
-+#endif
-+    printf("Pausing %d seconds so the log can be read...\n", HANDOFF_PAUSE_SECS);
-+    iodev_console_flush();
-+    mdelay(HANDOFF_PAUSE_SECS * 1000);
-+
-     nvme_shutdown();
-     exception_shutdown();
- #ifndef BRINGUP
