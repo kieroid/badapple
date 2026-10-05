@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Apple T8020 "A12" SoC
+ *
+ * Other names: H11
+ *
+ * Every address and interrupt number here was read out of the DeviceTree
+ * shipped in the iPhone11,2 IPSW (see tools/iosdt.py), not guessed from T8015.
+ * The arm-io ranges property maps child 0x0 to parent 0x200000000, so a
+ * peripheral offset of 0x35200000 is absolute address 0x235200000.
+ *
+ * This is deliberately a bring-up subset: enough for a serial console and an
+ * initramfs, nothing more. Blocks left out on purpose, with the reason:
+ *
+ *   pmgr / power domains  Needs a generated t8020-pmgr.dtsi. UART0 is the
+ *                         iBoot boot-console so its clock gate is already on
+ *                         when Linux starts, and nothing else here is gated.
+ *   cpufreq / OPP tables  Cluster controllers live at 0x210e20000 (E) and
+ *                         0x211e20000 (P), but the A12 operating points are
+ *                         not measured yet and wrong ones hang the cluster.
+ *   pinctrl, i2c, nvme    Not needed to reach a shell.
+ *
+ * Copyright (c) 2026, kiki <kieran@lavato.net>
+ */
+
+#include <dt-bindings/interrupt-controller/apple-aic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	interrupt-parent = <&aic>;
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	clkref: clock-ref {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+		clock-output-names = "clkref";
+	};
+
+	cpus {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		cpu-map {
+			cluster0 {
+				core0 {
+					cpu = <&cpu_e0>;
+				};
+				core1 {
+					cpu = <&cpu_e1>;
+				};
+				core2 {
+					cpu = <&cpu_e2>;
+				};
+				core3 {
+					cpu = <&cpu_e3>;
+				};
+			};
+
+			cluster1 {
+				core0 {
+					cpu = <&cpu_p0>;
+				};
+				core1 {
+					cpu = <&cpu_p1>;
+				};
+			};
+		};
+
+		/*
+		 * iOS reports reg 0 for cpu0 and reg 256 for cpu4, so the second
+		 * cluster is at affinity level 1 rather than level 2 like T8015.
+		 */
+		cpu_e0: cpu@0 {
+			compatible = "apple,tempest";
+			reg = <0x0 0x0>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+			device_type = "cpu";
+			next-level-cache = <&l2_cache_0>;
+		};
+
+		cpu_e1: cpu@1 {
+			compatible = "apple,tempest";
+			reg = <0x0 0x1>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+			device_type = "cpu";
+			next-level-cache = <&l2_cache_0>;
+		};
+
+		cpu_e2: cpu@2 {
+			compatible = "apple,tempest";
+			reg = <0x0 0x2>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+			device_type = "cpu";
+			next-level-cache = <&l2_cache_0>;
+		};
+
+		cpu_e3: cpu@3 {
+			compatible = "apple,tempest";
+			reg = <0x0 0x3>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+			device_type = "cpu";
+			next-level-cache = <&l2_cache_0>;
+		};
+
+		cpu_p0: cpu@100 {
+			compatible = "apple,vortex";
+			reg = <0x0 0x100>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+			device_type = "cpu";
+			next-level-cache = <&l2_cache_1>;
+		};
+
+		cpu_p1: cpu@101 {
+			compatible = "apple,vortex";
+			reg = <0x0 0x101>;
+			cpu-release-addr = <0 0>; /* To be filled by loader */
+			enable-method = "spin-table";
+			device_type = "cpu";
+			next-level-cache = <&l2_cache_1>;
+		};
+
+		/* Sizes come from the l2-cache-size property in the iOS DeviceTree. */
+		l2_cache_0: l2-cache-0 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-unified;
+			cache-size = <0x200000>;
+		};
+
+		l2_cache_1: l2-cache-1 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-unified;
+			cache-size = <0x800000>;
+		};
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		nonposted-mmio;
+		ranges;
+
+		/* iBoot calls this one debug-console and leaves it running. */
+		serial0: serial@235200000 {
+			compatible = "apple,s5l-uart";
+			reg = <0x2 0x35200000 0x0 0x4000>;
+			reg-io-width = <4>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 386 IRQ_TYPE_LEVEL_HIGH>;
+			/* Use the bootloader-enabled clocks for now. */
+			clocks = <&clkref>, <&clkref>;
+			clock-names = "uart", "clk_uart_baud0";
+			status = "disabled";
+		};
+
+		aic: interrupt-controller@23b100000 {
+			compatible = "apple,t8020-aic", "apple,aic";
+			reg = <0x2 0x3b100000 0x0 0x8000>;
+			#interrupt-cells = <3>;
+			interrupt-controller;
+		};
+
+		wdt: watchdog@23d2b0000 {
+			compatible = "apple,t8020-wdt", "apple,wdt";
+			reg = <0x2 0x3d2b0000 0x0 0x4000>;
+			clocks = <&clkref>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 232 IRQ_TYPE_LEVEL_HIGH>;
+		};
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupt-parent = <&aic>;
+		interrupt-names = "phys", "virt", "hyp-phys", "hyp-virt";
+		/* Unlike A11, the A12 does implement EL2, so wire the HV timers too. */
+		interrupts = <AIC_FIQ AIC_TMR_GUEST_PHYS IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ AIC_TMR_GUEST_VIRT IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ AIC_TMR_HV_PHYS IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ AIC_TMR_HV_VIRT IRQ_TYPE_LEVEL_HIGH>;
+	};
+};
