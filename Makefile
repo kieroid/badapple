@@ -104,8 +104,6 @@ $(BLOB): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS)
 # PongoOS does not have. Its laikadbg.py speaks to the board over USB
 # 4141:4c41, so the board has to be plugged into this machine with the phone
 # connected through it.
-L41KA ?= build/l41ka
-LAIKA ?= build/venv/bin/python $(L41KA)/scripts/laikadbg.py
 
 # Do not run the stages as separate laikadbg commands. Opening the board calls
 # set_configuration(), which re-enumerates it and drops the downstream link, so
@@ -151,18 +149,15 @@ M1N1DEV ?= $(shell for d in /sys/class/tty/ttyACM*; do \
 	    echo /dev/$$(basename $$d) && break; done)
 PROXY := M1N1DEVICE=$(M1N1DEV) build/venv/bin/python $(M1N1_SRC)/proxyclient
 
-.PHONY: proxy-boot proxy-shell
+.PHONY: proxy-boot
 proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS)
 	$(PROXY)/tools/linux.py $(IMAGE) $(DTB) $(INITRAMFS) -b '$(BOOTARGS)'
-
-proxy-shell:
-	$(PROXY)/tools/shell.py
 
 # Get out of a parked m1n1 or a recovery prompt without the button combo.
 # Does not reach DFU, nothing in software can: see the note under "pongo".
 .PHONY: reboot
 reboot:
-	build/venv/bin/python tools/reboot.py
+	M1N1DEVICE=$(M1N1DEV) build/venv/bin/python tools/reboot.py
 
 # There is deliberately no hypervisor target here. m1n1's hypervisor would trap
 # the guest's UART writes and give us Linux's early console for free, but it
