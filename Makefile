@@ -132,7 +132,13 @@ boot-m1n1: $(M1N1)
 # The point is that m1n1's log arrives as text on the host rather than having
 # to be photographed off the screen, and a failed attempt can be retried
 # without re-running the exploit, as long as m1n1 itself survives.
-M1N1DEV ?= /dev/ttyACM0
+# Pick the m1n1 proxy port by USB vendor id rather than guessing ttyACM0,
+# which is the l41ka board. m1n1's proxy is 1209:316d and exposes two ACM
+# interfaces; the first one is the proxy.
+M1N1DEV ?= $(shell for d in /sys/class/tty/ttyACM*; do \
+	p=$$(readlink -f $$d/device); \
+	[ "$$(cat $$p/../idVendor 2>/dev/null)" = "1209" ] && \
+	    echo /dev/$$(basename $$d) && break; done)
 PROXY := M1N1DEVICE=$(M1N1DEV) build/venv/bin/python $(M1N1_SRC)/proxyclient
 
 .PHONY: proxy-boot proxy-shell
