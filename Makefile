@@ -7,6 +7,9 @@
 # blob       concatenate m1n1, the device tree, the kernel and the initramfs
 # pongo      drive the phone from DFU to a PongoOS shell with l41ka
 # boot       send the blob to the PongoOS shell and chainload it
+# boot-m1n1  send m1n1 alone, leaving it in its USB proxy
+# proxy-boot load kernel, dtb and initramfs over m1n1's proxy (cable on the PC)
+# proxy-guest run the blob under m1n1's hypervisor, guest console on the host
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -114,12 +117,39 @@ pongo:
 boot: $(BLOB)
 	build/venv/bin/python tools/chain.py boot $(BLOB)
 
-# Bisect target. Sends m1n1 on its own, with no device tree, kernel or
-# initramfs appended, so m1n1 comes up to its own prompt and draws to the
-# framebuffer instead of handing off. Proves whether m1n1 runs on T8020 at all,
-# and it is 1 MB rather than 12 MB so it uploads in a few seconds.
+# Sends m1n1 on its own, with nothing appended, so it ends up in uartproxy_run
+# instead of handing off. Two uses: it proves m1n1 runs on T8020 at all, and it
+# is the first half of the proxy workflow below.
 boot-m1n1: $(M1N1)
 	build/venv/bin/python tools/chain.py boot $(M1N1)
+
+# The fast iteration loop, which avoids the DFU button dance per attempt.
+#
+#   make boot-m1n1          through the jig, leaves m1n1 sitting in its proxy
+#   move the Lightning cable from the jig to this PC
+#   make proxy-boot         loads kernel, dtb and initramfs over USB
+#
+# The point is that m1n1's log arrives as text on the host rather than having
+# to be photographed off the screen, and a failed attempt can be retried
+# without re-running the exploit, as long as m1n1 itself survives.
+M1N1DEV ?= /dev/ttyACM0
+PROXY := M1N1DEVICE=$(M1N1DEV) build/venv/bin/python $(M1N1_SRC)/proxyclient
+
+.PHONY: proxy-boot proxy-shell
+proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS)
+	$(PROXY)/tools/linux.py $(IMAGE) $(DTB) $(INITRAMFS) -b '$(BOOTARGS)'
+
+proxy-shell:
+	$(PROXY)/tools/shell.py
+
+# The actual fix for "Linux prints nothing". Runs the blob as a guest under
+# m1n1's hypervisor, which traps the guest's UART writes and prints them on the
+# host, so earlycon output becomes readable without a serial cable on the
+# Lightning pins. --hook-exceptions reports guest faults with registers.
+# A12 implements EL2, which the ADT confirms: /product has-virtualization = 1.
+.PHONY: proxy-guest
+proxy-guest: $(BLOB)
+	$(PROXY)/tools/run_guest.py -r -e -l build/guest.log $(BLOB)
 
 clean:
 	rm -f $(DTB) $(PP) $(BLOB)
