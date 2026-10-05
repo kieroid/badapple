@@ -2,13 +2,16 @@
 """Read an Apple iOS DeviceTree dumped to JSON by "ipsw dtree --json" and print
 the parts that matter when writing a Linux DTSI for the same SoC.
 
-The iOS tree stores reg as a flat list of 64 bit address/size pairs that are
-relative to the parent node. For nodes under /arm-io the parent base comes from
-the arm-io ranges property, so an absolute address is arm_io_base + offset.
+Every reg address is an offset from the parent node's own base, and that nests.
+/arm-io sets the starting base from its ranges property (0x200000000 on T8020),
+a direct child like usb-complex at 0x39000000 therefore sits at 0x239000000, and
+usb-complex's own child at 0x100000 sits at 0x239100000 rather than 0x200100000.
+Getting this wrong is quiet rather than loud, so the base is accumulated down
+the tree instead of being added once at the top.
 
 Usage:
-    iosdt.py d321ap.json                 list every node with reg and compatible
-    iosdt.py d321ap.json uart            only nodes whose path matches "uart"
+    iosdt.py d331pap.json                list every node with reg and compatible
+    iosdt.py d331pap.json uart           only nodes whose path matches "uart"
 """
 
 import json
@@ -50,26 +53,68 @@ def as_u64_pairs(value):
     return []
 
 
+def ranges_base(node):
+    """arm-io ranges is a list of (child, parent, size) triplets. The parent
+    address of the first triplet is where the SoC register window starts."""
+    words = [a for pair in as_u64_pairs(node.get("ranges")) for a in pair]
+    return words[1] if len(words) >= 2 else 0
+
+
+def resolve(node, path="/", base=0):
+    """Yield (path, node, base, regs) with base already accumulated from every
+    ancestor, so regs[i][0] + base is the absolute address."""
+    if path == "/arm-io/":
+        base = ranges_base(node)
+    regs = as_u64_pairs(node.get("reg"))
+    yield path, node, base, regs
+    # Children are addressed from this node's own first reg, once we are inside
+    # the SoC window. Above /arm-io the addresses are already absolute, and
+    # /arm-io itself only passes down the window base: its own reg list is the
+    # scattered CPU and PMGR regions, which are not a window for anything.
+    child_base = base
+    if regs and path.startswith("/arm-io/") and path != "/arm-io/":
+        child_base = base + regs[0][0]
+    for name, child in children(node):
+        yield from resolve(child, path + name + "/", child_base)
+
+
+def selfcheck():
+    """The nesting is the only real logic in here and it fails silently, so
+    pin it to addresses taken from the T8020 tree by hand."""
+    def kid(name, node):
+        return {"children": [{name: node}]}
+
+    tree = {
+        "ranges": [{"addr": 0x0, "size": 0x200000000},
+                   {"addr": 0x100000000, "size": 0}],
+        "reg": [{"addr": 0x210F00000, "size": 0x50000}],
+        "children": [{
+            "aic": {"reg": [{"addr": 0x3B100000, "size": 0x8000}]},
+            "usb-complex": dict(
+                reg=[{"addr": 0x39000000, "size": 0x100}],
+                **kid("usb-device", {"reg": [{"addr": 0x100000, "size": 0x10000}]}),
+            ),
+        }],
+    }
+    got = {path: regs[0][0] + base
+           for path, _, base, regs in resolve(kid("arm-io", tree)) if regs}
+
+    assert got["/arm-io/aic/"] == 0x23B100000, hex(got["/arm-io/aic/"])
+    assert got["/arm-io/usb-complex/"] == 0x239000000
+    assert got["/arm-io/usb-complex/usb-device/"] == 0x239100000, \
+        hex(got["/arm-io/usb-complex/usb-device/"])
+    print("selfcheck ok")
+
+
 def main():
+    if sys.argv[1] == "--selfcheck":
+        return selfcheck()
     doc = json.load(open(sys.argv[1]))["device-tree"]
     want = re.compile(sys.argv[2]) if len(sys.argv) > 2 else None
 
-    # arm-io ranges is a list of (child, parent, size) triplets. The parent
-    # address of the first triplet is the base every peripheral offset adds to.
-    arm_io_base = 0
-    for path, node in walk(doc):
-        if path == "/arm-io/":
-            words = [a for pair in as_u64_pairs(node.get("ranges"))
-                     for a in pair]
-            if len(words) >= 2:
-                arm_io_base = words[1]
-            break
-
-    print(f"# arm-io base: {arm_io_base:#x}\n")
-    for path, node in walk(doc):
+    for path, node, base, regs in resolve(doc):
         if want and not want.search(path):
             continue
-        regs = as_u64_pairs(node.get("reg"))
         compat = node.get("compatible")
         if not regs and not compat:
             continue
@@ -77,8 +122,7 @@ def main():
         if compat:
             print(f"    compatible: {compat}")
         for addr, size in regs:
-            absolute = addr + arm_io_base if path.startswith("/arm-io/") else addr
-            print(f"    reg: {addr:#x} size {size:#x}  abs {absolute:#x}")
+            print(f"    reg: {addr:#x} size {size:#x}  abs {addr + base:#x}")
         for key in ("interrupts", "interrupt-parent", "clock-gates",
                     "function-clock_gate", "AAPL,phandle", "device_type"):
             if key in node:

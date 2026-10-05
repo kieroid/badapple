@@ -9,12 +9,9 @@
  * The arm-io ranges property maps child 0x0 to parent 0x200000000, so a
  * peripheral offset of 0x35200000 is absolute address 0x235200000.
  *
- * This is deliberately a bring-up subset: enough for a serial console and an
- * initramfs, nothing more. Blocks left out on purpose, with the reason:
+ * This is deliberately a bring-up subset: enough for a console and an
+ * initramfs shell, nothing more. Blocks left out on purpose, with the reason:
  *
- *   pmgr / power domains  Needs a generated t8020-pmgr.dtsi. UART0 is the
- *                         iBoot boot-console so its clock gate is already on
- *                         when Linux starts, and nothing else here is gated.
  *   cpufreq / OPP tables  Cluster controllers live at 0x210e20000 (E) and
  *                         0x211e20000 (P), but the A12 operating points are
  *                         not measured yet and wrong ones hang the cluster.
@@ -25,6 +22,7 @@
 
 #include <dt-bindings/interrupt-controller/apple-aic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/phy/phy.h>
 
 / {
 	interrupt-parent = <&aic>;
@@ -159,7 +157,52 @@
 			/* Use the bootloader-enabled clocks for now. */
 			clocks = <&clkref>, <&clkref>;
 			clock-names = "uart", "clk_uart_baud0";
+			power-domains = <&ps_uart0>;
 			status = "disabled";
+		};
+
+		/*
+		 * USB device mode. This is what gives an interactive shell:
+		 * the initramfs brings up a CDC-ACM gadget, which shows up as
+		 * /dev/ttyACM0 on the host. Without it the framebuffer console
+		 * can print but you have nothing to type on.
+		 *
+		 * dma-ranges maps DMA address 0 to the start of DRAM, which is
+		 * the same thing T8015 does and assumes the USB DART is left in
+		 * bypass. If DMA is where this falls over, that assumption is
+		 * the first thing to check: the ADT has a dart-usb at
+		 * 0x239900000 with interrupt 454 that this tree ignores.
+		 */
+		bus@239000000 {
+			compatible = "apple,t8020-usb-complex", "simple-pm-bus";
+			#address-cells = <2>;
+			#size-cells = <2>;
+			dma-ranges = <0x0 0x00000000 0x8 0x00000000 0x1 0x00000000>;
+			ranges;
+
+			reg = <0x2 0x39000000 0x0 0x100>;
+			power-domains = <&ps_usb>;
+
+			ausbphy0: phy@239000060 {
+				compatible = "apple,t8020-ausb-phy", "apple,ausb-phy";
+				reg = <0x2 0x39000060 0x0 0x20>;
+				power-domains = <&ps_usbctlreg>;
+				#phy-cells = <1>;
+				/* Tunables to be filled by loader */
+			};
+
+			usbdev: usbdev@239100000 {
+				compatible = "apple,t8020-dwc2", "apple,dwc2";
+				reg = <0x2 0x39100000 0x0 0x10000>;
+				interrupts = <AIC_IRQ 451 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&clkref>;
+				clock-names = "otg";
+				phys = <&ausbphy0 PHY_TYPE_USB2>;
+				phy-names = "usb2-phy";
+				power-domains = <&ps_usb2dev>;
+				resets = <&ps_usb2dev>;
+				dr_mode = "peripheral";
+			};
 		};
 
 		aic: interrupt-controller@23b100000 {
@@ -167,6 +210,23 @@
 			reg = <0x2 0x3b100000 0x0 0x8000>;
 			#interrupt-cells = <3>;
 			interrupt-controller;
+			power-domains = <&ps_aic>;
+		};
+
+		pmgr: power-management@23b000000 {
+			compatible = "apple,t8020-pmgr", "apple,pmgr", "syscon", "simple-mfd";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			reg = <0x2 0x3b000000 0 0x8c000>;
+		};
+
+		pmgr_mini: power-management@23d200000 {
+			compatible = "apple,t8020-pmgr", "apple,pmgr", "syscon", "simple-mfd";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			reg = <0x2 0x3d200000 0 0x8c000>;
 		};
 
 		wdt: watchdog@23d2b0000 {
@@ -189,3 +249,5 @@
 			     <AIC_FIQ AIC_TMR_HV_VIRT IRQ_TYPE_LEVEL_HIGH>;
 	};
 };
+
+#include "t8020-pmgr.dtsi"

@@ -27,6 +27,22 @@
 		ranges;
 
 		stdout-path = "serial0";
+
+		/*
+		 * This is the console you can actually read without a serial
+		 * cable. m1n1 fills in the address and the format properties
+		 * from the framebuffer iBoot already set up, then flips this to
+		 * okay. There is no display driver involved, so the picture
+		 * freezes as handed over.
+		 *
+		 * No power-domains here, unlike T8015: this tree has no pmgr
+		 * node, so nothing is going to gate the display behind our back.
+		 */
+		framebuffer0: framebuffer@0 {
+			compatible = "apple,simple-framebuffer", "simple-framebuffer";
+			reg = <0 0 0 0>; /* To be filled by loader */
+			status = "disabled";
+		};
 	};
 
 	memory@800000000 {
