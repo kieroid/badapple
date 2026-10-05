@@ -123,6 +123,27 @@ Then, with the RP2350 plugged into the host and the phone connected through it:
     make pongo      # DFU to a PongoOS shell
     make boot       # upload the blob and chainload it
 
+### RP2350 firmware
+
+l41ka ships no binary in its git tree, only in its releases, and the release is
+marked prerelease so the `releases/latest` API returns 404. There is one asset,
+for the only board the author tested:
+
+    https://github.com/0cyn/l41ka/releases/download/0.1.0/l41ka-waveshare-rp2350-usb-a.zip
+
+It unpacks to `l41ka.uf2`, `l41ka.elf`, `l41ka.bin`, `l41ka.hex` plus a
+disassembly and a link map. `make deps` does not fetch it, so it lives in
+`build/l41ka-fw/` by hand. To flash:
+
+    picotool load -t elf build/l41ka-fw/l41ka.elf -x -f
+
+Or hold BOOTSEL and copy `l41ka.uf2` onto the mass storage device that appears,
+which needs no picotool at all. Coming from an older l41ka firmware, put the
+board in BOOTSEL first with `laikadbg.py bootsel`, or `picotool reboot -f -u`.
+
+The 0.1.0 firmware and the scripts in a current clone are the same version in
+practice: the only commit after the release tag is a README screenshot.
+
 Host toolchain notes, since none of this is the default on a Linux box:
 
 - The kernel and m1n1 both need `ld.lld`. There is no need for an aarch64 GCC,
