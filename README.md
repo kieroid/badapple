@@ -28,6 +28,27 @@ left here is the kernel side.
 
 Nothing is written to the phone. Reboot returns it to iOS.
 
+The pre-boot half is l41ka, which is the only thing that gets an A12 this far.
+It runs usbliter8 from the RP2350 and embeds a PongoOS fork with T8020 support.
+That matters in two ways:
+
+- Upstream checkra1n PongoOS has no T8020 support, and Hoolock's prebuilt
+  `Pongo.bin` covers A7 to A11 and T2 only.
+- `bootm`, the command that chainloads m1n1, is not an upstream PongoOS
+  command. Upstream has `bootl`, `bootx`, `bootr` and `bootux`. Hoolock added
+  `bootm`, and 0cyn's `PongoOS` fork on the `t8030` branch has it too, which is
+  the build l41ka ships. It boots whatever `/send` left in the loader buffer as
+  a raw m1n1 image, so the appended payloads are m1n1's problem, not PongoOS's.
+
+l41ka is not open source ("All Rights Reserved", contact the author for
+licensing), so it stays a tool in `build/` and none of it is vendored here. Its
+`scripts/laikadbg.py` is enough to drive the whole chain from the command line,
+no GUI app needed, and `make pongo` wraps that.
+
+Worth noting for later: the l41ka author vendored m1n1's DART driver into their
+PongoOS fork, which suggests the USB DART on A12 needs more care than the
+`dma-ranges` bypass this tree currently assumes.
+
 ## The two consoles
 
 Worth being clear about, because it drives what the device tree has to contain:
@@ -97,9 +118,32 @@ Apple trees use. Regenerate with `make pmgr`.
     make initramfs
     make blob       # build/m1n1-linux.bin
 
-Then put the phone in the PongoOS shell using the usbliter8 toolkit and run:
+Then, with the RP2350 plugged into the host and the phone connected through it:
 
-    make boot
+    make pongo      # DFU to a PongoOS shell
+    make boot       # upload the blob and chainload it
+
+Host toolchain notes, since none of this is the default on a Linux box:
+
+- The kernel and m1n1 both need `ld.lld`. There is no need for an aarch64 GCC,
+  clang cross compiles on its own.
+- m1n1 needs the Rust `core` and `alloc` crates for
+  `aarch64-unknown-none-softfloat`. Without rustup, `BUILDSTD=1` builds them
+  from source, which needs the Rust standard library sources installed. On
+  Gentoo that is the `rust-src` USE flag on `dev-lang/rust-bin`.
+- `laikadbg.py` needs `pyusb` and `pyserial` in the venv.
+
+To check whether the phone is pwned, read its DFU serial string:
+
+    cat /sys/bus/usb/devices/*/serial
+
+A pwned iPhone XS Max looks like this, and the fields are worth reading:
+
+    CPID:8020 CPRV:11 CPFM:03 SCEP:01 BDID:1A ECID:... IBFL:3C
+    SRTG:[iBoot-3865.0.0.4.7] PWND:[usbliter8]
+
+`CPID:8020` is the chip id, which is where the T8020 name comes from, and
+`BDID:1A` is the D331pAP board id.
 
 ## Expected driver work
 

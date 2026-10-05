@@ -5,7 +5,8 @@
 # kernel     build Image.gz with Hoolock's 16K config
 # initramfs  download Hoolock's test initramfs
 # blob       concatenate m1n1, the device tree, the kernel and the initramfs
-# boot       send the blob to a device already sitting in the PongoOS shell
+# pongo      drive the phone from DFU to a PongoOS shell with l41ka
+# boot       send the blob to the PongoOS shell and chainload it
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -37,7 +38,7 @@ KBUILD := LLVM=1 ARCH=arm64
 # secondaries would never come up anyway. Drop it once SMP works.
 BOOTARGS ?= earlycon console=tty0 loglevel=7 maxcpus=1
 
-.PHONY: check deps pmgr m1n1 kernel initramfs blob boot clean
+.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot clean
 check: $(DTB)
 
 $(DTB): $(DTS) dts/t8020.dtsi dts/t8020-pmgr.dtsi
@@ -95,9 +96,28 @@ $(BLOB): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS)
 	  cat $(DTB) $(IMAGE) $(INITRAMFS); } > $@
 	@echo "built $@ ($$(stat -c%s $@) bytes)"
 
-# Expects the phone to already be in the PongoOS shell by way of usbliter8.
+# l41ka is the only thing that gets an A12 to PongoOS: it runs usbliter8 from
+# the RP2350 and embeds a PongoOS fork with T8020 support, which upstream
+# PongoOS does not have. Its laikadbg.py speaks to the board over USB
+# 4141:4c41, so the board has to be plugged into this machine with the phone
+# connected through it.
+L41KA ?= build/l41ka
+LAIKA ?= build/venv/bin/python $(L41KA)/scripts/laikadbg.py
+
+# Takes the phone from DFU to a PongoOS shell. Skip "exploit" if the DFU serial
+# string already ends in PWND:[usbliter8].
+pongo:
+	$(LAIKA) info
+	$(LAIKA) exploit
+	$(LAIKA) setup-iboot
+	$(LAIKA) load-pongo
+
+# pongo-file is the laikadbg equivalent of typing /send at the PongoOS prompt,
+# and bootm boots whatever that upload left in the loader buffer as a raw m1n1
+# image. m1n1 then parses the device tree, kernel and initramfs appended to it.
 boot: $(BLOB)
-	printf '/send %s\nbootm\n' "$(BLOB)" | pongoterm
+	$(LAIKA) pongo-file $(BLOB)
+	$(LAIKA) pongo-command bootm
 
 clean:
 	rm -f $(DTB) $(PP) $(BLOB)
