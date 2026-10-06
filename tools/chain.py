@@ -71,6 +71,7 @@ def to_pongo(deadline):
     """
     seen = None
     recovery_strikes = 0
+    pongo_strikes = 0
     client = open_board()
     try:
         while time.monotonic() < deadline:
@@ -82,8 +83,19 @@ def to_pongo(deadline):
 
                 if here != "recovery":
                     recovery_strikes = 0
+                if here != "pongo":
+                    pongo_strikes = 0
 
                 if here == "pongo":
+                    # Do not trust one reading here either. This has reported
+                    # pongo on the very first poll for a phone sitting in DFU,
+                    # which makes the whole run a no-op that then reports
+                    # success. Same stale state problem as recovery below.
+                    pongo_strikes += 1
+                    if pongo_strikes < 3:
+                        time.sleep(1.0)
+                        seen = None
+                        continue
                     return
                 if here == "none":
                     time.sleep(2.0)
@@ -172,6 +184,31 @@ def boot(image, deadline):
     raise SystemExit("gave up before booting")
 
 
+def run(commands, deadline):
+    """Run shell commands in PongoOS and print what they say.
+
+    This is the only place where a working USB gadget on this SoC can be
+    questioned directly: PongoOS brings its own up, which is how the board
+    talks to it at all. "synopsys" dumps the DWC2 registers and "peek" reads
+    any 32 bit register, so the USB complex, the PHY and the core can all be
+    read out of a setup that works, rather than guessed at one DFU cycle at a
+    time.
+    """
+    client = open_board()
+    try:
+        for command in commands:
+            print(f"\n=== {command} ===")
+            client.request(L.DEVICE_PONGO_SEND_COMMAND,
+                           struct.pack("<I", TIMEOUT_MS) + command.encode(),
+                           TIMEOUT_MS)
+            L.drain_pongo_output(client, TIMEOUT_MS)
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main():
     what = sys.argv[1] if len(sys.argv) > 1 else "pongo"
     deadline = time.monotonic() + 600
@@ -182,8 +219,12 @@ def main():
     elif what == "boot":
         to_pongo(deadline)
         boot(Path(sys.argv[2]), deadline)
+    elif what == "run":
+        to_pongo(deadline)
+        run(sys.argv[2:], deadline)
     else:
-        raise SystemExit(f"usage: {sys.argv[0]} pongo | boot <image>")
+        raise SystemExit(
+            f"usage: {sys.argv[0]} pongo | boot <image> | run <command>...")
 
 
 if __name__ == "__main__":

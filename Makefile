@@ -7,6 +7,10 @@
 # blob       concatenate m1n1, the device tree, the kernel and the initramfs
 # pongo      drive the phone from DFU to a PongoOS shell with l41ka
 # boot       send the blob to the PongoOS shell and chainload it
+# pc-boot    same, but over PongoOS's USB with the cable already on the PC
+# boot-m1n1  send m1n1 alone, leaving it parked in its USB proxy
+# proxy-boot load kernel, dtb and initramfs over m1n1's proxy (cable on the PC)
+# usbregs    dump the USB complex, the PHY and DWC2 from a parked m1n1
 # reboot     reboot from a parked m1n1 or recovery, no button combo
 #
 # "make check" is the only target that works on a bare checkout. The headers
@@ -36,9 +40,10 @@ KBUILD := LLVM=1 ARCH=arm64
 # earlycon picks up UART0 through stdout-path.
 # maxcpus=1 is here because m1n1 has no CPU start offset for T8020 yet, so the
 # secondaries would never come up anyway. Drop it once SMP works.
-BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1 rdinit=/rebind-init
+BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1
 
-.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot reboot clean
+.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot boot-m1n1 pc-boot \
+	proxy-boot usbregs reboot clean
 check: $(DTB)
 
 $(DTB): $(DTS) dts/t8020.dtsi dts/t8020-pmgr.dtsi
@@ -128,6 +133,66 @@ pongo:
 
 boot: $(BLOB)
 	build/venv/bin/python tools/chain.py boot $(BLOB)
+
+# The same boot, but driven from this PC over PongoOS's own USB gadget rather
+# than through the jig:
+#
+#   make pongo        jig: DFU -> exploit -> PongoOS shell
+#   move the Lightning cable from the jig to this PC, once
+#   make pc-boot      upload the blob and bootm, over 05ac:4141
+#
+# Linux then comes up with the cable already here for the whole boot, instead
+# of binding its gadget to the RP2350 and having to re-present itself after.
+pc-boot: $(BLOB)
+	build/venv/bin/python tools/pcboot.py $(BLOB)
+
+# Sends m1n1 on its own, with nothing appended, so it lands in uartproxy_run
+# instead of handing off. First half of the proxy workflow below.
+boot-m1n1: $(M1N1)
+	build/venv/bin/python tools/chain.py boot $(M1N1)
+
+# The fast iteration loop, and the one that gives the gadget a chance:
+#
+#   make boot-m1n1          through the jig, leaves m1n1 sitting in its proxy
+#   move the Lightning cable from the jig to this PC
+#   make proxy-boot         loads kernel, dtb and initramfs over USB
+#
+# Two reasons this matters. m1n1's log arrives as text here rather than having
+# to be photographed off the screen, and a failed attempt retries without
+# re-running the exploit as long as m1n1 survives.
+#
+# The third reason is the USB gadget itself. Booting the blob through the jig
+# means dwc2 probes while the phone is attached to the RP2350, which is the
+# host running the exploit, so the gadget binds to that and the cable has to
+# move afterwards. Here the cable is already on the PC before the kernel
+# starts, which is the arrangement the A11 port gets for free from checkm8.
+#
+# This was dropped once on the grounds that the cable move "never worked on
+# this host". That was wrong: it had already worked, enumerating as
+# 1209:316d. Do not remove it again on that argument.
+#
+# Run ONE proxy session per m1n1 boot. Observed: three sessions worked, the
+# fourth got no reply to its very first request, while the phone stayed
+# enumerated and the screen's last line was still "Heap limit: 0x811e0c000
+# (128 MiB)". The mechanism is unproven, so treat the one-session rule as an
+# empirical workaround rather than an explanation.
+#
+# Pick the port by USB vendor id rather than guessing ttyACM0, which is the
+# l41ka board. m1n1's proxy is 1209:316d and exposes two ACM interfaces; the
+# first is the proxy.
+M1N1DEV ?= $(shell for d in /sys/class/tty/ttyACM*; do \
+	p=$$(readlink -f $$d/device); \
+	[ "$$(cat $$p/../idVendor 2>/dev/null)" = "1209" ] && \
+	    echo /dev/$$(basename $$d) && break; done)
+PROXY := M1N1DEVICE=$(M1N1DEV) build/venv/bin/python $(M1N1_SRC)/proxyclient
+
+proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS_RB)
+	$(PROXY)/tools/linux.py $(IMAGE) $(DTB) $(INITRAMFS_RB) -b '$(BOOTARGS)'
+
+# Dump the USB complex, the AUSB PHY and the DWC2 core from a parked m1n1,
+# which is a working gadget on this silicon, to diff against what Linux leaves.
+usbregs:
+	M1N1DEVICE=$(M1N1DEV) build/venv/bin/python tools/usbregs.py
 
 # Get out of a parked m1n1 or a recovery prompt without the button combo.
 # Does not reach DFU, nothing in software can: see the note under "pongo".
