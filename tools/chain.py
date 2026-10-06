@@ -36,15 +36,15 @@ TIMEOUT_MS = 60000
 GONE = (OSError, L.ProtocolError, RuntimeError)
 
 
-def open_board(tries=20, delay=2.0):
+def open_board():
     """Wait for the board to come back after it re-enumerates."""
-    for attempt in range(tries):
+    for attempt in range(20):
         try:
             return L.LaikaClient()
         except Exception:  # noqa: BLE001
             if attempt == 0:
                 print("  waiting for the board to come back")
-            time.sleep(delay)
+            time.sleep(2.0)
     raise SystemExit("board never came back")
 
 

@@ -8,16 +8,16 @@ it.
 
 That matters for more than convenience. Booting through the jig means Linux's
 dwc2 probes while the phone is attached to the RP2350, because the board is the
-host that runs the exploit, so the gadget binds to it and has to re-present
-itself afterwards, which is what tools/rebind-init is for. Going this way the
-cable is already here before the kernel starts, which is the arrangement the
-A11 port gets for free from checkm8.
+host that runs the exploit, so the gadget binds to it and never re-presents
+itself to a different host. Going this way the cable is already here before the
+kernel starts, which is the arrangement the A11 port gets for free from
+checkm8.
 
 It also cuts the number of times the phone has to come off the jig, and the
 exploit gets less reliable the more that happens.
 
 Usage:
-    pongo.py <blob>        upload and run bootm
+    pcboot.py <blob>       upload and run bootm
 """
 
 import struct

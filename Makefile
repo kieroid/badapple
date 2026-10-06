@@ -11,7 +11,6 @@
 # boot-m1n1  send m1n1 alone, leaving it parked in its USB proxy
 # proxy-boot load kernel, dtb and initramfs over m1n1's proxy (cable on the PC)
 # usbregs    dump the USB complex, the PHY and DWC2 from a parked m1n1
-# reboot     reboot from a parked m1n1 or recovery, no button combo
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -29,7 +28,6 @@ CONFIG_16K ?= build/hoolock-docs/config_16k
 M1N1      ?= $(M1N1_SRC)/build/m1n1.bin
 IMAGE     ?= $(KDIR)/arch/arm64/boot/Image.gz
 INITRAMFS ?= build/initramfs.gz
-INITRAMFS_RB := build/initramfs-rebind.gz
 BLOB      := build/m1n1-linux.bin
 
 KBUILD := LLVM=1 ARCH=arm64
@@ -43,7 +41,7 @@ KBUILD := LLVM=1 ARCH=arm64
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1
 
 .PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot boot-m1n1 pc-boot \
-	proxy-boot usbregs reboot clean
+	proxy-boot usbregs clean
 check: $(DTB)
 
 $(DTB): $(DTS) dts/t8020.dtsi dts/t8020-pmgr.dtsi
@@ -101,21 +99,10 @@ $(INITRAMFS):
 
 blob: $(BLOB)
 
-# Append /rebind-init as a second cpio member. init/initramfs.c handles
-# concatenated archives: do_name() returns on TRAILER!!! with next_state=Reset,
-# and do_reset() skips the NUL padding and only errors if the following header
-# is not 4-byte aligned. The base archive is 512-byte aligned, so it is.
-$(INITRAMFS_RB): $(INITRAMFS) tools/rebind-init
-	rm -rf build/irfs && mkdir -p build/irfs
-	install -m755 tools/rebind-init build/irfs/rebind-init
-	zcat $(INITRAMFS) > build/irfs.cpio
-	cd build/irfs && find . | cpio -o -H newc --quiet >> ../irfs.cpio
-	gzip -9 -c build/irfs.cpio > $@
-
-$(BLOB): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS_RB)
+$(BLOB): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS)
 	{ cat $(M1N1); \
 	  echo 'chosen.bootargs=$(BOOTARGS)'; \
-	  cat $(DTB) $(IMAGE) $(INITRAMFS_RB); } > $@
+	  cat $(DTB) $(IMAGE) $(INITRAMFS); } > $@
 	@echo "built $@ ($$(stat -c%s $@) bytes)"
 
 # l41ka is the only thing that gets an A12 to PongoOS: it runs usbliter8 from
@@ -186,26 +173,13 @@ M1N1DEV ?= $(shell for d in /sys/class/tty/ttyACM*; do \
 	    echo /dev/$$(basename $$d) && break; done)
 PROXY := M1N1DEVICE=$(M1N1DEV) build/venv/bin/python $(M1N1_SRC)/proxyclient
 
-proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS_RB)
-	$(PROXY)/tools/linux.py $(IMAGE) $(DTB) $(INITRAMFS_RB) -b '$(BOOTARGS)'
+proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS)
+	$(PROXY)/tools/linux.py $(IMAGE) $(DTB) $(INITRAMFS) -b '$(BOOTARGS)'
 
 # Dump the USB complex, the AUSB PHY and the DWC2 core from a parked m1n1,
 # which is a working gadget on this silicon, to diff against what Linux leaves.
 usbregs:
 	M1N1DEVICE=$(M1N1DEV) build/venv/bin/python tools/usbregs.py
-
-# Get out of a parked m1n1 or a recovery prompt without the button combo.
-# Does not reach DFU, nothing in software can: see the note under "pongo".
-.PHONY: reboot
-reboot:
-	build/venv/bin/python tools/reboot.py
-
-# There is deliberately no hypervisor target here. m1n1's hypervisor would trap
-# the guest's UART writes and give us Linux's early console for free, but it
-# needs EL2, and PongoOS hands off at EL1: see its own comment in
-# src/kernel/entry.c, "We're in EL1 here", with elevation only on SoCs that
-# have EL3. The ADT's has-virtualization = 1 is about the silicon, not about
-# the exception level we are handed.
 
 clean:
 	rm -f $(DTB) $(PP) $(BLOB)
