@@ -60,47 +60,75 @@ def info(client):
 
 
 def to_pongo(deadline):
-    """Walk the phone to a PongoOS shell, whatever stage it starts from."""
-    seen = None
-    while time.monotonic() < deadline:
-        client = open_board()
-        try:
-            here = stage(client)
-            if here != seen:
-                print(f"  stage: {here}")
-                seen = here
+    """Walk the phone to a PongoOS shell, whatever stage it starts from.
 
-            if here == "pongo":
-                return
-            if here == "none":
-                time.sleep(2.0)
-            elif here == "dfu":
-                d = info(client)
-                print(f"  {d['product_type']} cpid {d['cpid']} bdid {d['bdid']}")
-                print("exploit")
-                client.request(L.DEVICE_DFU_EXPLOIT, timeout_ms=TIMEOUT_MS)
-            elif here == "pwned-dfu":
-                print("setup-iboot")
-                client.request(
-                    L.DEVICE_PWNED_DFU_SEND_EMBEDDED_IBOOT_PATCHFINDER_AND_BOOT,
-                    timeout_ms=TIMEOUT_MS)
-            elif here == "laika-dfu":
-                print("load-pongo")
-                client.request(L.DEVICE_LAIKADFU_SEND_EMBEDDED_PONGOOS,
-                               timeout_ms=TIMEOUT_MS)
-            elif here == "recovery":
-                raise SystemExit(
-                    "stuck in recovery: the iBoot patchfinder did not install "
-                    "laikaDFU, so there is no way forward from here")
-            else:
-                raise SystemExit(f"unexpected stage {here}")
-        except GONE as error:
-            print(f"  board went away ({error}), reopening")
-        finally:
+    Hold one session open across iterations. Opening a LaikaClient calls
+    set_configuration(), which re-enumerates the board and drops whatever
+    downstream link it had, so reopening on every poll is not free: do that
+    during the exploit and the phone gives up and boots its own iBoot into
+    recovery, which is a dead end. Only reopen when the board actually goes
+    away.
+    """
+    seen = None
+    recovery_strikes = 0
+    client = open_board()
+    try:
+        while time.monotonic() < deadline:
             try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
+                here = stage(client)
+                if here != seen:
+                    print(f"  stage: {here}")
+                    seen = here
+
+                if here != "recovery":
+                    recovery_strikes = 0
+
+                if here == "pongo":
+                    return
+                if here == "none":
+                    time.sleep(2.0)
+                elif here == "dfu":
+                    d = info(client)
+                    print(f"  {d['product_type']} cpid {d['cpid']} bdid {d['bdid']}")
+                    print("exploit")
+                    client.request(L.DEVICE_DFU_EXPLOIT, timeout_ms=TIMEOUT_MS)
+                elif here == "pwned-dfu":
+                    print("setup-iboot")
+                    client.request(
+                        L.DEVICE_PWNED_DFU_SEND_EMBEDDED_IBOOT_PATCHFINDER_AND_BOOT,
+                        timeout_ms=TIMEOUT_MS)
+                elif here == "laika-dfu":
+                    print("load-pongo")
+                    client.request(L.DEVICE_LAIKADFU_SEND_EMBEDDED_PONGOOS,
+                                   timeout_ms=TIMEOUT_MS)
+                elif here == "recovery":
+                    # Do not trust one reading. A poll taken just after the
+                    # board re-enumerates reports stale state, and this has
+                    # said "recovery" for a phone that was sitting in DFU.
+                    # Only believe it if it keeps saying so.
+                    recovery_strikes += 1
+                    if recovery_strikes < 5:
+                        time.sleep(2.0)
+                        seen = None
+                        continue
+                    raise SystemExit(
+                        "stuck in recovery: the iBoot patchfinder did not "
+                        "install laikaDFU, so there is no way forward from here")
+                else:
+                    raise SystemExit(f"unexpected stage {here}")
+            except GONE as error:
+                print(f"  board went away ({error}), reopening")
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                client = open_board()
+                seen = None
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
     raise SystemExit("gave up before reaching pongo")
 
 

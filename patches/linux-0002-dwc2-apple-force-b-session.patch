@@ -1,0 +1,46 @@
+diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
+index 102169b40..b4b7d103d 100644
+--- a/drivers/usb/dwc2/gadget.c
++++ b/drivers/usb/dwc2/gadget.c
+@@ -22,6 +22,7 @@
+ #include <linux/delay.h>
+ #include <linux/io.h>
+ #include <linux/slab.h>
++#include <linux/of.h>
+ 
+ #include <linux/usb/ch9.h>
+ #include <linux/usb/gadget.h>
+@@ -4577,6 +4578,33 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
+ 	}
+ 
+ 	hsotg->enabled = 0;
++
++	/*
++	 * Apple A-series: nothing wires VBUS sensing, so the controller never
++	 * asserts B-session valid and dwc2_hsotg_pullup() bails out early
++	 * because op_state is not B_PERIPHERAL, leaving the soft disconnect
++	 * set. The gadget then binds, logs "bound driver", and is invisible to
++	 * every host. Force the session, claim peripheral role, and connect
++	 * here rather than waiting for a VBUS event that cannot arrive.
++	 */
++	if (of_device_is_compatible(hsotg->dev->of_node, "apple,dwc2")) {
++		u32 gotgctl = dwc2_readl(hsotg, GOTGCTL);
++
++		gotgctl |= GOTGCTL_DBNCE_FLTR_BYPASS;
++		gotgctl |= GOTGCTL_BVALOEN | GOTGCTL_BVALOVAL;
++		gotgctl |= GOTGCTL_AVALOEN | GOTGCTL_VBVALOEN;
++		dwc2_writel(hsotg, gotgctl, GOTGCTL);
++
++		hsotg->op_state = OTG_STATE_B_PERIPHERAL;
++		hsotg->enabled = 1;
++		dwc2_hsotg_core_connect(hsotg);
++
++		dev_info(hsotg->dev,
++			 "apple: forced connect, GOTGCTL=0x%08x DCTL=0x%08x op_state=%d\n",
++			 dwc2_readl(hsotg, GOTGCTL), dwc2_readl(hsotg, DCTL),
++			 hsotg->op_state);
++	}
++
+ 	spin_unlock_irqrestore(&hsotg->lock, flags);
+ 
+ 	gadget->sg_supported = using_desc_dma(hsotg);

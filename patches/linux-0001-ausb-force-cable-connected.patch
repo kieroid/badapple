@@ -1,0 +1,23 @@
+diff --git a/drivers/phy/apple/ausb.c b/drivers/phy/apple/ausb.c
+index 39ba39d83..77f7bcc19 100644
+--- a/drivers/phy/apple/ausb.c
++++ b/drivers/phy/apple/ausb.c
+@@ -108,7 +108,17 @@ static int ausb_phy_usb2_power_on(struct phy *phy)
+ 	udelay(20);
+ 	clear32(aphy->base + AUSB_CTL, AUSB_CTL_RESET);
+ 	udelay(1500);
+-	set32(aphy->base + AUSB_SIG, AUSB_SIG_VBUSDET_FORCE_EN);
++	/*
++	 * Force VBUS detection on, and force it to say a cable *is* present.
++	 * Setting VBUSDET_FORCE_EN alone pins the detector to the value of
++	 * CABLE_CONNECTED, which is zero, so the controller reports
++	 * "not attached" forever no matter what is plugged in. m1n1's
++	 * usb_complex.h records the same encoding from observation: the SIG
++	 * register reads 0xd103 with a cable and 0xd003 without, and bit 8 is
++	 * the difference.
++	 */
++	set32(aphy->base + AUSB_SIG,
++	      AUSB_SIG_VBUSDET_FORCE_EN | AUSB_SIG_CABLE_CONNECTED);
+ 
+ 	return 0;
+ }

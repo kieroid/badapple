@@ -25,6 +25,7 @@ CONFIG_16K ?= build/hoolock-docs/config_16k
 M1N1      ?= $(M1N1_SRC)/build/m1n1.bin
 IMAGE     ?= $(KDIR)/arch/arm64/boot/Image.gz
 INITRAMFS ?= build/initramfs.gz
+INITRAMFS_RB := build/initramfs-rebind.gz
 BLOB      := build/m1n1-linux.bin
 
 KBUILD := LLVM=1 ARCH=arm64
@@ -35,7 +36,7 @@ KBUILD := LLVM=1 ARCH=arm64
 # earlycon picks up UART0 through stdout-path.
 # maxcpus=1 is here because m1n1 has no CPU start offset for T8020 yet, so the
 # secondaries would never come up anyway. Drop it once SMP works.
-BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1
+BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1 rdinit=/rebind-init
 
 .PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot reboot clean
 check: $(DTB)
@@ -95,10 +96,21 @@ $(INITRAMFS):
 
 blob: $(BLOB)
 
-$(BLOB): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS)
+# Append /rebind-init as a second cpio member. init/initramfs.c handles
+# concatenated archives: do_name() returns on TRAILER!!! with next_state=Reset,
+# and do_reset() skips the NUL padding and only errors if the following header
+# is not 4-byte aligned. The base archive is 512-byte aligned, so it is.
+$(INITRAMFS_RB): $(INITRAMFS) tools/rebind-init
+	rm -rf build/irfs && mkdir -p build/irfs
+	install -m755 tools/rebind-init build/irfs/rebind-init
+	zcat $(INITRAMFS) > build/irfs.cpio
+	cd build/irfs && find . | cpio -o -H newc --quiet >> ../irfs.cpio
+	gzip -9 -c build/irfs.cpio > $@
+
+$(BLOB): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS_RB)
 	{ cat $(M1N1); \
 	  echo 'chosen.bootargs=$(BOOTARGS)'; \
-	  cat $(DTB) $(IMAGE) $(INITRAMFS); } > $@
+	  cat $(DTB) $(IMAGE) $(INITRAMFS_RB); } > $@
 	@echo "built $@ ($$(stat -c%s $@) bytes)"
 
 # l41ka is the only thing that gets an A12 to PongoOS: it runs usbliter8 from

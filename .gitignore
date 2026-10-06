@@ -1,3 +1,4 @@
 build/
 work/
 refs/iosdt/*.json
+__pycache__/
