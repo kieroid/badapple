@@ -48,6 +48,29 @@ def open_board(tries=20, delay=2.0):
     raise SystemExit("board never came back")
 
 
+def reset_board():
+    """Reset the board before trusting anything it says about the phone.
+
+    The board caches the last device state it saw and keeps reporting it after
+    the phone has moved on. That has reported a PongoOS shell for a phone
+    sitting in DFU, three polls in a row, which makes the whole run a no-op
+    that then claims success and costs an attempt to notice. Resetting first is
+    the only thing observed to clear it.
+    """
+    print("  resetting the board")
+    client = open_board()
+    try:
+        client.request(L.PI_RESET_PI, timeout_ms=TIMEOUT_MS)
+    except GONE:
+        pass  # it goes away as it resets, which is the point
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+    time.sleep(3.0)
+
+
 def stage(client):
     state = L.connection_from_payload(
         client.request(L.PI_POLL_FOR_DEVICE, timeout_ms=TIMEOUT_MS))
@@ -69,6 +92,8 @@ def to_pongo(deadline):
     recovery, which is a dead end. Only reopen when the board actually goes
     away.
     """
+    reset_board()
+
     seen = None
     recovery_strikes = 0
     pongo_strikes = 0
