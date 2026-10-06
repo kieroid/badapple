@@ -121,7 +121,38 @@ Apple trees use. Regenerate with `make pmgr`.
 Then, with the RP2350 plugged into the host and the phone connected through it:
 
     make pongo      # DFU to a PongoOS shell
-    make boot       # upload the blob and chainload it
+    make boot       # upload the blob and chainload it, through the jig
+
+`make boot` drives everything through the board, which means the phone is
+attached to the RP2350 when dwc2 probes. Prefer this instead:
+
+    make pongo      # jig: DFU to a PongoOS shell
+                    # now move the Lightning cable from the jig to this PC
+    make pc-boot    # upload and chainload over PongoOS's own gadget
+
+PongoOS brings up its own USB and it enumerates on a PC as `05ac:4141`, so once
+the shell is up the board has done its job and everything after can go over the
+cable. Linux then boots with the cable already on the host for the whole boot,
+which is the arrangement the A11 port gets for free from checkm8.
+
+Same idea for m1n1 on its own, which is how its proxy becomes usable:
+
+    make pongo
+                    # move the cable to the PC
+    build/venv/bin/python tools/pcboot.py build/m1n1/build/m1n1.bin
+
+m1n1 with nothing appended lands in `uartproxy_run()` and enumerates as
+`1209:316d`. From there:
+
+    make usbregs    # dump the USB complex, the PHY and DWC2 over the proxy
+    make proxy-boot # load kernel, dtb and initramfs without another DFU cycle
+
+Run one proxy session per m1n1 boot. A second one tends to wedge it.
+
+A PongoOS shell can also be questioned directly, which is the only way to read
+registers out of a USB gadget that actually works on this SoC:
+
+    build/venv/bin/python tools/chain.py run "peek 0x239100008" "synopsys"
 
 ### RP2350 firmware
 
@@ -195,8 +226,9 @@ out of the IPSW:
     Unpacking initramfs...
 
 So `pmgr_mini`, UART0, the generated power domains and the handover framebuffer
-are all correct. What is not yet working is the USB gadget, so there is no
-interactive shell: output only.
+are all correct. What is not yet working is Linux's USB gadget, so there is no
+interactive shell: output only. m1n1's own gadget does work, which is what
+`make usbregs` and `make proxy-boot` rely on.
 
 ### What it took, in m1n1
 
@@ -241,49 +273,98 @@ on the phone side:
 The phone is 172.16.42.1 and runs a DHCP server; the host is meant to get
 172.16.42.2 and `telnet 172.16.42.1`. That last hop does not work yet.
 
-### Why this is harder here than on A11
+### The cable move was the m1n1 half of it, and that part is fixed
 
-The A11 port never hits it. checkm8 runs from the PC, so the phone is attached
-to the PC for the whole boot and the gadget enumerates there naturally.
-usbliter8 needs the RP2350 as the USB host, so our phone is on the jig exactly
-when dwc2 probes at ~0.26s, and it binds its pullup to the jig. Moving the
-cable afterwards does nothing: the device never re-presents itself, so the new
-host never enumerates it.
+The A11 port never hits this. checkm8 runs from the PC, so the phone is
+attached to the PC for the whole boot. usbliter8 needs the RP2350 as the USB
+host, so the phone is on the jig when dwc2 probes, binds its pullup there, and
+moving the cable afterwards does nothing: the host sees the attach and the high
+speed chirp, because those are the PHY, and then times out on every control
+transfer with `device descriptor read/64, error -110`.
 
-### What was tried
+m1n1 hit exactly this and is fixed by not moving the cable at all. Boot m1n1
+from the PC over PongoOS, as above, and its proxy enumerates first try. The
+countdowns that used to exist in `run_actions()` and `m1n1_main()` were there
+only to make room for that cable move and are gone.
 
-- **Hot-swapping the cable after boot.** Never enumerated, in any port.
-- **A powered hub and a USB-C adapter**, following the wiki's note that AMD
-  hosts "may require using a USB adapter". Made things worse, nothing
-  enumerated at all, and a `VIA Labs USB Billboard Device` appeared in the
-  chain. The host here is a Ryzen 5 2600.
-- **A 30 second pause in m1n1 before vectoring**, to move the cable before
-  dwc2 probes. This is in `patches/m1n1-0003`. Inconclusive so far.
-- **Rebinding the UDC from a script injected into the initramfs**, writing ""
-  then the controller name to `/sys/kernel/config/usb_gadget/g1/UDC` to toggle
-  the pullup. The gadget *did* enumerate once this way, as
-  `05ac:12a8` with a working CDC interface. But any repacked initramfs panics
-  the kernel on unpack, and this was reverted. Do not re-add it without
-  solving that first.
+Two things learned the hard way while chasing it:
 
-### The repack problem, unexplained
+- A diagnostic loop that polled the gadget every 100ms was itself enough to
+  stop enumeration. A host will not wait that long for EP0.
+- m1n1's USB is polled from `uartproxy_run()`, not interrupt driven, so
+  anything that keeps the CPU out of that loop looks exactly like broken USB.
 
-Appending a second cpio member to Hoolock's initramfs and re-gzipping makes the
-kernel die immediately at unpack. Ruled out: the base archive is 3379712 bytes,
-`mod 512 == 0`, so alignment is fine; the appended member is present with mode
-0755 and a valid `#!` line; `sh -n` passes. The stock initramfs boots every
-time, the repacked one never does. Whatever is wrong is in how the archive is
-assembled, not in the script.
+### What a working gadget looks like on this SoC
+
+From `make usbregs` against a parked m1n1 that the PC has enumerated:
+
+    GAHBCFG  0x0000002e      DCTL  0x00000000      DCFG  0x00000074
+    DSTS     0x002c7e00      GSNPSID 0x4f54300a
+    complex CTL 0x00000001   remap +0x48 0x03000088
+
+`DCTL` 0 means the soft disconnect is clear, `DCFG` says the host assigned
+address 7, `DSTS` decodes to high speed, and the core is revision 3.00a.
+PongoOS, read over the jig with `chain.py run peek`, agrees on the complex and
+the remap, which is what confirms `patches/m1n1-0001` had the right offsets.
+
+Also confirmed against hardware: `AUSB_SIG_CABLE_CONNECTED` is `BIT(16)` on
+T8020, not `BIT(8)`. PongoOS reads SIG `0x00d10003` while connected, which is
+m1n1's documented `0xd103` with every upper bit shifted up by 8. The Linux
+`ausb` driver tests bit 8 and so never sees a cable.
+
+### Where Linux actually stops: no write to dwc2 ever lands
+
+This is the one fact worth keeping. Writing a known value to four registers and
+reading each one straight back, from `dwc2_hsotg_pullup()`:
+
+    wtest GINTMSK  00000000 -> 00000000 (wrote 00003000)
+    wtest DIEPMSK  00000000 -> 00000000 (wrote 0000000d)
+    wtest GAHBCFG  00000000 -> 00000000 (wrote 0000002e)
+    wtest DCTL     00000002 -> 00000002 (wrote 00000000)
+
+Not one takes. `GINTMSK` and `DIEPMSK` read 0 even though
+`dwc2_hsotg_core_init_disconnected()` wrote them moments earlier, so nothing
+this driver has ever written to this controller has had any effect. Reads work
+and match what m1n1 sees on the same silicon, and probe reads `GHWCFG` well
+enough to report 9 EPs and 2056 SPRAM entries. `dwc2_writel()` is a plain
+`writel()` through the same `hsotg->regs` pointer `dwc2_readl()` reads through.
+
+That single mechanism explains every earlier dead end, because all of them were
+writes into a block that was not listening.
+
+Ruled out, each with evidence rather than reasoning:
+
+- Hardware, cable, hub, port and host. PongoOS enumerates on this PC as
+  `05ac:4141`, same cable, minutes apart.
+- The complex enable bit and the DMA remap. Both match PongoOS byte for byte.
+- `GUSBCFG`. Already `0x1408`, which is what PongoOS writes.
+- SError storms. The handler is rate limited now and the screen stays clean.
+- The DWC2 core soft reset. Skipped it for `apple,dwc2`, no change, reverted.
+- Power domains. `ps_usb`, `ps_usbctlreg` and `ps_usb2dev` are pinned with
+  `apple,always-on`, and the pmgr driver warns about `debug` and `debug_usb`
+  not being on at boot while saying nothing about these three.
 
 ### Next things to try
 
-1. Rebuild the initramfs as a **single** cpio rather than appending a second
-   member, which sidesteps multi-archive semantics entirely.
-2. Configure the host interface by hand once it does enumerate. This needs
-   root, which the agent does not have:
-   `sudo ip link set <iface> up && sudo ip addr add 172.16.42.2/24 dev <iface>`
-3. Failing all that, a serial cable on the Lightning pins makes UART0 readable
-   and sidesteps USB for debugging, though not for a usable shell.
+1. Find out why `writel()` to `hsotg->regs + offset` is dropped while `readl()`
+   through the identical pointer works. Boot with `no_hash_pointers` so the
+   `regs=` line prints a real address instead of a hashed one, and compare it
+   against `0x239100000`, which m1n1 peeks successfully.
+2. Configure the host interface by hand once it does enumerate, which needs
+   root: `sudo ip link set <iface> up && sudo ip addr add 172.16.42.2/24 dev
+   <iface>`, then `telnet 172.16.42.1`.
+3. A serial cable on the Lightning pins makes UART0 readable and sidesteps USB
+   for debugging, though not for a usable shell.
+
+### A correction worth recording
+
+An earlier version of this file claimed that any repacked initramfs panics the
+kernel at unpack. That was wrong, generalised from two failures of a flaky
+chain. `init/initramfs.c` handles concatenated archives, the base archive is
+512 byte aligned, and the repacked one boots fine. The real bug was in the
+injected script: at `rdinit=` time busybox has not run `--install -s` yet, so
+neither `/bin/sh` nor `sleep` exists. That script is gone now, since booting
+with the cable already on the PC removes the need for it.
 
 ### An unrelated flake worth knowing
 
@@ -291,6 +372,17 @@ The chain intermittently fails with the board dropping off USB mid-`exploit`.
 `chain.py` reopens, finds the phone already in `recovery`, and says so rather
 than continuing. The phone then boots iOS. Just retry; it usually takes on the
 next attempt.
+
+It gets worse the more the phone comes off the jig, so a session full of cable
+moves degrades into failing most attempts. When that happens, a firmware reset
+is not enough: physically unplug the RP2350 from USB for a few seconds and
+plug it back in. That has fixed it every time.
+
+The board also caches the last device state it saw and keeps reporting it after
+the phone has moved on, which is worse than a plain failure because the run
+looks like it succeeded. It has reported a PongoOS shell, three polls running,
+for a phone sitting in DFU. `chain.py` resets the board before trusting
+anything it says, which is the only thing observed to clear it.
 
 ## Known gaps and the order to attack them
 
@@ -332,13 +424,19 @@ The mask covers bits 0-7 and 24-25, which is exactly m1n1's T8011 bit layout
 `patches/m1n1-0001-t8020-usb-complex.patch` adds a `USBCOMPLEX_T8020` case
 writing the T8011 values to 0x28, 0x38 and 0x48.
 
-Why this is worth suspecting as a crash cause: writing remap-enable bits to the
-wrong registers leaves USB DMA un-remapped, so transfers land at wrong physical
-addresses. That corrupts memory rather than faulting cleanly, which matches a
-crash that happens a while after the logo and some console output.
+This has since been confirmed against the hardware rather than inferred.
+PongoOS's `t8030` branch, which l41ka pins and whose gadget works on this
+phone, gives `0x8015` and `0x8020` a shared case: enable at offset 0, then the
+device remap at 0x48. Peeking a running PongoOS over the jig agrees:
 
-It also explains why m1n1 with no payload rebooted instead of hanging.
-`run_actions()` ends in `uartproxy_run()`, which blocks forever, but only if
-USB came up. If it returns, `main()` falls through to `panic("Nothing to do!")`,
-and a panic on an iDevice reboots. So m1n1 alone staying on screen is the
-signal that USB init is fixed.
+    0x239000000: 1          complex enable
+    0x239000048: 3000088    device remap
+
+So only the 0x48 write matters and the values were right. The 0x28 and 0x38
+writes are harmless but unnecessary, and m1n1 no longer makes them.
+
+Worth recording as a wrong turn: an earlier attempt rewrote this case to the
+S5L8960X layout, 0x108 at 0x1c and 0x5c, on the strength of reading PongoOS's
+`iOS15` branch, where 0x8020 falls through to `default`. That is the wrong
+branch. Check which commit l41ka's submodule actually pins before trusting
+anything read out of that tree.
