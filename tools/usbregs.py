@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0+ OR MIT
+# Copyright (c) 2026 kiki <kieran@lavato.net>
 """Dump the USB complex, the AUSB PHY and the DWC2 core from a parked m1n1.
 
 Why this exists: m1n1's own USB gadget enumerates on the host from this exact

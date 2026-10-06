@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0+ OR MIT
+# Copyright (c) 2026 kiki <kieran@lavato.net>
 """Read an Apple iOS DeviceTree dumped to JSON by "ipsw dtree --json" and print
 the parts that matter when writing a Linux DTSI for the same SoC.
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0+ OR MIT
+# Copyright (c) 2026 kiki <kieran@lavato.net>
 """Upload a blob to PongoOS and boot it, talking to the phone from this PC.
 
 The jig is only needed to get as far as a PongoOS shell. From there PongoOS

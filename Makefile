@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0+ OR MIT
+# Copyright (c) 2026 kiki <kieran@lavato.net>
 # check      compile the device tree on its own, no kernel tree needed
 # deps       clone m1n1, the Hoolock kernel and the docs into build/
 # pmgr       regenerate dts/t8020-pmgr.dtsi from the IPSW

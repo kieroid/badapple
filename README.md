@@ -149,6 +149,13 @@ Read out of the DeviceTree in the iPhone11,6 IPSW, not guessed from T8015.
 The iPhone XS (D321AP) DeviceTree was diffed against this one and the SoC
 blocks are identical, so adding that board later is a second `.dts`.
 
+## License
+
+Dual licensed, `GPL-2.0+ OR MIT`. See [LICENSE](LICENSE).
+
+`patches/` is excluded: those are changes to other people's code and carry that
+code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT.
+
 ## Known gaps
 
 1. **Linux USB gadget.** Writes to dwc2 are dropped. Blocks the shell.

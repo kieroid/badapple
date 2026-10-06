@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0+ OR MIT
+# Copyright (c) 2026 kiki <kieran@lavato.net>
 # Regenerate dts/t8020-pmgr.dtsi from the ADT inside the iPhone11,6 IPSW.
 #
 # The heavy lifting is m1n1's pmgr_adt2dt.py, which reads the real register

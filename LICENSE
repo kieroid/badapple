@@ -1,0 +1,21 @@
+Copyright (c) 2026 kiki <kieran@lavato.net>
+
+This project is dual licensed. You may use it under the terms of the GNU
+General Public License version 2 or later, or under the MIT license, at your
+option:
+
+    SPDX-License-Identifier: GPL-2.0+ OR MIT
+
+Full texts are in LICENSES/GPL-2.0 and LICENSES/MIT.
+
+Dual licensing is deliberate. The device trees under dts/ follow the same
+convention as the arm64 Apple device trees in upstream Linux, so they can be
+submitted there without relicensing, while the MIT half keeps anything shared
+with m1n1 compatible with its license.
+
+The contents of patches/ are not covered by this. They are changes to other
+people's code and carry that code's license: patches named linux-* are against
+Linux and are GPL-2.0, patches named m1n1-* are against m1n1 and are MIT.
+
+Headers under include/dt-bindings/ are copies of the Linux originals and keep
+the SPDX identifiers already in them.

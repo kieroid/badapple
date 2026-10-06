@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0+ OR MIT
+# Copyright (c) 2026 kiki <kieran@lavato.net>
 """Drive the whole pre-boot chain, surviving the board dropping off USB.
 
 Two things make this harder than calling laikadbg.py a few times:
