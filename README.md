@@ -180,6 +180,9 @@ code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT. Each one is generated
 with `git diff` against the pinned checkout, so the trees rebuild from them
 byte for byte.
 
+`linux-0004` and `linux-0005` are NVMe bring-up and do not finish the job on
+their own. Both are necessary and neither is sufficient, see the gap below.
+
 `linux-0002` keeps six `dev_info` calls that look like leftover debugging and
 are not: removing them stops the gadget enumerating. See the comment on them,
 and [NOTES.md](NOTES.md#the-gadget-prints-are-load-bearing).
@@ -189,7 +192,8 @@ and [NOTES.md](NOTES.md#the-gadget-prints-are-load-bearing).
 1. **NVMe.** Device tree is in and the stack works as far as the firmware:
    SART, the mailbox and RTKit all bind, and ANS2 boots, logs `boot mode
    normal` and starts reading NAND context. It then fails to fetch the admin
-   submission queue with a bus error, so there is no `nvme0n1` yet. See
+   submission queue with a bus error, even though the queue address is provably
+   inside a SART region the driver added, so there is no `nvme0n1` yet. See
    [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
 2. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
 3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART

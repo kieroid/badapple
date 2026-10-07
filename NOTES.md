@@ -437,16 +437,77 @@ With the clock pinned the firmware boots properly and talks:
 That is real NAND engine firmware running. It then fails fetching the admin
 submission queue, and rresp 2 is a bus error on a DMA read of host memory.
 
-The likely cause is that the queues are never added to SART.
+The obvious cause was that the queues are never added to SART:
 `apple_nvme_sart_dma_setup()` only runs for RTKit shmem buffers, which is why
 the syslog works, while `apple_nvme_queue_alloc()` takes its `sqes` and `cqes`
-straight from `dmam_alloc_coherent()` with nothing permitting them. On T8103
-the NVMMU translates command addresses, so the question does not arise the same
-way; T8015 has no NVMMU and presumably relies on something else that T8020 does
-not do.
+straight from `dmam_alloc_coherent()` with nothing permitting them.
+`linux-0005` adds them. It is necessary and it is not sufficient.
 
-Next step is to try adding the queue allocations to the allowed regions and see
-whether the admin queue starts being fetched.
+With it in place the permissions are provably right, and the fetch still
+fails:
+
+    sart: wrote [0x000000080f1ec000, 0x1000] to entry 6 flags 0x6f
+    nvme: admin queues: ASQ=0x000000080f1ec000 ACQ=0x000000080f1e8000
+
+The admin submission queue address is exactly the region that was permitted.
+So whatever `rresp code 2` means here, it is not a missing SART entry.
+
+### What has been ruled out
+
+- **The queues not being permitted.** Fixed by `linux-0005`, and the dump above
+  shows the entry covering the exact ASQ address. The failure survives.
+- **The SART allow value.** Linux writes 0xff for v2 and this part never does:
+  iBoot uses 0x2f, 0x6a and 0x6f. `linux-0004` adds a version 1 case using
+  0x6f, the value the part itself uses for data buffers. No change.
+- **A 16K granule.** Every entry iBoot writes is 16K aligned with a 16K
+  multiple size, and this SoC runs 16K pages, so rounding the regions to 16K
+  looked likely. It is actively worse: the firmware then dies before logging
+  anything. Kept at 4K.
+- **A stale enable from iBoot.** iBEC uses NVMe, so the controller could have
+  been left enabled with the bootloader's own admin queue, and
+  `apple_nvme_reset_work()` only disables it when `ctrl_config` says Linux
+  enabled it, which on a first probe is zero. Reading `NVME_REG_CC` back from
+  the hardware shows `CC.EN` clear, so this is not happening.
+- **LinearSQ and the NVMMU.** Settled from the iOS kernelcache rather than by
+  guessing, see below. ANS2 has neither, so `apple,t8015-nvme-ans2` is right.
+
+### What the iOS kernelcache says
+
+Worth doing early next time rather than late. Extract and read it with:
+
+    ipsw extract --kernel -o work <ipsw>
+    ipsw kernel kexts work/*/kernelcache.release.* | grep -iE 'sart|nvme'
+    ipsw kernel extract work/*/kernelcache.release.* com.apple.iokit.IONVMeFamily -o .
+    strings -n 8 com.apple.iokit.IONVMeFamily
+
+`IONVMeFamily` settles the variant question outright. LinearSQ belongs to ANS3:
+
+    virtual void AppleANS3NVMeController::EnableLinearSQ()
+    virtual void AppleANS3CGv2Controller::EnableLinearSQ()
+
+and the class for this SoC, `AppleANS2NVMeController`, has no LinearSQ or
+NVMMU strings at all. The ADT agrees: `/arm-io/ans` has `role = ANS2`. So
+`has_lsq_nvmmu` must be false here, and the T8103 binding is wrong for a real
+reason rather than because of a replayed crashlog.
+
+`AppleSART` is less useful. There are two implementations, and the one this SoC
+names in its ADT, `sart,coastguard`, maps to `IOCoastGuardSARTMapper`, which
+writes no registers of its own: it calls
+`pmap_iommu_ioctl(..., SART_IOCTL_SET_ACTIVE, ...)` and the real programming
+lives in XNU's PPL. The other, `AppleSARTMarconi`, does its own writes and
+carries the useful looking `_makeRegion(regions[i].size, regions[i].base & 1)`,
+but it is a different generation. Getting the v1 register semantics out of the
+kernel means disassembling the PPL, not the kext.
+
+### Where to pick this up
+
+The admin queue is permitted and still unreadable by the coprocessor, so the
+next thing to question is the address itself rather than the permission. The
+nvme node sits under a `soc` that has `ranges` and no `dma-ranges`, so the DMA
+address equals the physical address. That is right for the USB bus only because
+`dma-ranges` was added there explicitly. Check what address ANS is actually
+driving, and whether NVMe traffic crosses the APCIe window at 0x610000000 and
+needs translating the way the USB complex does.
 
 ### A trap when reading these crash dumps
 
