@@ -44,7 +44,7 @@ dying mid-boot.
 
 ## m1n1 patches
 
-Six, in `patches/`. Three were T8020 bugs, three were about seeing anything.
+Seven, in `patches/`. Four were T8020 bugs, three were about seeing anything.
 
 1. **`0001` USB complex registers.** `usb-complex,t8020` fell through to the
    `t8011` case and got its DMA remap offsets. See below.
@@ -59,6 +59,17 @@ Six, in `patches/`. Three were T8020 bugs, three were about seeing anything.
    the fault bits, `RECURSIVE_FAULT` included, works. Root cause still unknown.
 
    Masking DAIF in the handler does nothing: ERET restores SPSR.
+
+4. **`0007` dwc2 DMA coherency and PHY width.** Two separate T8020 bugs in one
+   file. There is no DART in the USB path, only the remap widget, which is not
+   an IOMMU and does not snoop, so with caches on the CPU reads stale SETUP
+   packets out of DRAM and never answers the host. PongoOS invalidates before
+   reading and cleans before handing a buffer over, and m1n1 now does the same.
+   Separately, `usb_dwc2_init()` decided 16 bit UTMI+ from the `GUSBCFG` it
+   read, but `usb_bringup` has just reset the PHY, so `PHYIF16` reads clear and
+   it fell through to the ULPI case with an 8 bit turnaround. Both faults look
+   identical from the host: attach, high speed chirp, then
+   `device descriptor read/64, error -110`.
 
 `0003`, `0004` and `0006` exist because the framebuffer is the only console
 without a serial cable, and a `RELEASE` build defines `FB_SILENT_MODE`, which

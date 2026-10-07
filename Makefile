@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0+ OR MIT
 # Copyright (c) 2026 kiki <kieran@lavato.net>
 # check      compile the device tree on its own, no kernel tree needed
-# deps       clone m1n1, the Hoolock kernel and the docs into build/
+# deps       clone m1n1, the Hoolock kernel and the docs into build/, and patch them
+# patch      apply patches/ to build/m1n1 and build/linux, safe to re-run
 # pmgr       regenerate dts/t8020-pmgr.dtsi from the IPSW
 # m1n1       build the m1n1 chainload payload
 # kernel     build Image.gz with Hoolock's 16K config
@@ -40,7 +41,7 @@ KBUILD := LLVM=1 ARCH=arm64
 # secondaries would never come up anyway. Drop it once SMP works.
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1
 
-.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot-m1n1 pc-boot \
+.PHONY: check deps patch pmgr m1n1 kernel initramfs blob pongo boot-m1n1 pc-boot \
 	proxy-boot clean
 check: $(DTB)
 
@@ -57,6 +58,26 @@ deps:
 	test -d build/hoolock-docs || git clone --depth 1 https://github.com/HoolockLinux/docs.git build/hoolock-docs
 	test -d build/venv || python3 -m venv --system-site-packages build/venv
 	build/venv/bin/pip install -q construct
+	$(MAKE) patch
+
+# Neither tree boots this phone unpatched, so a checkout that skips this builds
+# cleanly and then does nothing on the hardware. "deps" runs it, and it is also
+# a target of its own because the patches get regenerated as work goes on.
+#
+# Re-running is safe: a patch that is already applied reverses cleanly, so it
+# is reported and skipped. A patch that does neither is a real conflict and
+# stops the build rather than being swallowed.
+patch:
+	@set -e; \
+	for p in $(CURDIR)/patches/m1n1-*.patch $(CURDIR)/patches/linux-*.patch; do \
+	    case $$p in *linux-*) d=$(KDIR);; *) d=$(M1N1_SRC);; esac; \
+	    if git -C $$d apply --reverse --check $$p 2>/dev/null; then \
+	        echo "  already applied: $$(basename $$p)"; \
+	    else \
+	        echo "  applying: $$(basename $$p)"; \
+	        git -C $$d apply $$p; \
+	    fi; \
+	done
 
 pmgr:
 	./tools/gen-pmgr.sh

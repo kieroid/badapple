@@ -1,5 +1,5 @@
 diff --git a/src/exception.c b/src/exception.c
-index ded20c4..7f044eb 100644
+index ded20c4..31ddb15 100644
 --- a/src/exception.c
 +++ b/src/exception.c
 @@ -355,8 +355,8 @@ void exc_sync(u64 *regs)
@@ -13,10 +13,45 @@ index ded20c4..7f044eb 100644
      }
  
      exc_count++;
-@@ -471,9 +471,50 @@ void exc_serr(u64 *regs)
-     if (!(exc_guard & GUARD_SILENT))
+@@ -460,20 +460,82 @@ void exc_fiq(u64 *regs)
+     // print_regs(regs);
+ }
+ 
++/*
++ * How many SErrors to report in full before going quiet.
++ *
++ * Reporting every one is not free. print_regs goes to the framebuffer
++ * console, which on this panel is 1242x2688 and scrolls in software, so one
++ * dump costs a lot of CPU. m1n1's USB gadget is polled from uartproxy_run's
++ * loop rather than driven by interrupts, so anything that keeps the CPU out
++ * of that loop stops EP0 being serviced while the PHY keeps its pullup. A
++ * host then sees the attach and the high speed chirp but times out on every
++ * control transfer: "device descriptor read/64, error -110".
++ */
++#define SERR_REPORT_LIMIT 2
++
+ void exc_serr(u64 *regs)
+ {
+-    if (!(exc_guard & GUARD_SILENT))
+-        printf("Exception: SError\n");
++    static u32 serr_count = 0;
++    bool report = serr_count < SERR_REPORT_LIMIT && !(exc_guard & GUARD_SILENT);
++
++    serr_count++;
++
++    if (report)
++        printf("Exception: SError (#%u)\n", serr_count);
+ 
+     sysop("dsb sy");
+     sysop("isb");
+ 
+-    if (!(exc_guard & GUARD_SILENT))
++    if (report)
          print_regs(regs, 0);
  
++    if (serr_count == SERR_REPORT_LIMIT)
++        printf("SError repeating, silencing further reports\n");
++
 +    /*
 +     * Bring-up on T8020: report an unhandled SError and keep going rather than
 +     * halting.

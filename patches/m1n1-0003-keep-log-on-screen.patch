@@ -18,29 +18,10 @@ index 2b85d9a..fc5c389 100644
          fb_restore_logo();
          free(orig_logo.ptr);
 diff --git a/src/main.c b/src/main.c
-index d4e828c..f8139e1 100644
+index d4e828c..b13c427 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -31,6 +31,18 @@
- #include "wdt.h"
- #include "xnuboot.h"
- 
-+/*
-+ * Seconds to wait before vectoring to Linux, so the Lightning cable can be
-+ * moved from the l41ka jig to the host.
-+ *
-+ * The phone must stay on the jig for the whole usbliter8 chain, since the
-+ * RP2350 is the USB host running the exploit. But dwc2 probes ~0.26s into the
-+ * kernel and the gadget binds to whatever host is attached then, and it does
-+ * not re-present itself if the cable moves later. The A11 port never hits this
-+ * because checkm8 runs from the PC, so the phone is on the PC throughout.
-+ */
-+#define HANDOFF_PAUSE_SECS 30
-+
- struct vector_args next_stage;
- 
- const char version_tag[] = "##m1n1_ver##" BUILD_TAG;
-@@ -172,11 +184,17 @@ void m1n1_main(void)
+@@ -172,11 +172,17 @@ void m1n1_main(void)
      // On idevice we need to always clear, because otherwise it looks scuffed on white devices
      fb_init(!is_mac);
      fb_display_logo();
@@ -62,18 +43,3 @@ index d4e828c..f8139e1 100644
  #endif
  
      cpufreq_fixup();
-@@ -193,6 +211,14 @@ void m1n1_main(void)
- 
-     printf("Preparing to run next stage at %p...\n", next_stage.entry);
- 
-+    printf("\n*** MOVE THE CABLE FROM THE JIG TO THE HOST NOW ***\n");
-+    for (int i = HANDOFF_PAUSE_SECS; i > 0; i--) {
-+        printf("\rbooting Linux in %2d s ", i);
-+        iodev_console_flush();
-+        mdelay(1000);
-+    }
-+    printf("\n");
-+
-     nvme_shutdown();
-     exception_shutdown();
- #ifndef BRINGUP

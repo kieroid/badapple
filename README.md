@@ -58,12 +58,18 @@ a tool in `build/` and none of it is vendored here.
 
 ## Build
 
-    make deps       # clone m1n1, the Hoolock kernel, the docs, make a venv
+    make deps       # clone m1n1, the Hoolock kernel, the docs, venv, apply patches/
     make check      # compile the device tree, no kernel tree needed
     make m1n1
     make kernel     # Hoolock's config_16k, LLVM=1 ARCH=arm64
     make initramfs
     make blob       # build/m1n1-linux.bin
+
+Neither m1n1 nor the kernel boots this phone unpatched, so `make deps` applies
+everything in `patches/` to the trees it clones. `make patch` does it on its
+own and is safe to re-run: an already applied patch reverses cleanly, so it is
+skipped, and anything that neither applies nor reverses is a real conflict and
+stops the build.
 
 ## Running
 
@@ -170,7 +176,9 @@ blocks are identical, so adding that board later is a second `.dts`.
 Dual licensed, `GPL-2.0+ OR MIT`. See [LICENSE](LICENSE).
 
 `patches/` is excluded: those are changes to other people's code and carry that
-code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT.
+code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT. Each one is generated
+with `git diff` against the pinned checkout, so the trees rebuild from them
+byte for byte.
 
 `linux-0002` keeps six `dev_info` calls that look like leftover debugging and
 are not: removing them stops the gadget enumerating. See the comment on them,
@@ -178,15 +186,14 @@ and [NOTES.md](NOTES.md#the-gadget-prints-are-load-bearing).
 
 ## Known gaps
 
-1. **Nothing applies `patches/`.** A clean checkout builds m1n1 and the kernel
-   unpatched and will not boot.
-2. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
-3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
+1. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
+2. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
    is in bypass. l41ka's author vendored m1n1's DART driver into their PongoOS
-   fork, which suggests that assumption is wrong.
-4. **cpufreq.** Needs measured A12 operating points. Cluster controllers at
+   fork, which suggests that assumption is wrong. m1n1 does its own cache
+   maintenance around the DMA buffers for the same reason, see `m1n1-0007`.
+3. **cpufreq.** Needs measured A12 operating points. Cluster controllers at
    0x210e20000 and 0x211e20000.
-5. **Chicken bits.** A12 Vortex and Tempest are MIDR parts 0xb and 0xc. Fine
+4. **Chicken bits.** A12 Vortex and Tempest are MIDR parts 0xb and 0xc. Fine
    for bring-up, not for stability.
-6. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
+5. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
    framebuffer includes the notch area. Cosmetic.
