@@ -130,28 +130,35 @@ Two things learned the hard way:
 - m1n1's USB is polled from `uartproxy_run()`, not interrupt driven, so
   anything keeping the CPU out of that loop looks exactly like broken USB.
 
-## Linux dwc2 writes never land
+## Linux dwc2 writes never land, solved
 
-Writing a known value to four registers and reading each back, from
-`dwc2_hsotg_pullup()`:
+Every write dwc2 made was dropped while every read worked and agreed with
+m1n1 on the same silicon:
 
     wtest GINTMSK  00000000 -> 00000000 (wrote 00003000)
     wtest DIEPMSK  00000000 -> 00000000 (wrote 0000000d)
     wtest GAHBCFG  00000000 -> 00000000 (wrote 0000002e)
     wtest DCTL     00000002 -> 00000002 (wrote 00000000)
 
-Not one takes. `GINTMSK` and `DIEPMSK` read 0 even though
-`dwc2_hsotg_core_init_disconnected()` wrote them moments earlier, so nothing
-this driver has ever written to this controller has had any effect.
+The cause was a missing `nonposted-mmio` on the `bus@239000000` node.
+`of_mmio_is_nonposted()` only looks at the node and its immediate parent, so
+the one on `soc` does not reach anything a bus further down, and the PHY and
+dwc2 were mapped with `ioremap()` rather than `ioremap_np()`. Upstream repeats
+the property on this same bus for every A series SoC, `s5l8960x.dtsi` included.
+With it added, the same test reads:
 
-Reads work and match m1n1 on the same silicon. Probe reads `GHWCFG` well enough
-to report 9 EPs and 2056 SPRAM entries. `dwc2_writel()` is a plain `writel()`
-through the same `hsotg->regs` pointer `dwc2_readl()` reads through.
+    wtest GINTMSK  d08c3cc4 -> 00003000 (wrote 00003000)
+    wtest DIEPMSK  0000020f -> 0000000d (wrote 0000000d)
+    wtest GAHBCFG  00000023 -> 0000002e (wrote 0000002e)
 
-That one mechanism explains every earlier dead end, because all of them were
-writes into a block that was not listening.
+A plain `ioremap()` of the same block, taken from the ausb driver, still reads
+`GRXFSIZ 0x840 -> 0x840` after writing it, which is the same bug seen from the
+other side.
 
-### Ruled out, with the evidence
+This mechanism explains every earlier dead end at once, because all of them
+were writes into a block that was not listening.
+
+### Ruled out along the way, with the evidence
 
 | Theory | Killed by |
 |---|---|
@@ -161,18 +168,72 @@ writes into a block that was not listening.
 | `GUSBCFG` PHYIF16 misdetected | Already `0x1408`, which is what PongoOS writes |
 | SError storm starving the poll loop | Handler rate limited, screen stays clean |
 | dwc2 core soft reset wedging the core | Skipped for `apple,dwc2`, no change |
-| USB power domains gated off | `apple,always-on` on all three; pmgr warns about `debug` and `debug_usb` only |
+| USB power domains gated off | All three read `0x000000ff`, on and settled |
+| Core clamped by `PCGCTL` | Reads `0x00000000`, nothing gated |
 | High speed only failure | m1n1 enumerates at high speed, `DSTS` `0x002c7e00` |
 | Non-coherent DMA needing cache maintenance | Added it, no change |
+| dwc2's own mapping at fault | A second independent `ioremap()` behaved identically |
+
+## Forced VBUS detection is needed after all
+
+`patches/linux-0001` used to clear `AUSB_SIG_VBUSDET_FORCE_EN`, on the reading
+that the real detector was being pinned to a value sampled while the PHY was
+still settling. That reading came from runs where no dwc2 write landed, so it
+proved nothing. With the bit set the host sees the attach and the high speed
+chirp. The PHY then reads `SIG 0x01c10003`, which is m1n1's documented
+`0x1c103` shifted by the usual 8, and m1n1's own table calls that value "USB
+proxy active".
+
+The same patch used to clear `AUSB_SIG_HOST`. That mask is `7 << 12`, which on
+T8020 is three bits that are not the role field, and m1n1 never touches it.
+Dropped.
+
+## No AIC interrupt is ever delivered
+
+Current blocker. The gadget gets as far as the host seeing it attach, then
+every control transfer times out with `device descriptor read/64, error -110`,
+because nothing services the bus.
+
+A counter in `dwc2_hsotg_irq()` stays at zero while the controller sits with
+work pending:
+
+    apple dbg: irqs=0 GINTSTS=0x0408bc38 GINTMSK=0xd08c3cc4 DSTS=0x002bfe00
+
+`GINTSTS & GINTMSK` is `0x00083c00`, which includes USBRst and EnumDone. The
+timer keeps running because on Apple SoCs it is an FIQ, so an otherwise healthy
+looking boot is consistent with no IRQ ever arriving.
+
+Established about AIC, from the hardware:
+
+- `AIC_WHOAMI` reads 4 on the boot CPU. The A12 starts on cluster 1 core 0,
+  which is logical CPU 0 to the kernel, so the two numbering schemes disagree.
+  Upstream only warns about this and leaves a note that a mapping table would
+  be needed if it ever happened. `patches/linux-0003` adds one.
+- IRQ 451 is unmasked: `mask_set` reads `0xfffffff7`, bit 3 clear.
+- `nr_irq` is 512 while the driver hardcodes `max_irq` 1024. Sizing the
+  register banks from `nr_irq` instead moves `mask_set` to `0x3880`, where it
+  reads `0x00000000`, so 1024 is correct and PongoOS agrees: it uses `0x4100`
+  and `0x4180` directly.
+- `AIC_CONFIG` bit 0 is AIC's global enable. PongoOS sets `0xe0000001` in its
+  `interrupt_init()`. Setting it from Linux too changes nothing.
+- `TARGET_CPU` has been tried as `BIT(0)`, as `BIT(whoami)`, and left as iBoot
+  set it, which is what PongoOS does. None deliver an interrupt.
+- Reading AIC at `0x4200`, where the driver's layout puts `HW_STATE`, raises a
+  synchronous external abort. So does reading `TARGET_CPU` for some hwirqs.
+
+PongoOS does take AIC interrupts on this SoC after the same exploit, including
+for USB: `usb_irq = otg_irq` with `task_register_preempt_irq()`. So delivery is
+possible here and something in the handover or in the kernel's setup is in the
+way.
 
 ### Next step
 
-Find out why `writel()` to `hsotg->regs + offset` is dropped while `readl()`
-through the identical pointer works. Boot with `no_hash_pointers` so the
-`regs=` line prints a real address instead of a hashed one, and compare against
-`0x239100000`, which m1n1 peeks successfully.
+Put a counter in `aic_handle_irq()` to settle whether any AIC interrupt at all
+is delivered or only this one. If none are, suspect the exception level: Pongo
+hands off at EL1 and nothing owns EL2, so if `HCR_EL2.IMO` is set, IRQs are
+routed to an EL2 that has no handler, while FIQs keep working.
 
-Then, once it enumerates, configure the host end as root:
+Once it enumerates, configure the host end as root:
 
     sudo ip link set <iface> up
     sudo ip addr add 172.16.42.2/24 dev <iface>

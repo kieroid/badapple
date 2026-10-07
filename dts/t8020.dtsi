@@ -184,6 +184,17 @@
 			#address-cells = <2>;
 			#size-cells = <2>;
 			dma-ranges = <0x0 0x00000000 0x8 0x00000000 0x1 0x00000000>;
+
+			/*
+			 * of_mmio_is_nonposted() only looks at the node and its
+			 * immediate parent, so the one on the soc node does not
+			 * reach anything a bus further down. Without it here the
+			 * PHY and dwc2 are mapped with ioremap() instead of
+			 * ioremap_np(), and dwc2 then answers every read while
+			 * dropping every write. Upstream repeats this property
+			 * on the same bus for every A series SoC.
+			 */
+			nonposted-mmio;
 			ranges;
 
 			reg = <0x2 0x39000000 0x0 0x100>;

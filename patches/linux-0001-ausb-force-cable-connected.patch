@@ -1,5 +1,5 @@
 diff --git a/drivers/phy/apple/ausb.c b/drivers/phy/apple/ausb.c
-index 39ba39d83..aa2c414f9 100644
+index 39ba39d83..048a6887d 100644
 --- a/drivers/phy/apple/ausb.c
 +++ b/drivers/phy/apple/ausb.c
 @@ -40,6 +40,7 @@ struct ausb_usbphy {
@@ -10,7 +10,7 @@ index 39ba39d83..aa2c414f9 100644
  };
  
  static inline void mask32(void __iomem *reg, u32 mask, u32 set)
-@@ -94,9 +95,36 @@ static __maybe_unused int ausb_phy_usb2_set_mode(struct phy *phy, enum phy_mode
+@@ -94,9 +95,37 @@ static __maybe_unused int ausb_phy_usb2_set_mode(struct phy *phy, enum phy_mode
  }
  #endif
  
@@ -21,6 +21,7 @@ index 39ba39d83..aa2c414f9 100644
 +#define AUSB_COMPLEX_FROM_PHY		0x60
 +#define AUSB_COMPLEX_CTL		0x00
 +#define AUSB_COMPLEX_CTL_EN		BIT(0)
++#define AUSB_COMPLEX_REMAP		0x48
 +
  static int ausb_phy_usb2_power_on(struct phy *phy)
  {
@@ -32,14 +33,14 @@ index 39ba39d83..aa2c414f9 100644
 +	 * Linux does this: the complex is bound to simple-pm-bus, which powers
 +	 * the domain but never writes the enable bit. m1n1 does it explicitly
 +	 * and its gadget works on this SoC, and m1n1 disables USB again on
-+	 * handoff, so by the time Linux runs the block is inert and every write
-+	 * to the PHY and to dwc2's device registers is silently dropped.
++	 * handoff, so by the time Linux runs the block is off.
 +	 */
-+	complex = ioremap(aphy->reg_base - AUSB_COMPLEX_FROM_PHY, 4);
++	complex = ioremap(aphy->reg_base - AUSB_COMPLEX_FROM_PHY, 0x1000);
 +	if (complex) {
 +		set32(complex + AUSB_COMPLEX_CTL, AUSB_COMPLEX_CTL_EN);
-+		dev_info(aphy->dev, "apple phy: complex CTL=0x%08x\n",
-+			 readl(complex + AUSB_COMPLEX_CTL));
++		dev_info(aphy->dev, "apple phy: complex CTL=0x%08x REMAP=0x%08x\n",
++			 readl(complex + AUSB_COMPLEX_CTL),
++			 readl(complex + AUSB_COMPLEX_REMAP));
 +		iounmap(complex);
 +	} else {
 +		dev_err(aphy->dev, "apple phy: could not map usb complex\n");
@@ -47,41 +48,37 @@ index 39ba39d83..aa2c414f9 100644
  
  	/* set a sane tunable */
  	writel(aphy->cfg0_device, aphy->base + AUSB_CFG0);
-@@ -108,7 +136,32 @@ static int ausb_phy_usb2_power_on(struct phy *phy)
+@@ -108,8 +137,29 @@ static int ausb_phy_usb2_power_on(struct phy *phy)
  	udelay(20);
  	clear32(aphy->base + AUSB_CTL, AUSB_CTL_RESET);
  	udelay(1500);
--	set32(aphy->base + AUSB_SIG, AUSB_SIG_VBUSDET_FORCE_EN);
 +
 +	/*
-+	 * Select device mode. ausb_phy_usb2_set_mode() is #if 0'd out in this
-+	 * driver, so nothing ever clears AUSB_SIG_HOST and the PHY keeps
-+	 * whatever role iBoot left it in. If that is host, dwc2's device
-+	 * register block is inert: DCTL and GOTGCTL writes are silently
-+	 * dropped, the soft disconnect can never be cleared, and the gadget
-+	 * binds but is invisible to every host.
++	 * AUSB_SIG_HOST is not cleared here. On T8020 every SIG bit above 1 is
++	 * eight places further up than this driver's defines say, so 7 << 12
++	 * clears three bits that are not the role field, and the role field
++	 * sits at 7 << 20. m1n1 never touches it at all and its gadget works
++	 * on this phone, so leave it as iBoot left it.
 +	 */
-+	clear32(aphy->base + AUSB_SIG, AUSB_SIG_HOST);
 +
 +	/*
-+	 * Leave forced VBUS detection OFF here, so the real detector runs.
-+	 *
-+	 * m1n1 brings this same PHY up successfully on this SoC and clears
-+	 * VBUSDET_FORCE_EN at this point, only setting it again after the dwc2
-+	 * core has been initialised. This driver was instead setting it before
-+	 * dwc2 init and never clearing it, which pins detection to a value
-+	 * sampled while the PHY is still settling: SIG bit 8, CABLE_CONNECTED,
-+	 * then reads 0 forever and will not accept a write, the core never sees
-+	 * a session, and DCTL keeps its soft disconnect so no host can see us.
++	 * Force VBUS detection on, which is what this driver has always done
++	 * and what works on T8015. An earlier version of this patch cleared it
++	 * instead, on the theory that the real detector was being pinned to a
++	 * value sampled while the PHY was still settling. That reading came
++	 * from a run where no write to dwc2 landed at all, so it proved
++	 * nothing. m1n1 ends up with this bit set too: its PHY reads 0x1c103
++	 * with the proxy running, against 0x1c101 here without it.
 +	 */
-+	clear32(aphy->base + AUSB_SIG, AUSB_SIG_VBUSDET_FORCE_EN);
-+
+ 	set32(aphy->base + AUSB_SIG, AUSB_SIG_VBUSDET_FORCE_EN);
+ 
 +	dev_info(aphy->dev, "apple phy: power_on done CTL=0x%08x SIG=0x%08x\n",
 +		 readl(aphy->base + AUSB_CTL), readl(aphy->base + AUSB_SIG));
- 
++
  	return 0;
  }
-@@ -160,6 +213,7 @@ static int ausb_usbphy_probe(struct platform_device *pdev) {
+ 
+@@ -160,6 +210,7 @@ static int ausb_usbphy_probe(struct platform_device *pdev) {
  	aphy->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
  	if (IS_ERR(aphy->base))
  		return PTR_ERR(aphy->base);

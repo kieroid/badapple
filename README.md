@@ -16,9 +16,10 @@ Detailed findings, register dumps and the debugging history are in
 Linux 7.3.0-rc1 boots on one Vortex core with a framebuffer console. UART0, the
 generated power domains and the handover framebuffer are all confirmed working.
 
-Not working: Linux's USB gadget, so there is no interactive shell. No write
-this driver makes to the dwc2 block takes effect, while reads work and match
-what m1n1 sees. See [NOTES.md](NOTES.md#linux-dwc2-writes-never-land).
+Linux's USB gadget now reaches the host: it sees the attach and the high speed
+chirp, and dwc2 takes register writes. It does not enumerate yet, because no
+AIC interrupt is ever delivered, so nothing services the bus and every control
+transfer times out. See [NOTES.md](NOTES.md#no-aic-interrupt-is-ever-delivered).
 
 m1n1's own gadget does work, which is what `usbregs` and `proxy-boot` use.
 
@@ -156,9 +157,13 @@ Dual licensed, `GPL-2.0+ OR MIT`. See [LICENSE](LICENSE).
 `patches/` is excluded: those are changes to other people's code and carry that
 code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT.
 
+`linux-0002` and `linux-0003` still carry debug scaffolding, an interrupt
+counter and a periodic register dump. Both go once the interrupt is delivered.
+
 ## Known gaps
 
-1. **Linux USB gadget.** Writes to dwc2 are dropped. Blocks the shell.
+1. **AIC interrupts.** None are delivered, so the gadget attaches but never
+   enumerates. Blocks the shell.
 2. **Nothing applies `patches/`.** A clean checkout builds m1n1 and the kernel
    unpatched and will not boot.
 3. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
