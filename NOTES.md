@@ -330,6 +330,117 @@ So they are delays wearing a print's clothing. The real fix is to find which
 gap matters and put an explicit delay there, which costs a DFU cycle per guess.
 Until someone does that, leave all six alone.
 
+## NVMe on T8020, ANS2 bring-up
+
+Storage on this phone is NVMe behind the ANS2 coprocessor, not eMMC and not
+PCIe. The stack is SART, then an RTKit mailbox, then ANS2, then `nvme-apple`.
+All four are already in the Hoolock kernel and enabled in `config_16k`, so the
+work is device tree plus working out where T8020 sits between T8015 and T8103.
+
+It is not finished. The current state is that RTKit talks, the coprocessor
+boots its firmware, and the firmware then takes an SError and crashes.
+
+### What the ADT settles
+
+`/arm-io/ans` and `/arm-io/sart-ans` give the addresses directly:
+
+| Thing | Address | From |
+|---|---|---|
+| ASC wrapper | 0x277400000 | ans reg index 0 |
+| mailbox | 0x277408000 | wrapper + 0x8000 |
+| coprocessor control | 0x277400044 | wrapper + 0x44 |
+| NVMe registers | 0x27acc0000 | ans reg index 3 |
+| SART | 0x27ac50000 | sart-ans reg |
+
+`nvme-interrupt-idx = 4` means the fifth entry of the ans interrupts list, 371,
+is NVMe, and the first four belong to the mailbox.
+
+### Three things the ADT gets wrong if read literally
+
+1. **The lone four byte range at 0x27ad20044 is a decoy.** It looks exactly
+   like a coprocessor control register, being some base plus 0x44, and it
+   accepts a write to the run bit. It does not start anything. Writing bit 4
+   of 0x277400044 does, and ANS then puts a message in the inbound queue.
+   Pointing the nvme node's "ans" reg at 0x27ad20000 probes cleanly and then
+   fails with "ANS did not boot".
+
+2. **The mailbox is the T8015 kind even though the control register is where
+   T8103 puts it.** The two layouts put their queue control registers in
+   different places. Read from a parked m1n1:
+
+       mbox+0x108 = 0x00020001   empty bit set, T8015 layout, live
+       mbox+0x10c = 0x00100101   T8015 layout, live
+       mbox+0x110 = 0x00000000   v4 layout, dead
+       mbox+0x114 = 0x00000000   v4 layout, dead
+
+   Claim `apple,asc-mailbox-v4` and the driver polls two registers that never
+   change, so the handshake times out.
+
+3. **The interrupt order is not the binding's order.** The ADT lists
+   365, 364, 367, 366, which is two descending pairs. Taken literally that puts
+   recv-not-empty on 366 and no mailbox interrupt ever arrives. Read each pair
+   as (not-empty, empty) and it comes out ascending, which is how every other
+   Apple SoC spells it, and 367 then fires.
+
+### sart-version 1
+
+The ADT says `sart-version = 1`. Neither Linux nor m1n1 has a case for it:
+both know 0, 2 and 3, and m1n1 also knows 4. v0 and v2 share their register
+offsets and differ only in field widths.
+
+The entries iBoot leaves behind say v2: one reads config 0x2f000004, and bit 29
+is set, which does not fit v0's five bit flags field at 28:24 but does fit v2's
+eight bit field at 31:24. The hardware agrees. With v2 the coprocessor DMAs a
+crashlog back, which is the only reason the crash below is visible. With v0
+nothing arrives at all and the boot just times out.
+
+### Where it stops
+
+ANS boots and immediately crashes:
+
+    RTKit: Initializing (protocol version 12)
+    RTKit: co-processor has crashed
+      == Exception taken from EL1h ==
+      ESR    = 0xbe000000
+      FAR    = 0x600084000
+      PC     = 0x6444
+
+ESR 0xbe000000 decodes to EC 0x2f, an SError. FAR is 0x600084000, which is
+exactly what SART entry 0 covers: that entry reads paddr 0x00600084, and
+shifted by 12 that is 0x600084000. So the firmware faults on the one region
+iBoot set aside for it.
+
+That address is nowhere near DRAM, which starts at 0x800000000, and nothing in
+/proc/iomem claims it. Two things to try next, in order:
+
+1. Check whether v1's paddr shift is 12 at all. Everything above only
+   establishes the flags field width; the shift was assumed from v0 and v2.
+2. Check whether the firmware region survives the handover. iBEC uses NVMe, so
+   iBoot had ANS running, and PongoOS or m1n1 may leave the carveout or the
+   SART table in a state the firmware cannot restart from. m1n1 reserves
+   several regions near 0x8ea00000, none of them near 0x600084000.
+
+Not worth another approach until one of those two is answered, because every
+other knob here is now pinned by hardware reads rather than guesswork.
+
+### Reading registers without a DFU cycle
+
+/dev/mem is useless for this: arm64 rejects anything above RAM, so a read of an
+MMIO address returns `Bad address` even with CONFIG_STRICT_DEVMEM off. Use a
+parked m1n1 and its proxy instead:
+
+    make pongo
+                    # move the cable to the PC
+    build/venv/bin/python tools/pcboot.py build/m1n1/build/m1n1.bin
+
+then `p.read32()` and `p.write32()` from a script that imports `m1n1.setup`.
+That is how the decoy register, the mailbox layout and the SART field widths
+were all settled, none of which needed a kernel build.
+
+m1n1's own `p.nvme_init()` is not a shortcut here. It stops at
+`asc: Unsupported compatible`, because m1n1 knows `iop,ascwrap-v4` and the two
+T8015 variants but not T8020's `iop,ascwrap-v2`.
+
 ## Corrections
 
 Things this repo previously asserted that are wrong.

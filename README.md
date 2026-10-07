@@ -186,14 +186,18 @@ and [NOTES.md](NOTES.md#the-gadget-prints-are-load-bearing).
 
 ## Known gaps
 
-1. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
-2. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
+1. **NVMe.** Device tree is in and the whole stack probes: SART, mailbox and
+   RTKit all bind and talk. ANS2 boots its firmware and then crashes with an
+   SError on the region its own SART entry covers, so there is no `nvme0n1`
+   yet. See [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
+2. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
+3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
    is in bypass. l41ka's author vendored m1n1's DART driver into their PongoOS
    fork, which suggests that assumption is wrong. m1n1 does its own cache
    maintenance around the DMA buffers for the same reason, see `m1n1-0007`.
-3. **cpufreq.** Needs measured A12 operating points. Cluster controllers at
+4. **cpufreq.** Needs measured A12 operating points. Cluster controllers at
    0x210e20000 and 0x211e20000.
-4. **Chicken bits.** A12 Vortex and Tempest are MIDR parts 0xb and 0xc. Fine
+5. **Chicken bits.** A12 Vortex and Tempest are MIDR parts 0xb and 0xc. Fine
    for bring-up, not for stability.
-5. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
+6. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
    framebuffer includes the notch area. Cosmetic.

@@ -15,7 +15,7 @@
  *   cpufreq / OPP tables  Cluster controllers live at 0x210e20000 (E) and
  *                         0x211e20000 (P), but the A12 operating points are
  *                         not measured yet and wrong ones hang the cluster.
- *   pinctrl, i2c, nvme    Not needed to reach a shell.
+ *   pinctrl, i2c          Not needed to reach a shell.
  *
  * Copyright (c) 2026, kiki <kieran@lavato.net>
  */
@@ -220,6 +220,99 @@
 				resets = <&ps_usb2dev>;
 				dr_mode = "peripheral";
 			};
+		};
+
+		/*
+		 * NVMe, which on this SoC means the ANS2 coprocessor rather
+		 * than a PCIe controller. Every number here comes from
+		 * /arm-io/ans and /arm-io/sart-ans in the IPSW DeviceTree.
+		 *
+		 * The ADT gives /arm-io/ans nine reg ranges. Two are wanted:
+		 * index 0 is the ASC wrapper and index 3 is the NVMe register
+		 * block. The wrapper carries both the mailbox, at +0x8000, and
+		 * the coprocessor control register at +0x44, which is the
+		 * arrangement T8103 uses rather than the split one T8015 has.
+		 * Confirmed on the hardware: writing bit 4 of 0x277400044 starts
+		 * ANS and it puts a message in the inbound queue.
+		 *
+		 * The ADT also lists a lone four byte range at 0x27ad20044, which
+		 * looks like a second copy of the same control register and
+		 * accepts the write without starting anything. Pointing the node
+		 * at it instead probes cleanly and then fails with "ANS did not
+		 * boot". It is a decoy.
+		 *
+		 * The ADT lists five interrupts and says nvme-interrupt-idx is
+		 * 4, so 371 is NVMe and the first four belong to the mailbox.
+		 * The ADT order is 365, 364, 367, 366, which is two descending
+		 * pairs rather than the order the binding wants. Read each pair
+		 * as (not-empty, empty) and it comes out ascending, which is
+		 * also how every other Apple SoC spells it, so that is what is
+		 * used below. Taking the ADT order literally instead puts
+		 * recv-not-empty on 366 and no mailbox interrupt ever arrives.
+		 *
+		 * The mailbox is the T8015 kind, not the v4 kind, even though
+		 * the control register sits where T8103 puts it. The two
+		 * layouts put their queue control registers in different
+		 * places, 0x108 and 0x10c against 0x110 and 0x114, and on this
+		 * SoC only the first pair is live: 0x108 reads 0x00020001 with
+		 * the empty bit set, 0x110 and 0x114 read zero always. Claiming
+		 * v4 here makes the driver poll two registers that never
+		 * change, so the RTKit handshake times out and NVMe fails with
+		 * "ANS did not boot" even though the coprocessor started.
+		 */
+		ans_mbox: mbox@277408000 {
+			compatible = "apple,t8020-asc-mailbox", "apple,t8015-asc-mailbox";
+			reg = <0x2 0x77408000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 364 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 365 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 366 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 367 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+					  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+			power-domains = <&ps_ans2>;
+		};
+
+		/*
+		 * The ADT says sart-version = 1, which neither Linux nor m1n1
+		 * has a case for: both know 0, 2 and 3 only. v0 and v2 share
+		 * their register offsets and differ only in field widths, so
+		 * the question is which one v1 resembles. The entries iBoot
+		 * leaves behind answer it: one reads config 0x2f000004, and
+		 * bit 29 is set, which does not fit v0's five bit flags field
+		 * at 28:24 but does fit v2's eight bit field at 31:24. The size
+		 * field decodes to 4 pages either way.
+		 *
+		 * The hardware agrees. With v2 ops the coprocessor manages to
+		 * DMA a crashlog back to us, which is how the crash below is
+		 * visible at all. With v0 ops nothing ever arrives and the boot
+		 * just times out, because ANS cannot reach the buffer.
+		 */
+		sart: iommu@27ac50000 {
+			compatible = "apple,t8103-sart";
+			reg = <0x2 0x7ac50000 0x0 0x8000>;
+			power-domains = <&ps_ans2>;
+		};
+
+		/*
+		 * The driver has one variant for T8015, with no LSQ NVMMU and a
+		 * queue depth of 16, and one for T8103 with both. Nothing
+		 * readable says which side of that line A12 falls on, so this
+		 * follows A11 until the controller says otherwise.
+		 */
+		nvme@27acc0000 {
+			compatible = "apple,t8015-nvme-ans2";
+			reg = <0x2 0x7acc0000 0x0 0x60000>,
+			      <0x2 0x77400000 0x0 0x4000>;
+			reg-names = "nvme", "ans";
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 371 IRQ_TYPE_LEVEL_HIGH>;
+			mboxes = <&ans_mbox>;
+			apple,sart = <&sart>;
+			power-domains = <&ps_ans2>, <&ps_apcie_st>;
+			power-domain-names = "ans", "apcie0";
+			resets = <&ps_ans2>;
 		};
 
 		aic: interrupt-controller@23b100000 {
