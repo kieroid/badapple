@@ -390,38 +390,71 @@ offsets and differ only in field widths.
 
 The entries iBoot leaves behind say v2: one reads config 0x2f000004, and bit 29
 is set, which does not fit v0's five bit flags field at 28:24 but does fit v2's
-eight bit field at 31:24. The hardware agrees. With v2 the coprocessor DMAs a
-crashlog back, which is the only reason the crash below is visible. With v0
-nothing arrives at all and the boot just times out.
+eight bit field at 31:24. iBoot also writes 0x6f and 0x6a elsewhere in the
+table, which need seven bits.
 
-### Where it stops
+The paddr shift really is 12. Entries 1, 2, 3, 4 and 8 all land inside DRAM
+when shifted by 12 and nowhere near it when shifted by 14:
 
-ANS boots and immediately crashes:
+    [ 3] cfg=0x6a00013c paddr=0x00800024  ->  0x800024000 .. 0x800160000
+    [ 8] cfg=0x6f003288 paddr=0x008fcad4  ->  0x8fcad4000 .. 0x8ffd5c000
 
-    RTKit: Initializing (protocol version 12)
-    RTKit: co-processor has crashed
+v2 is also what gets furthest in practice: with it the coprocessor DMAs its
+syslog back, so the regions the driver adds plainly work.
+
+### The PCIe reference clock, which was the first wall
+
+ANS used to crash immediately:
+
       == Exception taken from EL1h ==
       ESR    = 0xbe000000
       FAR    = 0x600084000
       PC     = 0x6444
 
-ESR 0xbe000000 decodes to EC 0x2f, an SError. FAR is 0x600084000, which is
-exactly what SART entry 0 covers: that entry reads paddr 0x00600084, and
-shifted by 12 that is 0x600084000. So the firmware faults on the one region
-iBoot set aside for it.
+ESR 0xbe000000 is EC 0x2f, an SError. FAR 0x600084000 sits inside
+/arm-io/apcie, whose reg list includes 0x600080000 size 0x18000. NVMe here
+reaches its storage link through that block, so the firmware was faulting on
+PCIe registers that were not answering.
 
-That address is nowhere near DRAM, which starts at 0x800000000, and nothing in
-/proc/iomem claims it. Two things to try next, in order:
+The cause was the same one that hid the interrupt controller: nothing claims
+`ps_pcie_ref`. It has no parent domain, and the nvme node names `ps_ans2` and
+`ps_apcie_st`, whose own parents genpd pulls up for it. `ps_pcie_ref` is left
+with no users and gets switched off. Pinning it in `dts/t8020.dtsi` fixes it.
 
-1. Check whether v1's paddr shift is 12 at all. Everything above only
-   establishes the flags field width; the shift was assumed from v0 and v2.
-2. Check whether the firmware region survives the handover. iBEC uses NVMe, so
-   iBoot had ANS running, and PongoOS or m1n1 may leave the carveout or the
-   SART table in a state the firmware cannot restart from. m1n1 reserves
-   several regions near 0x8ea00000, none of them near 0x600084000.
+That is twice now that a domain nothing claims has been the root cause. When a
+block answers at probe and then misbehaves, check `ps_*` before anything else.
 
-Not worth another approach until one of those two is answered, because every
-other knob here is now pinned by hardware reads rather than guesswork.
+### Where it stops now
+
+With the clock pinned the firmware boots properly and talks:
+
+    RTKit: syslog message: pre_nand_eng.c:7119: MSP_SCD: Link speed drop recovery is not supported
+    RTKit: syslog message: cmd.c:5483:  boot mode normal
+    RTKit: syslog message: clog_v2.c:1342: Cxt Sync 0 Bands 1 1 FlowAccum 25 pendingBands 0
+    RTKit: Message (id=1): assert failed: [7442]:cmd fetch error for host 0
+           Admin SQ, rresp code 2, status_reg: 0x100
+
+That is real NAND engine firmware running. It then fails fetching the admin
+submission queue, and rresp 2 is a bus error on a DMA read of host memory.
+
+The likely cause is that the queues are never added to SART.
+`apple_nvme_sart_dma_setup()` only runs for RTKit shmem buffers, which is why
+the syslog works, while `apple_nvme_queue_alloc()` takes its `sqes` and `cqes`
+straight from `dmam_alloc_coherent()` with nothing permitting them. On T8103
+the NVMMU translates command addresses, so the question does not arise the same
+way; T8015 has no NVMMU and presumably relies on something else that T8020 does
+not do.
+
+Next step is to try adding the queue allocations to the allowed regions and see
+whether the admin queue starts being fetched.
+
+### A trap when reading these crash dumps
+
+ANS appears to keep its crashlog across a reset, and RTKit reports whatever it
+finds at init. One boot reported a PC and FAR identical to a crash from two
+boots earlier, which made a device tree change look like it had caused a
+regression when it may not have. Compare crash times, and do not trust a single
+boot's dump to describe that boot.
 
 ### Reading registers without a DFU cycle
 

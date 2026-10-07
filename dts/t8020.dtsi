@@ -284,10 +284,12 @@
 		 * at 28:24 but does fit v2's eight bit field at 31:24. The size
 		 * field decodes to 4 pages either way.
 		 *
-		 * The hardware agrees. With v2 ops the coprocessor manages to
-		 * DMA a crashlog back to us, which is how the crash below is
-		 * visible at all. With v0 ops nothing ever arrives and the boot
-		 * just times out, because ANS cannot reach the buffer.
+		 * v2 is also what gets furthest in practice: the coprocessor
+		 * DMAs its syslog back, so the allowed regions it adds plainly
+		 * work. Both v0 and v2 were first compared while the PCIe
+		 * reference clock was still being switched off underneath
+		 * them, so that earlier comparison proved nothing and was
+		 * redone afterwards.
 		 */
 		sart: iommu@27ac50000 {
 			compatible = "apple,t8103-sart";
@@ -297,9 +299,16 @@
 
 		/*
 		 * The driver has one variant for T8015, with no LSQ NVMMU and a
-		 * queue depth of 16, and one for T8103 with both. Nothing
-		 * readable says which side of that line A12 falls on, so this
-		 * follows A11 until the controller says otherwise.
+		 * queue depth of 16, and one for T8103 with both. T8015 is the
+		 * one that gets furthest: the firmware boots, logs "boot mode
+		 * normal" and starts reading NAND context. Claiming T8103
+		 * instead goes back to crashing early.
+		 *
+		 * Treat that comparison as weak evidence though. The T8103 run
+		 * reported the same PC and FAR as a crash from two boots
+		 * earlier, so ANS looks like it keeps its crashlog across a
+		 * reset and RTKit replays whatever it finds. Any single boot's
+		 * crash dump may belong to a previous one.
 		 */
 		nvme@27acc0000 {
 			compatible = "apple,t8015-nvme-ans2";
@@ -379,6 +388,23 @@
  * iOS DeviceTree, which has no equivalent property.
  */
 &ps_aic {
+	apple,always-on;
+};
+
+/*
+ * Keep the PCIe reference clock powered.
+ *
+ * NVMe lives behind ANS2, and ANS2 reaches the storage link through the APCIe
+ * block at 0x600080000. Nothing in this tree claims ps_pcie_ref: it has no
+ * parent domain, and the nvme node names ps_ans2 and ps_apcie_st, whose own
+ * parents genpd pulls up for it. So ps_pcie_ref is left with no users and
+ * genpd switches it off, exactly as it did to the interrupt controller.
+ *
+ * The ANS firmware then takes an SError on 0x600084000, which is inside the
+ * APCIe register window, and the driver reports "ANS did not boot" with a
+ * crashlog whose FAR is that address.
+ */
+&ps_pcie_ref {
 	apple,always-on;
 };
 

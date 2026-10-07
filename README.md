@@ -186,10 +186,11 @@ and [NOTES.md](NOTES.md#the-gadget-prints-are-load-bearing).
 
 ## Known gaps
 
-1. **NVMe.** Device tree is in and the whole stack probes: SART, mailbox and
-   RTKit all bind and talk. ANS2 boots its firmware and then crashes with an
-   SError on the region its own SART entry covers, so there is no `nvme0n1`
-   yet. See [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
+1. **NVMe.** Device tree is in and the stack works as far as the firmware:
+   SART, the mailbox and RTKit all bind, and ANS2 boots, logs `boot mode
+   normal` and starts reading NAND context. It then fails to fetch the admin
+   submission queue with a bus error, so there is no `nvme0n1` yet. See
+   [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
 2. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
 3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
    is in bypass. l41ka's author vendored m1n1's DART driver into their PongoOS
