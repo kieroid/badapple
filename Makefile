@@ -8,11 +8,9 @@
 # initramfs  download Hoolock's test initramfs
 # blob       concatenate m1n1, the device tree, the kernel and the initramfs
 # pongo      drive the phone from DFU to a PongoOS shell with l41ka
-# boot       send the blob to the PongoOS shell and chainload it
 # pc-boot    same, but over PongoOS's USB with the cable already on the PC
 # boot-m1n1  send m1n1 alone, leaving it parked in its USB proxy
 # proxy-boot load kernel, dtb and initramfs over m1n1's proxy (cable on the PC)
-# usbregs    dump the USB complex, the PHY and DWC2 from a parked m1n1
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -42,8 +40,8 @@ KBUILD := LLVM=1 ARCH=arm64
 # secondaries would never come up anyway. Drop it once SMP works.
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1
 
-.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot boot-m1n1 pc-boot \
-	proxy-boot usbregs clean
+.PHONY: check deps pmgr m1n1 kernel initramfs blob pongo boot-m1n1 pc-boot \
+	proxy-boot clean
 check: $(DTB)
 
 $(DTB): $(DTS) dts/t8020.dtsi dts/t8020-pmgr.dtsi
@@ -120,9 +118,6 @@ $(BLOB): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS)
 pongo:
 	build/venv/bin/python tools/chain.py pongo
 
-boot: $(BLOB)
-	build/venv/bin/python tools/chain.py boot $(BLOB)
-
 # The same boot, but driven from this PC over PongoOS's own USB gadget rather
 # than through the jig:
 #
@@ -177,11 +172,6 @@ PROXY := M1N1DEVICE=$(M1N1DEV) build/venv/bin/python $(M1N1_SRC)/proxyclient
 
 proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS)
 	$(PROXY)/tools/linux.py $(IMAGE) $(DTB) $(INITRAMFS) -b '$(BOOTARGS)'
-
-# Dump the USB complex, the AUSB PHY and the DWC2 core from a parked m1n1,
-# which is a working gadget on this silicon, to diff against what Linux leaves.
-usbregs:
-	M1N1DEVICE=$(M1N1DEV) build/venv/bin/python tools/usbregs.py
 
 clean:
 	rm -f $(DTB) $(PP) $(BLOB)

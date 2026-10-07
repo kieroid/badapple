@@ -82,11 +82,6 @@ About twenty seconds later the phone is up as `05ac:4142`. The host takes
 There is a getty on the CDC-ACM port too, as the `05ac:4142` `/dev/ttyACM*`
 rather than the jig's. It wants a keypress before it prints anything.
 
-Everything through the jig instead, which leaves dwc2 bound to the RP2350:
-
-    make pongo
-    make boot
-
 m1n1 alone, which is how its proxy becomes usable:
 
     make pongo
@@ -95,14 +90,9 @@ m1n1 alone, which is how its proxy becomes usable:
 
 It lands in `uartproxy_run()` and enumerates as `1209:316d`. Then:
 
-    make usbregs    # dump the USB complex, the PHY and DWC2
     make proxy-boot # load kernel, dtb and initramfs, no new DFU cycle
 
 One proxy session per m1n1 boot. A second one wedges it.
-
-Read registers out of a PongoOS shell, over the jig:
-
-    build/venv/bin/python tools/chain.py run "peek 0x239100008" "synopsys"
 
 ### When the chain starts failing
 
@@ -181,9 +171,6 @@ Dual licensed, `GPL-2.0+ OR MIT`. See [LICENSE](LICENSE).
 
 `patches/` is excluded: those are changes to other people's code and carry that
 code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT.
-
-`linux-0001` and `linux-0002` still carry a handful of `dev_info` calls from
-the gadget bring-up. Harmless, but they go before any of this is sent anywhere.
 
 ## Known gaps
 

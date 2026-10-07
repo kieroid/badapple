@@ -24,6 +24,7 @@ Usage:
     chain.py boot <image>       upload an image and run bootm
 """
 
+import contextlib
 import struct
 import sys
 import time
@@ -66,10 +67,8 @@ def reset_board():
     except GONE:
         pass  # it goes away as it resets, which is the point
     finally:
-        try:
+        with contextlib.suppress(Exception):
             client.close()
-        except Exception:  # noqa: BLE001
-            pass
     time.sleep(3.0)
 
 
@@ -157,17 +156,13 @@ def to_pongo(deadline):
                     raise SystemExit(f"unexpected stage {here}")
             except GONE as error:
                 print(f"  board went away ({error}), reopening")
-                try:
+                with contextlib.suppress(Exception):
                     client.close()
-                except Exception:  # noqa: BLE001
-                    pass
                 client = open_board()
                 seen = None
     finally:
-        try:
+        with contextlib.suppress(Exception):
             client.close()
-        except Exception:  # noqa: BLE001
-            pass
     raise SystemExit("gave up before reaching pongo")
 
 
@@ -204,36 +199,9 @@ def boot(image, deadline):
         except GONE as error:
             print(f"  board went away ({error}), reopening")
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 client.close()
-            except Exception:  # noqa: BLE001
-                pass
     raise SystemExit("gave up before booting")
-
-
-def run(commands, deadline):
-    """Run shell commands in PongoOS and print what they say.
-
-    This is the only place where a working USB gadget on this SoC can be
-    questioned directly: PongoOS brings its own up, which is how the board
-    talks to it at all. "synopsys" dumps the DWC2 registers and "peek" reads
-    any 32 bit register, so the USB complex, the PHY and the core can all be
-    read out of a setup that works, rather than guessed at one DFU cycle at a
-    time.
-    """
-    client = open_board()
-    try:
-        for command in commands:
-            print(f"\n=== {command} ===")
-            client.request(L.DEVICE_PONGO_SEND_COMMAND,
-                           struct.pack("<I", TIMEOUT_MS) + command.encode(),
-                           TIMEOUT_MS)
-            L.drain_pongo_output(client, TIMEOUT_MS)
-    finally:
-        try:
-            client.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def main():
@@ -246,12 +214,9 @@ def main():
     elif what == "boot":
         to_pongo(deadline)
         boot(Path(sys.argv[2]), deadline)
-    elif what == "run":
-        to_pongo(deadline)
-        run(sys.argv[2:], deadline)
     else:
         raise SystemExit(
-            f"usage: {sys.argv[0]} pongo | boot <image> | run <command>...")
+            f"usage: {sys.argv[0]} pongo | boot <image>")
 
 
 if __name__ == "__main__":
