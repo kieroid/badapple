@@ -1,5 +1,5 @@
 diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
-index 102169b40..ce76d5b6e 100644
+index 102169b40..45339f62a 100644
 --- a/drivers/usb/dwc2/gadget.c
 +++ b/drivers/usb/dwc2/gadget.c
 @@ -22,6 +22,7 @@
@@ -10,51 +10,7 @@ index 102169b40..ce76d5b6e 100644
  
  #include <linux/usb/ch9.h>
  #include <linux/usb/gadget.h>
-@@ -3705,6 +3706,34 @@ static void dwc2_gadget_handle_incomplete_isoc_out(struct dwc2_hsotg *hsotg)
-  * @irq: The IRQ number triggered
-  * @pw: The pw value when registered the handler.
-  */
-+/*
-+ * The host sees the attach and the high speed chirp but every control
-+ * transfer times out, which is what it looks like when nothing services the
-+ * bus. Count interrupts so a dump can tell "the handler never runs" apart
-+ * from "it runs and gets nowhere".
-+ */
-+static unsigned int apple_irq_count;
-+static struct dwc2_hsotg *apple_dbg_hsotg;
-+static int apple_dbg_left;
-+
-+static void apple_dbg_dump(struct work_struct *work)
-+{
-+	struct dwc2_hsotg *hsotg = apple_dbg_hsotg;
-+
-+	dev_info(hsotg->dev,
-+		 "apple dbg: irqs=%u GINTSTS=0x%08x GINTMSK=0x%08x DSTS=0x%08x DCFG=0x%08x DCTL=0x%08x DAINT=0x%08x\n",
-+		 apple_irq_count, dwc2_readl(hsotg, GINTSTS),
-+		 dwc2_readl(hsotg, GINTMSK), dwc2_readl(hsotg, DSTS),
-+		 dwc2_readl(hsotg, DCFG), dwc2_readl(hsotg, DCTL),
-+		 dwc2_readl(hsotg, DAINT));
-+
-+	if (--apple_dbg_left > 0)
-+		schedule_delayed_work(to_delayed_work(work),
-+				      msecs_to_jiffies(4000));
-+}
-+
-+static DECLARE_DELAYED_WORK(apple_dbg_work, apple_dbg_dump);
-+
- static irqreturn_t dwc2_hsotg_irq(int irq, void *pw)
- {
- 	struct dwc2_hsotg *hsotg = pw;
-@@ -3712,6 +3741,8 @@ static irqreturn_t dwc2_hsotg_irq(int irq, void *pw)
- 	u32 gintsts;
- 	u32 gintmsk;
- 
-+	apple_irq_count++;
-+
- 	if (!dwc2_is_device_mode(hsotg))
- 		return IRQ_NONE;
- 
-@@ -4577,6 +4608,56 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
+@@ -4577,6 +4578,56 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
  	}
  
  	hsotg->enabled = 0;
@@ -111,7 +67,7 @@ index 102169b40..ce76d5b6e 100644
  	spin_unlock_irqrestore(&hsotg->lock, flags);
  
  	gadget->sg_supported = using_desc_dma(hsotg);
-@@ -4705,6 +4786,27 @@ static int dwc2_hsotg_pullup(struct usb_gadget *gadget, int is_on)
+@@ -4705,6 +4756,23 @@ static int dwc2_hsotg_pullup(struct usb_gadget *gadget, int is_on)
  		/* Enable ACG feature in device mode,if supported */
  		dwc2_enable_acg(hsotg);
  		dwc2_hsotg_core_connect(hsotg);
@@ -132,10 +88,6 @@ index 102169b40..ce76d5b6e 100644
 +			 "pullup on: DCTL=0x%08x GAHBCFG=0x%08x GOTGCTL=0x%08x GINTSTS=0x%08x\n",
 +			 dwc2_readl(hsotg, DCTL), dwc2_readl(hsotg, GAHBCFG),
 +			 dwc2_readl(hsotg, GOTGCTL), dwc2_readl(hsotg, GINTSTS));
-+
-+		apple_dbg_hsotg = hsotg;
-+		apple_dbg_left = 6;
-+		schedule_delayed_work(&apple_dbg_work, msecs_to_jiffies(4000));
  	} else {
  		dwc2_hsotg_core_disconnect(hsotg);
  		dwc2_hsotg_disconnect(hsotg);

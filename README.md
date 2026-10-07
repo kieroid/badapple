@@ -13,15 +13,32 @@ Detailed findings, register dumps and the debugging history are in
 
 ## Status
 
-Linux 7.3.0-rc1 boots on one Vortex core with a framebuffer console. UART0, the
-generated power domains and the handover framebuffer are all confirmed working.
+It boots to a root shell.
 
-Linux's USB gadget now reaches the host: it sees the attach and the high speed
-chirp, and dwc2 takes register writes. It does not enumerate yet, because no
-AIC interrupt is ever delivered, so nothing services the bus and every control
-transfer times out. See [NOTES.md](NOTES.md#no-aic-interrupt-is-ever-delivered).
+Linux 7.3.0-rc1 runs on one Vortex core with a framebuffer console. UART0, the
+generated power domains, the handover framebuffer, AIC interrupts and the USB
+gadget all work. The gadget enumerates as `05ac:4142` and brings up a CDC-NCM
+network interface alongside a CDC-ACM serial port, so the phone answers on
+`172.16.42.1`:
 
-m1n1's own gadget does work, which is what `usbregs` and `proxy-boot` use.
+    telnet 172.16.42.1
+
+    HoolockLinux test ramdisk shell
+
+    ~ # uname -a; id
+    Linux (none) 7.3.0-rc1 #33 SMP PREEMPT aarch64 Linux
+    uid=0 gid=0
+
+Interrupts arrive on both devices that have them:
+
+      34:      10926  AIC-FIQ     1 Level     arch_timer
+      35:          5  AIC      65922 Level     235200000.serial
+      36:        284  AIC      65987 Level     239100000.usbdev
+
+m1n1's own gadget also works, which is what `proxy-boot` uses.
+
+That is the scope this port set out to reach. What is left is hardening: SMP,
+the gaps listed at the end, and making the patches fit to send upstream.
 
 ## Boot chain
 
@@ -56,6 +73,14 @@ up with the cable on the host for the whole boot:
     make pongo      # jig: DFU to a PongoOS shell
                     # move the Lightning cable from the jig to this PC
     make pc-boot    # upload and chainload over PongoOS's gadget (05ac:4141)
+
+About twenty seconds later the phone is up as `05ac:4142`. The host takes
+`172.16.42.2` by DHCP from it, and the shell is on the other end:
+
+    telnet 172.16.42.1
+
+There is a getty on the CDC-ACM port too, as the `05ac:4142` `/dev/ttyACM*`
+rather than the jig's. It wants a keypress before it prints anything.
 
 Everything through the jig instead, which leaves dwc2 bound to the RP2350:
 
@@ -157,22 +182,20 @@ Dual licensed, `GPL-2.0+ OR MIT`. See [LICENSE](LICENSE).
 `patches/` is excluded: those are changes to other people's code and carry that
 code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT.
 
-`linux-0002` and `linux-0003` still carry debug scaffolding, an interrupt
-counter and a periodic register dump. Both go once the interrupt is delivered.
+`linux-0001` and `linux-0002` still carry a handful of `dev_info` calls from
+the gadget bring-up. Harmless, but they go before any of this is sent anywhere.
 
 ## Known gaps
 
-1. **AIC interrupts.** None are delivered, so the gadget attaches but never
-   enumerates. Blocks the shell.
-2. **Nothing applies `patches/`.** A clean checkout builds m1n1 and the kernel
+1. **Nothing applies `patches/`.** A clean checkout builds m1n1 and the kernel
    unpatched and will not boot.
-3. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
-4. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
+2. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
+3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
    is in bypass. l41ka's author vendored m1n1's DART driver into their PongoOS
    fork, which suggests that assumption is wrong.
-5. **cpufreq.** Needs measured A12 operating points. Cluster controllers at
+4. **cpufreq.** Needs measured A12 operating points. Cluster controllers at
    0x210e20000 and 0x211e20000.
-6. **Chicken bits.** A12 Vortex and Tempest are MIDR parts 0xb and 0xc. Fine
+5. **Chicken bits.** A12 Vortex and Tempest are MIDR parts 0xb and 0xc. Fine
    for bring-up, not for stability.
-7. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
+6. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
    framebuffer includes the notch area. Cosmetic.

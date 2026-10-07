@@ -1,5 +1,5 @@
 diff --git a/drivers/irqchip/irq-apple-aic.c b/drivers/irqchip/irq-apple-aic.c
-index 4a3141d9f..d5946fdc9 100644
+index 4a3141d9f..e3cbb601a 100644
 --- a/drivers/irqchip/irq-apple-aic.c
 +++ b/drivers/irqchip/irq-apple-aic.c
 @@ -386,6 +386,7 @@ static void aic_irq_unmask(struct irq_data *d)
@@ -37,11 +37,11 @@ index 4a3141d9f..d5946fdc9 100644
  
 -	aic_ic_write(ic, ic->info.target_cpu + AIC_HWIRQ_IRQ(hwirq) * 4, BIT(cpu));
 +	/*
-+	 * ponytail: leave TARGET_CPU as iBoot set it, revisit once its
-+	 * semantics are known. Neither BIT(0) nor BIT(whoami) gets an
-+	 * interrupt delivered here, and PongoOS takes interrupts on this SoC
-+	 * without ever writing this register, so iBoot's value is the only
-+	 * one known to work. With maxcpus=1 there is nothing to steer.
++	 * ponytail: leave TARGET_CPU as iBoot set it. PongoOS takes interrupts
++	 * on this SoC without ever writing this register, and with maxcpus=1
++	 * there is nothing to steer. Reading it back for some hwirqs raises a
++	 * synchronous external abort, so its layout here is not understood.
++	 * Revisit when bringing up the other cores.
 +	 */
  	irq_data_update_effective_affinity(d, cpumask_of(cpu));
  
@@ -56,7 +56,7 @@ index 4a3141d9f..d5946fdc9 100644
  }
  
  static int __init aic_init_smp(struct aic_irq_chip *irqc, struct device_node *node)
-@@ -892,12 +914,9 @@ static int aic_init_cpu(unsigned int cpu)
+@@ -892,12 +914,7 @@ static int aic_init_cpu(unsigned int cpu)
  	isb();
  
  	if (aic_irqc->info.version == 1) {
@@ -67,31 +67,10 @@ index 4a3141d9f..d5946fdc9 100644
 -		 */
 -		WARN_ON(aic_ic_read(aic_irqc, AIC_WHOAMI) != smp_processor_id());
 +		__this_cpu_write(aic_cpu_index, aic_ic_read(aic_irqc, AIC_WHOAMI));
-+		pr_info("aic: logical cpu %u is aic cpu %u\n", smp_processor_id(),
-+			aic_ic_read(aic_irqc, AIC_WHOAMI));
  
  		/*
  		 * Always keep IPIs unmasked at the hardware level (except auto-masking
-@@ -1067,6 +1086,18 @@ static int __init aic_of_ic_init(struct device_node *node, struct device_node *p
- 	}
- 	of_node_put(affs);
- 
-+	/*
-+	 * Bit 0 of AIC_CONFIG is the controller's global enable, and on an
-+	 * iPhone it is not on by the time Linux runs: PongoOS sets it in its
-+	 * own interrupt_init() and clears it again on the way out. Without it
-+	 * AIC accepts every mask and target write and delivers nothing, so
-+	 * every driver looks like it has a dead interrupt line. The other
-+	 * three bits are what PongoOS sets alongside it.
-+	 */
-+	if (irqc->info.version == 1)
-+		aic_ic_write(irqc, AIC_CONFIG,
-+			     aic_ic_read(irqc, AIC_CONFIG) | 0xe0000001);
-+
- 	set_handle_irq(aic_handle_irq);
- 	set_handle_fiq(aic_handle_fiq);
- 
-@@ -1076,9 +1107,7 @@ static int __init aic_of_ic_init(struct device_node *node, struct device_node *p
+@@ -1076,9 +1093,7 @@ static int __init aic_of_ic_init(struct device_node *node, struct device_node *p
  			aic_ic_write(irqc, irqc->info.mask_set + off + i * 4, U32_MAX);
  		for (i = 0; i < BITS_TO_U32(irqc->nr_irq); i++)
  			aic_ic_write(irqc, irqc->info.sw_clr + off + i * 4, U32_MAX);
