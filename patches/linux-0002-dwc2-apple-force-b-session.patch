@@ -1,5 +1,5 @@
 diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
-index 102169b40..ef7d2158d 100644
+index 102169b40..af5e6a294 100644
 --- a/drivers/usb/dwc2/gadget.c
 +++ b/drivers/usb/dwc2/gadget.c
 @@ -22,6 +22,7 @@
@@ -10,7 +10,7 @@ index 102169b40..ef7d2158d 100644
  
  #include <linux/usb/ch9.h>
  #include <linux/usb/gadget.h>
-@@ -4577,6 +4578,37 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
+@@ -4577,6 +4578,73 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
  	}
  
  	hsotg->enabled = 0;
@@ -35,20 +35,56 @@ index 102169b40..ef7d2158d 100644
 +		hsotg->enabled = 1;
 +
 +		/*
++		 * ponytail: these prints are load bearing, which nobody wants
++		 * and nobody has yet proved otherwise. Removing them, with no
++		 * other change at all, takes the gadget from enumerating to
++		 * stopping dead after "new device is high-speed", with the
++		 * host reporting "device descriptor read/64, error -110".
++		 *
++		 * The console is a 155x168 simpledrm framebuffer, so each of
++		 * these costs milliseconds, and that is the only thing between
++		 * dwc2_force_mode(), dwc2_hsotg_core_connect() and the manual
++		 * SFTDISCON clear below. Upstream's own waits are evidently not
++		 * enough for this core.
++		 *
++		 * The fix is to work out which gap actually matters and put a
++		 * real delay there. Until someone spends the DFU cycles to
++		 * bisect it, leave every one of them alone.
++		 */
++		dev_info(hsotg->dev,
++			 "apple: before: GOTGCTL=0x%08x DCTL=0x%08x GINTSTS=0x%08x curmod=%d\n",
++			 dwc2_readl(hsotg, GOTGCTL), dwc2_readl(hsotg, DCTL),
++			 dwc2_readl(hsotg, GINTSTS),
++			 !!(dwc2_readl(hsotg, GINTSTS) & GINTSTS_CURMODE_HOST));
++		dev_info(hsotg->dev,
++			 "apple: GRSTCTL=0x%08x GAHBCFG=0x%08x GUSBCFG=0x%08x PCGCTL=0x%08x\n",
++			 dwc2_readl(hsotg, GRSTCTL), dwc2_readl(hsotg, GAHBCFG),
++			 dwc2_readl(hsotg, GUSBCFG), dwc2_readl(hsotg, PCGCTL));
++
++		/*
 +		 * Device registers are inert while the core sits in host mode,
 +		 * which is why DCTL writes were being swallowed. Force device
 +		 * mode before touching anything else.
 +		 */
 +		dwc2_force_mode(hsotg, false);
++		dev_info(hsotg->dev, "apple: after force device mode: curmod=%d DCTL=0x%08x\n",
++			 !!(dwc2_readl(hsotg, GINTSTS) & GINTSTS_CURMODE_HOST),
++			 dwc2_readl(hsotg, DCTL));
++
 +		dwc2_hsotg_core_connect(hsotg);
++		dev_info(hsotg->dev, "apple: after core_connect: DCTL=0x%08x\n",
++			 dwc2_readl(hsotg, DCTL));
++
 +		/* Clear it by hand too, in case core_connect declined. */
 +		dwc2_clear_bit(hsotg, DCTL, DCTL_SFTDISCON);
++		dev_info(hsotg->dev, "apple: after manual clear: DCTL=0x%08x\n",
++			 dwc2_readl(hsotg, DCTL));
 +	}
 +
  	spin_unlock_irqrestore(&hsotg->lock, flags);
  
  	gadget->sg_supported = using_desc_dma(hsotg);
-@@ -4705,6 +4737,18 @@ static int dwc2_hsotg_pullup(struct usb_gadget *gadget, int is_on)
+@@ -4705,6 +4773,23 @@ static int dwc2_hsotg_pullup(struct usb_gadget *gadget, int is_on)
  		/* Enable ACG feature in device mode,if supported */
  		dwc2_enable_acg(hsotg);
  		dwc2_hsotg_core_connect(hsotg);
@@ -64,6 +100,11 @@ index 102169b40..ef7d2158d 100644
 +		 * enumeration cannot complete.
 +		 */
 +		dwc2_set_bit(hsotg, GAHBCFG, GAHBCFG_GLBL_INTR_EN);
++
++		dev_info(hsotg->dev,
++			 "pullup on: DCTL=0x%08x GAHBCFG=0x%08x GOTGCTL=0x%08x GINTSTS=0x%08x\n",
++			 dwc2_readl(hsotg, DCTL), dwc2_readl(hsotg, GAHBCFG),
++			 dwc2_readl(hsotg, GOTGCTL), dwc2_readl(hsotg, GINTSTS));
  	} else {
  		dwc2_hsotg_core_disconnect(hsotg);
  		dwc2_hsotg_disconnect(hsotg);

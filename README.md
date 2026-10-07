@@ -172,6 +172,10 @@ Dual licensed, `GPL-2.0+ OR MIT`. See [LICENSE](LICENSE).
 `patches/` is excluded: those are changes to other people's code and carry that
 code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT.
 
+`linux-0002` keeps six `dev_info` calls that look like leftover debugging and
+are not: removing them stops the gadget enumerating. See the comment on them,
+and [NOTES.md](NOTES.md#the-gadget-prints-are-load-bearing).
+
 ## Known gaps
 
 1. **Nothing applies `patches/`.** A clean checkout builds m1n1 and the kernel

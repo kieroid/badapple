@@ -296,6 +296,28 @@ The ACM getty blocks on a read before it prints anything, by design, so an
 idle `/dev/ttyACM*` that says nothing is not a fault. Note there are two ACM
 devices: the jig is `4141:4c41` and the phone is `05ac:4142`.
 
+## The gadget prints are load bearing
+
+The six `dev_info` calls `linux-0002` adds to `dwc2_hsotg_udc_start()` and
+`dwc2_hsotg_pullup()` read like leftover bring-up debugging. They were removed
+on exactly that reasoning, as a tidy-up, with no other change in the build. The
+gadget stopped enumerating:
+
+    dwc2 239100000.usbdev: new device is high-speed
+
+and then nothing, with the host reporting `device descriptor read/64, error
+-110` and `device not accepting address N, error -62`. Putting them back, with
+nothing else changed, enumerates again on the next boot.
+
+The console is a 155x168 simpledrm framebuffer, so each of those prints costs
+milliseconds, and they are the only thing separating `dwc2_force_mode()`,
+`dwc2_hsotg_core_connect()` and the manual `DCTL_SFTDISCON` clear. Upstream's
+own waits are evidently not enough for this core.
+
+So they are delays wearing a print's clothing. The real fix is to find which
+gap matters and put an explicit delay there, which costs a DFU cycle per guess.
+Until someone does that, leave all six alone.
+
 ## Corrections
 
 Things this repo previously asserted that are wrong.
