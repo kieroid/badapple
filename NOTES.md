@@ -85,7 +85,8 @@ layout, 0x108 at 0x1c and 0x5c, from reading PongoOS's `iOS15` branch where
 
 ## A working gadget on this SoC
 
-From `make usbregs` against a parked m1n1 the PC has enumerated:
+Dumped from a parked m1n1 that the PC had enumerated, back when the Linux
+gadget did not work and the two needed comparing:
 
     GAHBCFG  0x0000002e      DCTL  0x00000000      DCFG  0x00000074
     DSTS     0x002c7e00      GSNPSID 0x4f54300a
