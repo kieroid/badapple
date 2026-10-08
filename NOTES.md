@@ -490,6 +490,11 @@ there got this on the third admin command:
 
 So fill by slot, invalidate by tag.
 
+The `NVME_PERM_ERR` had also been read as a SART denial, and for a while the
+driver permitted all of DRAM to ANS on that basis. It was never the SART. With
+the slot fixed, one SART entry per queue is enough and data buffers need none,
+because they reach the firmware through the NVMMU.
+
 Ruled out before this was found, all of which can now be put down to the slot:
 IO queue depth 64 and 16, `CC.IOSQES` 6 and 7, 64 and 128 byte entries,
 `NUM_TCBS` 15 and 63, the 0x1200 and 0x1208 base registers in either order,
@@ -735,8 +740,7 @@ not the exception level we are handed.
 
 1. **NVMe writes.** Reads work, see
    [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up). Nothing has been written
-   yet, and the SART permits the whole of DRAM, which is fine for a
-   development phone and nothing else.
+   yet.
 2. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
 3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
    is in bypass. l41ka's author vendored m1n1's DART driver into their PongoOS
