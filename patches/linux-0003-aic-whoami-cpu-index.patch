@@ -1,5 +1,5 @@
 diff --git a/drivers/irqchip/irq-apple-aic.c b/drivers/irqchip/irq-apple-aic.c
-index 4a3141d9f..e3cbb601a 100644
+index 4a3141d9f..1f085e7bb 100644
 --- a/drivers/irqchip/irq-apple-aic.c
 +++ b/drivers/irqchip/irq-apple-aic.c
 @@ -386,6 +386,7 @@ static void aic_irq_unmask(struct irq_data *d)
@@ -31,22 +31,17 @@ index 4a3141d9f..e3cbb601a 100644
  static int aic_irq_set_affinity(struct irq_data *d,
  				const struct cpumask *mask_val, bool force)
  {
-@@ -456,7 +471,13 @@ static int aic_irq_set_affinity(struct irq_data *d,
+@@ -456,7 +471,8 @@ static int aic_irq_set_affinity(struct irq_data *d,
  	else
  		cpu = cpumask_any_and(mask_val, cpu_online_mask);
  
 -	aic_ic_write(ic, ic->info.target_cpu + AIC_HWIRQ_IRQ(hwirq) * 4, BIT(cpu));
-+	/*
-+	 * ponytail: leave TARGET_CPU as iBoot set it. PongoOS takes interrupts
-+	 * on this SoC without ever writing this register, and with maxcpus=1
-+	 * there is nothing to steer. Reading it back for some hwirqs raises a
-+	 * synchronous external abort, so its layout here is not understood.
-+	 * Revisit when bringing up the other cores.
-+	 */
++	aic_ic_write(ic, ic->info.target_cpu + AIC_HWIRQ_IRQ(hwirq) * 4,
++		     BIT(per_cpu(aic_cpu_index, cpu)));
  	irq_data_update_effective_affinity(d, cpumask_of(cpu));
  
  	return IRQ_SET_MASK_OK;
-@@ -840,7 +861,8 @@ static void aic_ipi_send_single(unsigned int cpu)
+@@ -840,7 +856,8 @@ static void aic_ipi_send_single(unsigned int cpu)
  	if (static_branch_likely(&use_fast_ipi))
  		aic_ipi_send_fast(cpu);
  	else
@@ -56,7 +51,7 @@ index 4a3141d9f..e3cbb601a 100644
  }
  
  static int __init aic_init_smp(struct aic_irq_chip *irqc, struct device_node *node)
-@@ -892,12 +914,7 @@ static int aic_init_cpu(unsigned int cpu)
+@@ -892,12 +909,7 @@ static int aic_init_cpu(unsigned int cpu)
  	isb();
  
  	if (aic_irqc->info.version == 1) {
@@ -70,14 +65,36 @@ index 4a3141d9f..e3cbb601a 100644
  
  		/*
  		 * Always keep IPIs unmasked at the hardware level (except auto-masking
-@@ -1076,9 +1093,7 @@ static int __init aic_of_ic_init(struct device_node *node, struct device_node *p
+@@ -1076,9 +1088,30 @@ static int __init aic_of_ic_init(struct device_node *node, struct device_node *p
  			aic_ic_write(irqc, irqc->info.mask_set + off + i * 4, U32_MAX);
  		for (i = 0; i < BITS_TO_U32(irqc->nr_irq); i++)
  			aic_ic_write(irqc, irqc->info.sw_clr + off + i * 4, U32_MAX);
 -		if (irqc->info.target_cpu)
--			for (i = 0; i < irqc->nr_irq; i++)
++		/*
++		 * Point every interrupt at CPU0.
++		 *
++		 * Dropping this loop looked harmless because the mailbox and
++		 * the UART kept working, but those are the lines iBoot had
++		 * already aimed here. The ANS completion interrupt, hwirq 371,
++		 * was aimed somewhere else, so with maxcpus=1 it was raised on
++		 * a core that never runs: the NVMe admin command completed in
++		 * memory and the handler was never entered once.
++		 *
++		 * The target is a mask over AIC's own CPU numbering, not the
++		 * kernel's, so this is BIT(AIC_WHOAMI) for the core running
++		 * init rather than the BIT(0) upstream writes. Writing 1 here
++		 * aims everything at a Tempest core and even the mailbox stops
++		 * being delivered.
++		 */
++		if (irqc->info.target_cpu) {
++			u32 self = BIT(aic_ic_read(irqc, AIC_WHOAMI));
++
+ 			for (i = 0; i < irqc->nr_irq; i++)
 -				aic_ic_write(irqc, irqc->info.target_cpu + off + i * 4, 1);
-+		/* ponytail: see aic_irq_set_affinity, targets are left as found. */
++				aic_ic_write(irqc,
++					     irqc->info.target_cpu + off + i * 4,
++					     self);
++		}
  		off += irqc->info.die_stride;
  	}
  

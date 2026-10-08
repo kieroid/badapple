@@ -102,11 +102,25 @@ kernel: $(IMAGE)
 # NBD is disabled because nbd_init hangs the boot on this device: with
 # initcall_debug the last line on screen is "calling nbd_init+0x0/0x194" and
 # nothing follows. Hoolock ships it enabled for pmOS netboot, which we do not
-# use. This has to be reapplied after the config copy, otherwise it is silently
+# use.
+#
+# NVME_HWMON is disabled because its SMART log page is the one command that
+# kills the ANS firmware on this phone:
+#
+#   assert failed: [11956]:NVME_PERM_ERR F2H 1 SL[0] ERR 0x408 ... LBA 0x64013200
+#
+# It reads flash to answer, and this NAND has been through a lot of unclean
+# resets, so the read fails and takes RTKit down with it. nvme_init_ctrl_finish
+# turns the resulting -EINTR into a failed controller reset even though the
+# comment above it says hwmon is optional, so the whole controller is lost over
+# a temperature reading. Nothing here wants one.
+#
+# Both have to be reapplied after the config copy, otherwise they are silently
 # undone on the next build.
 $(IMAGE):
 	cp $(CONFIG_16K) $(KDIR)/.config
 	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD
+	cd $(KDIR) && ./scripts/config --disable CONFIG_NVME_HWMON
 	$(MAKE) -C $(KDIR) $(KBUILD) olddefconfig
 	$(MAKE) -C $(KDIR) $(KBUILD) -j$$(nproc) Image.gz
 

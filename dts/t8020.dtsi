@@ -311,7 +311,7 @@
 		 * crash dump may belong to a previous one.
 		 */
 		nvme@27acc0000 {
-			compatible = "apple,t8015-nvme-ans2";
+			compatible = "apple,t8020-nvme-ans2";
 			reg = <0x2 0x7acc0000 0x0 0x60000>,
 			      <0x2 0x77400000 0x0 0x4000>;
 			reg-names = "nvme", "ans";
@@ -405,6 +405,31 @@
  * crashlog whose FAR is that address.
  */
 &ps_pcie_ref {
+	apple,always-on;
+};
+
+/*
+ * Keep the whole APCIe complex powered.
+ *
+ * The reference clock alone was not enough: the SError on 0x600084000 came
+ * back intermittently, so one boot in two or three still lost the window
+ * before ANS reached it. There is no apcie node in this tree, which means no
+ * driver owns any of these domains. ps_apcie_st is the one the nvme node
+ * names, and genpd pulls its parents ps_apcie and ps_imx up with it, but
+ * ps_apcie_gp has no user at all and the whole set is at genpd's mercy for
+ * ordering. Pinning all three takes the power manager out of the question;
+ * iBoot has already trained the link by the time Linux starts, so nothing
+ * here needs to bring the complex up, only to leave it alone.
+ */
+&ps_apcie {
+	apple,always-on;
+};
+
+&ps_apcie_gp {
+	apple,always-on;
+};
+
+&ps_apcie_st {
 	apple,always-on;
 };
 

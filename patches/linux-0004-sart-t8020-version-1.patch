@@ -1,8 +1,8 @@
 diff --git a/drivers/soc/apple/sart.c b/drivers/soc/apple/sart.c
-index 66b99955b..2b0477dd5 100644
+index 66b99955b..168f40050 100644
 --- a/drivers/soc/apple/sart.c
 +++ b/drivers/soc/apple/sart.c
-@@ -140,6 +140,30 @@ static void sart2_set_entry(struct apple_sart *sart, int index, u8 flags,
+@@ -140,6 +140,33 @@ static void sart2_set_entry(struct apple_sart *sart, int index, u8 flags,
  	writel(cfg, sart->regs + APPLE_SART2_CONFIG(index));
  }
  
@@ -16,10 +16,13 @@ index 66b99955b..2b0477dd5 100644
 + *
 + * What differs is the allow value. v2 writes 0xff, and this part never does:
 + * iBoot uses 0x2f for an MMIO window, 0x6a for what looks like the firmware
-+ * image, and 0x6f for data buffers. Writing 0xff produces an entry the
-+ * controller does not honour, and the ANS firmware then fails its first fetch
-+ * of the admin submission queue with "rresp code 2", a bus error on a DMA
-+ * read. Use the value the part itself uses for data.
++ * image, and 0x6f for data buffers, so 0x6f is what a data region gets here.
++ *
++ * This was once credited with fixing the firmware's "rresp code 2" on its
++ * first fetch of the admin submission queue. It does not: that was a stale
++ * queue address left by iBoot, and 0xff behaves the same as 0x6f on this part
++ * as far as anything here can tell. Matching the bootloader is still the right
++ * default for a field whose bits are unknown.
 + */
 +static struct apple_sart_ops sart_ops_v1 = {
 +	.get_entry = sart2_get_entry,
@@ -33,7 +36,7 @@ index 66b99955b..2b0477dd5 100644
  static struct apple_sart_ops sart_ops_v2 = {
  	.get_entry = sart2_get_entry,
  	.set_entry = sart2_set_entry,
-@@ -289,8 +313,8 @@ int apple_sart_add_allowed_region(struct apple_sart *sart, phys_addr_t paddr,
+@@ -289,8 +316,8 @@ int apple_sart_add_allowed_region(struct apple_sart *sart, phys_addr_t paddr,
  			return ret;
  		}
  
@@ -44,7 +47,7 @@ index 66b99955b..2b0477dd5 100644
  		return 0;
  	}
  
-@@ -360,6 +384,10 @@ static const struct of_device_id apple_sart_of_match[] = {
+@@ -360,6 +387,10 @@ static const struct of_device_id apple_sart_of_match[] = {
  		.compatible = "apple,t8103-sart",
  		.data = &sart_ops_v2,
  	},

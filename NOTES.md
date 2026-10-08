@@ -50,6 +50,16 @@ core reports MPIDR `0x80010100`, so cluster 1 core 0 is `0x10100`.
 With the ADT values taken at face value, m1n1 prunes all six CPU nodes
 including the one it is running on, and Linux gets a tree with no CPUs.
 
+## Driving the shell from scripts
+
+`tools/tsh.py` runs one command on the phone's telnet shell and prints what
+comes back, so a boot can be checked without typing into a terminal:
+
+    python3 tools/tsh.py "dmesg | grep nvme"
+
+`telnetlib` left the standard library in 3.13 and all this needs is to refuse
+every option the server offers, so the negotiation is inline.
+
 ## The two consoles
 
 - **Output**: the framebuffer m1n1 hands over from iBoot, as
@@ -361,8 +371,123 @@ PCIe. The stack is SART, then an RTKit mailbox, then ANS2, then `nvme-apple`.
 All four are already in the Hoolock kernel and enabled in `config_16k`, so the
 work is device tree plus working out where T8020 sits between T8015 and T8103.
 
-It is not finished. The current state is that RTKit talks, the coprocessor
-boots its firmware, and the firmware then takes an SError and crashes.
+It is not finished, but it is close. The admin queue now works end to end:
+RTKit talks, the firmware boots clean, Identify Controller and Set Features
+both complete, and Create IO CQ is accepted. Create IO SQ comes back with
+status 2, invalid field, and that is the only thing between here and a block
+device.
+
+Seven separate faults stood between the first attempt and that point, and each
+one hid the next, so the order below is the order they were found in.
+
+### 1. iBoot leaves its own admin queue programmed
+
+The first failure looked like a permissions problem:
+
+    assert failed: [7442]:cmd fetch error for host 0 Admin SQ, rresp code 2
+
+`rresp` 2 is an AXI SLVERR, a refused read. Reading the NVMe block on entry to
+`apple_nvme_reset_work` showed why:
+
+    CC=0x474000 CSTS=0x0 AQA=0xf000f ASQ=0x8788e0000 ACQ=0x8788e1000
+
+Those are iBoot's values, still live, because the coprocessor reset does not
+clear the NVMe register block. The firmware fetches from whatever `ASQ` holds
+the moment it finishes booting, which is well before Linux writes its own, and
+iBoot's queue is no longer in the SART allow list. Writing our own `AQA`,
+`ASQ` and `ACQ` before releasing the coprocessor fixes it.
+
+### 2. The APCIe complex has to stay powered
+
+With that fixed the firmware got further and then took an SError:
+
+    == Exception taken from EL1h ==  ESR = 0xbe000000  FAR = 0x600084000
+
+`0x600084000` is APCIe port 0's second register window, and it is exactly what
+SART bootloader entry 0 permits, so that is how ANS reaches the storage link.
+Pinning `ps_pcie_ref` was not enough and the fault came back every second or
+third boot. `ps_apcie`, `ps_apcie_gp` and `ps_apcie_st` are all pinned now. No
+driver in this tree owns the complex, iBoot has already trained the link, so
+the only thing Linux needs to do is leave it alone.
+
+### 3. T8020 has the NVMMU but not the linear submission queue
+
+`apple_nvme_hw` had a single `has_lsq_nvmmu` flag for two features that
+arrived at different times. On entry iBoot leaves:
+
+    LINEAR_SQ_CTRL=0x0  NVMMU_NUM_TCBS=0x3f
+
+so this part has the NVMMU and submits through an ordinary ring. Proved by
+contradiction: building with the flag off brings the `cmd fetch error` back,
+building with it on does not. The flag is now two, `has_nvmmu` and
+`has_linear_sq`, and T8020 is the first part to set one without the other.
+
+### 4. The AIC never pointed the completion interrupt at this core
+
+With the NVMMU programmed the firmware ran the command and posted a valid
+completion, and the driver never saw it:
+
+    queue at timeout: sq_tail=1 cq_head=0 cq_phase=1 cqe[0]=... 0001
+    irq 39 entered 0 times, polling by hand completed the request
+
+This was self inflicted. `aic_irq_set_affinity` had been cut down to not write
+`AIC_TARGET_CPU`, on the grounds that the mailbox and the UART worked without
+it. They worked because iBoot had already aimed those lines at the boot core.
+Nothing had aimed hwirq 371.
+
+Restoring the upstream write was not enough either: upstream writes `BIT(0)`,
+and on an iPhone the boot core is cluster 1 core 0, which AIC numbers
+differently. Writing 1 aims everything at a Tempest core and even the mailbox
+stops arriving. The value has to be `BIT(AIC_WHOAMI)` for the core doing the
+programming, which is what `aic_cpu_index` already recorded for the IPI path.
+
+### 5. The SMART log kills the firmware
+
+    assert failed: [11956]:NVME_PERM_ERR F2H 1 SL[0] ERR 0x408 ... LBA 0x64013200
+
+Not a permission problem despite the name: permitting the whole of DRAM
+through the SART changed nothing. The firmware reads flash to answer a SMART
+log page, this NAND has been through a great many unclean resets, and the read
+fails and takes RTKit with it. `nvme_init_ctrl_finish` turns the resulting
+`-EINTR` into a failed controller reset even though its own comment says the
+controller works fine without hwmon, so the whole device is lost over a
+temperature reading. `CONFIG_NVME_HWMON` is disabled in the Makefile.
+
+### 6. Set Features has to come before Create IO CQ
+
+`apple_nvme_reset_work` called `nvme_set_queue_count` after creating both
+queues. The spec has the host negotiate the queue count first and then create
+queue ids within it. M1 does not care. T8020 answers Create IO CQ with status
+2 until something has asked for a queue. Moving those lines up gets the CQ
+created.
+
+### 7. Create IO SQ, still open
+
+Still status 2, invalid field. Ruled out so far:
+
+- **Queue depth.** 64 and 16 both refused. iBoot's own crash dump reports
+  `I/O SQ : 0x8788de000, size: 16`, so 16 is what the hardware uses, and the
+  same depth is accepted for the CQ.
+- **Entry size.** The ring path writes IO entries at a 128 byte stride and
+  sizes the allocation to match, while `nvme_enable_ctrl` hardcodes
+  `CC.IOSQES` to 6, 64 bytes. Setting it to 7 is at least self consistent and
+  the readback confirms `CC=0x470001`, but the command is refused either way.
+- **NVMMU depth.** `NUM_TCBS` was being set from the queue depth, which left
+  the NVMMU shorter than the queue. iBoot sets 0x3f on a part with 16 entry
+  queues, so the tag space and the queue depth are separate numbers and the
+  driver now has a separate field for it. Still refused.
+- **Missing completion queue.** The CQ is created first and returns status 0.
+  A bad `cqid` would be status 0x100, Completion Queue Invalid, not 0x2.
+
+That leaves `prp1`, `sq_flags` and `sqid`, none of which have anywhere
+obvious to be wrong. The next step is the iOS kernelcache: what
+`AppleANS2NVMeController` passes to Create IO SQ on this SoC settles it, and
+guessing has run out of road.
+
+One thing to watch while doing it: a failed admin command appears to poison
+the next one. An extra Identify issued by hand from the driver failed, and the
+Create IO CQ after it then failed too, where it had succeeded in the boot
+before. That may be its own bug in the NVMMU invalidation path.
 
 ### What the ADT settles
 
@@ -443,57 +568,12 @@ PCIe registers that were not answering.
 The cause was the same one that hid the interrupt controller: nothing claims
 `ps_pcie_ref`. It has no parent domain, and the nvme node names `ps_ans2` and
 `ps_apcie_st`, whose own parents genpd pulls up for it. `ps_pcie_ref` is left
-with no users and gets switched off. Pinning it in `dts/t8020.dtsi` fixes it.
+with no users and gets switched off. Pinning it in `dts/t8020.dtsi` made the
+fault rare rather than absent, and `ps_apcie`, `ps_apcie_gp` and `ps_apcie_st`
+had to be pinned too before it went away for good.
 
 That is twice now that a domain nothing claims has been the root cause. When a
 block answers at probe and then misbehaves, check `ps_*` before anything else.
-
-### Where it stops now
-
-With the clock pinned the firmware boots properly and talks:
-
-    RTKit: syslog message: pre_nand_eng.c:7119: MSP_SCD: Link speed drop recovery is not supported
-    RTKit: syslog message: cmd.c:5483:  boot mode normal
-    RTKit: syslog message: clog_v2.c:1342: Cxt Sync 0 Bands 1 1 FlowAccum 25 pendingBands 0
-    RTKit: Message (id=1): assert failed: [7442]:cmd fetch error for host 0
-           Admin SQ, rresp code 2, status_reg: 0x100
-
-That is real NAND engine firmware running. It then fails fetching the admin
-submission queue, and rresp 2 is a bus error on a DMA read of host memory.
-
-The obvious cause was that the queues are never added to SART:
-`apple_nvme_sart_dma_setup()` only runs for RTKit shmem buffers, which is why
-the syslog works, while `apple_nvme_queue_alloc()` takes its `sqes` and `cqes`
-straight from `dmam_alloc_coherent()` with nothing permitting them.
-`linux-0005` adds them. It is necessary and it is not sufficient.
-
-With it in place the permissions are provably right, and the fetch still
-fails:
-
-    sart: wrote [0x000000080f1ec000, 0x1000] to entry 6 flags 0x6f
-    nvme: admin queues: ASQ=0x000000080f1ec000 ACQ=0x000000080f1e8000
-
-The admin submission queue address is exactly the region that was permitted.
-So whatever `rresp code 2` means here, it is not a missing SART entry.
-
-### What has been ruled out
-
-- **The queues not being permitted.** Fixed by `linux-0005`, and the dump above
-  shows the entry covering the exact ASQ address. The failure survives.
-- **The SART allow value.** Linux writes 0xff for v2 and this part never does:
-  iBoot uses 0x2f, 0x6a and 0x6f. `linux-0004` adds a version 1 case using
-  0x6f, the value the part itself uses for data buffers. No change.
-- **A 16K granule.** Every entry iBoot writes is 16K aligned with a 16K
-  multiple size, and this SoC runs 16K pages, so rounding the regions to 16K
-  looked likely. It is actively worse: the firmware then dies before logging
-  anything. Kept at 4K.
-- **A stale enable from iBoot.** iBEC uses NVMe, so the controller could have
-  been left enabled with the bootloader's own admin queue, and
-  `apple_nvme_reset_work()` only disables it when `ctrl_config` says Linux
-  enabled it, which on a first probe is zero. Reading `NVME_REG_CC` back from
-  the hardware shows `CC.EN` clear, so this is not happening.
-- **LinearSQ and the NVMMU.** Settled from the iOS kernelcache rather than by
-  guessing, see below. ANS2 has neither, so `apple,t8015-nvme-ans2` is right.
 
 ### What the iOS kernelcache says
 
@@ -509,10 +589,16 @@ Worth doing early next time rather than late. Extract and read it with:
     virtual void AppleANS3NVMeController::EnableLinearSQ()
     virtual void AppleANS3CGv2Controller::EnableLinearSQ()
 
-and the class for this SoC, `AppleANS2NVMeController`, has no LinearSQ or
-NVMMU strings at all. The ADT agrees: `/arm-io/ans` has `role = ANS2`. So
-`has_lsq_nvmmu` must be false here, and the T8103 binding is wrong for a real
-reason rather than because of a replayed crashlog.
+and the class for this SoC, `AppleANS2NVMeController`, has no LinearSQ
+strings at all. The ADT agrees: `/arm-io/ans` has `role = ANS2`.
+
+Half of that conclusion was wrong, and it is worth saying why. The absence of
+LinearSQ held up. The absence of "NVMMU" did not mean the block is absent, it
+meant Apple does not call it that: the hardware has it, iBoot leaves
+`NVMMU_NUM_TCBS` at 0x3f, and turning it off in Linux brings the admin queue
+fetch error straight back. A string search proves a name is absent, not a
+feature. Read the registers the running bootloader left behind before
+concluding anything from a `strings` run.
 
 `AppleSART` is less useful. There are two implementations, and the one this SoC
 names in its ADT, `sart,coastguard`, maps to `IOCoastGuardSARTMapper`, which
@@ -525,13 +611,11 @@ kernel means disassembling the PPL, not the kext.
 
 ### Where to pick this up
 
-The admin queue is permitted and still unreadable by the coprocessor, so the
-next thing to question is the address itself rather than the permission. The
-nvme node sits under a `soc` that has `ranges` and no `dma-ranges`, so the DMA
-address equals the physical address. That is right for the USB bus only because
-`dma-ranges` was added there explicitly. Check what address ANS is actually
-driving, and whether NVMe traffic crosses the APCIe window at 0x610000000 and
-needs translating the way the USB complex does.
+Create IO SQ, and the kernelcache is the place to go. Pull
+`AppleANS2NVMeController` out of `IONVMeFamily` and read what it passes to
+Create IO SQ: the fields are few enough that seeing the real ones settles it.
+Everything the host can vary from this side has been tried, see the numbered
+list at the top of this section.
 
 ### A trap when reading these crash dumps
 
@@ -628,11 +712,10 @@ not the exception level we are handed.
 
 ## Known gaps
 
-1. **NVMe.** Device tree is in and the stack works as far as the firmware:
-   SART, the mailbox and RTKit all bind, and ANS2 boots, logs `boot mode
-   normal` and starts reading NAND context. It then fails to fetch the admin
-   submission queue with a bus error, even though the queue address is provably
-   inside a SART region the driver added, so there is no `nvme0n1` yet. See
+1. **NVMe.** The admin queue works: SART, the mailbox and RTKit all bind,
+   ANS2 boots clean, and Identify Controller, Set Features and Create IO CQ
+   all complete. Create IO SQ is refused with status 2, invalid field, so
+   there is no `nvme0n1` yet. See
    [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
 2. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
 3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART

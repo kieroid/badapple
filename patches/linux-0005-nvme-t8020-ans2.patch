@@ -1,0 +1,593 @@
+diff --git a/drivers/nvme/host/apple.c b/drivers/nvme/host/apple.c
+index c63e28c75..a65c81b12 100644
+--- a/drivers/nvme/host/apple.c
++++ b/drivers/nvme/host/apple.c
+@@ -28,6 +28,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+ #include <linux/soc/apple/rtkit.h>
++#include <linux/memblock.h>
+ #include <linux/soc/apple/sart.h>
+ #include <linux/reset.h>
+ #include <linux/time64.h>
+@@ -182,9 +183,26 @@ struct apple_nvme_iod {
+ 	struct scatterlist *sg;
+ };
+ 
++/*
++ * The NVMMU and the linear submission queue arrived at different times, and
++ * T8020 sits between the two generations that the driver knew about: iBoot
++ * leaves APPLE_NVMMU_NUM_TCBS at 0x3f and APPLE_ANS_LINEAR_SQ_CTRL at 0, so
++ * this part has the NVMMU and submits through an ordinary ring. Keeping the
++ * two as one flag would force T8020 onto a queue layout it does not have.
++ */
+ struct apple_nvme_hw {
+-	bool has_lsq_nvmmu;
++	bool has_nvmmu;
++	bool has_linear_sq;
+ 	u32 max_queue_depth;
++	/*
++	 * How many translation blocks the NVMMU is told to hold. This is the
++	 * tag space, not the queue depth: iBoot leaves 0x3f here on a part
++	 * whose queues are sixteen entries deep. Tying it to max_queue_depth,
++	 * the way the driver used to, leaves the NVMMU shorter than the queue
++	 * and Create IO SQ comes back as status 2, invalid field, while
++	 * Create IO CQ, which needs no blocks, is accepted.
++	 */
++	u32 nvmmu_tcbs;
+ };
+ 
+ struct apple_nvme {
+@@ -199,6 +217,7 @@ struct apple_nvme {
+ 	int pd_count;
+ 
+ 	struct apple_sart *sart;
++	bool sart_allows_all;
+ 	struct apple_rtkit *rtk;
+ 	struct reset_control *reset;
+ 
+@@ -294,6 +313,8 @@ static const struct apple_rtkit_ops apple_nvme_rtkit_ops = {
+ 	.shmem_destroy = apple_nvme_sart_dma_destroy,
+ };
+ 
++static void apple_nvme_dump_regs(struct apple_nvme *anv, const char *when);
++
+ static void apple_nvmmu_inval(struct apple_nvme_queue *q, unsigned int tag)
+ {
+ 	struct apple_nvme *anv = queue_to_apple_nvme(q);
+@@ -304,7 +325,27 @@ static void apple_nvmmu_inval(struct apple_nvme_queue *q, unsigned int tag)
+ 				     "NVMMU TCB invalidation failed\n");
+ }
+ 
+-static void apple_nvme_submit_cmd_t8015(struct apple_nvme_queue *q,
++static void apple_nvmmu_fill_tcb(struct apple_nvme_queue *q,
++				 struct nvme_command *cmd)
++{
++	u32 tag = nvme_tag_from_cid(cmd->common.command_id);
++	struct apple_nvmmu_tcb *tcb = &q->tcbs[tag];
++
++	tcb->opcode = 0;
++	tcb->prp1 = cmd->common.dptr.prp1;
++	tcb->prp2 = cmd->common.dptr.prp2;
++	tcb->length = cmd->rw.length;
++	tcb->command_id = tag;
++
++	if (!cmd->common.dptr.prp1)
++		tcb->dma_flags = 0;
++	else if (nvme_is_write(cmd))
++		tcb->dma_flags = APPLE_ANS_TCB_DMA_TO_DEVICE;
++	else
++		tcb->dma_flags = APPLE_ANS_TCB_DMA_FROM_DEVICE;
++}
++
++static void apple_nvme_submit_cmd_ring(struct apple_nvme_queue *q,
+ 				  struct nvme_command *cmd)
+ {
+ 	struct apple_nvme *anv = queue_to_apple_nvme(q);
+@@ -322,28 +363,38 @@ static void apple_nvme_submit_cmd_t8015(struct apple_nvme_queue *q,
+ 
+ 	writel(q->sq_tail, q->sq_db);
+ 	spin_unlock_irq(&anv->lock);
++
++	if (q->is_adminq) {
++		u32 tag = nvme_tag_from_cid(cmd->common.command_id);
++
++		dev_dbg(anv->dev,
++			"admin submit: opcode=%#x cid=%#x tail=%u "
++			 "prp1=%#llx prp2=%#llx nsid=%#x cdw10=%#x\n",
++			 cmd->common.opcode, cmd->common.command_id,
++			 q->sq_tail, le64_to_cpu(cmd->common.dptr.prp1),
++			 le64_to_cpu(cmd->common.dptr.prp2),
++			 le32_to_cpu(cmd->common.nsid),
++			 le32_to_cpu(cmd->common.cdw10));
++		if (anv->hw->has_nvmmu) {
++			struct apple_nvmmu_tcb *tcb = &q->tcbs[tag];
++
++			dev_dbg(anv->dev,
++				"admin tcb[%u]: flags=%#x cid=%#x length=%#x "
++				 "prp1=%#llx prp2=%#llx\n",
++				 tag, tcb->dma_flags, tcb->command_id,
++				 le16_to_cpu(tcb->length),
++				 le64_to_cpu(tcb->prp1),
++				 le64_to_cpu(tcb->prp2));
++		}
++	}
+ }
+ 
+ 
+-static void apple_nvme_submit_cmd_t8103(struct apple_nvme_queue *q,
++static void apple_nvme_submit_cmd_linear(struct apple_nvme_queue *q,
+ 				  struct nvme_command *cmd)
+ {
+ 	struct apple_nvme *anv = queue_to_apple_nvme(q);
+ 	u32 tag = nvme_tag_from_cid(cmd->common.command_id);
+-	struct apple_nvmmu_tcb *tcb = &q->tcbs[tag];
+-
+-	tcb->opcode = 0;
+-	tcb->prp1 = cmd->common.dptr.prp1;
+-	tcb->prp2 = cmd->common.dptr.prp2;
+-	tcb->length = cmd->rw.length;
+-	tcb->command_id = tag;
+-
+-	if (!cmd->common.dptr.prp1)
+-		tcb->dma_flags = 0;
+-	else if (nvme_is_write(cmd))
+-		tcb->dma_flags = APPLE_ANS_TCB_DMA_TO_DEVICE;
+-	else
+-		tcb->dma_flags = APPLE_ANS_TCB_DMA_FROM_DEVICE;
+ 
+ 	memcpy(&q->sqes[tag], cmd, sizeof(*cmd));
+ 
+@@ -637,9 +688,13 @@ static inline void apple_nvme_handle_cqe(struct apple_nvme_queue *q,
+ 	__u16 command_id = READ_ONCE(cqe->command_id);
+ 	struct request *req;
+ 
+-	if (anv->hw->has_lsq_nvmmu)
++	if (anv->hw->has_nvmmu)
+ 		apple_nvmmu_inval(q, command_id);
+ 
++	if (q->is_adminq)
++		dev_dbg(anv->dev, "admin completion: cid=%#x status=%#x\n",
++			 command_id, le16_to_cpu(cqe->status) >> 1);
++
+ 	req = nvme_find_rq(apple_nvme_queue_tagset(anv, q), command_id);
+ 	if (unlikely(!req)) {
+ 		dev_warn(anv->dev, "invalid id %d completed", command_id);
+@@ -814,10 +869,13 @@ static blk_status_t apple_nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
+ 
+ 	nvme_start_request(req);
+ 
+-	if (anv->hw->has_lsq_nvmmu)
+-		apple_nvme_submit_cmd_t8103(q, cmnd);
++	if (anv->hw->has_nvmmu)
++		apple_nvmmu_fill_tcb(q, cmnd);
++
++	if (anv->hw->has_linear_sq)
++		apple_nvme_submit_cmd_linear(q, cmnd);
+ 	else
+-		apple_nvme_submit_cmd_t8015(q, cmnd);
++		apple_nvme_submit_cmd_ring(q, cmnd);
+ 
+ 	return BLK_STS_OK;
+ 
+@@ -954,6 +1012,35 @@ static enum blk_eh_timer_return apple_nvme_timeout(struct request *req)
+ 		dev_warn(anv->dev,
+ 			 "I/O %d(aq:%d) timeout while not in live state\n",
+ 			 req->tag, q->is_adminq);
++		/*
++		 * This branch gives up without looking at the queue, which
++		 * hides the one thing worth knowing on a part that is still
++		 * being brought up: whether the firmware posted a completion
++		 * and the interrupt went missing, or whether it never ran the
++		 * command at all. Print both the completion entry and the
++		 * NVMMU state before returning.
++		 */
++		apple_nvme_dump_regs(anv, "at admin timeout");
++		dev_dbg(anv->dev,
++			"queue at timeout: sq_tail=%u cq_head=%u cq_phase=%u "
++			 "cqe[0]=%016llx %08x %04x %04x %04x\n",
++			 q->sq_tail, q->cq_head, q->cq_phase,
++			 le64_to_cpu(q->cqes[0].result.u64),
++			 le32_to_cpu(q->cqes[0].sq_head),
++			 le16_to_cpu(q->cqes[0].sq_id),
++			 le16_to_cpu(q->cqes[0].command_id),
++			 le16_to_cpu(q->cqes[0].status));
++		if (anv->hw->has_nvmmu) {
++			struct apple_nvmmu_tcb *tcb = &q->tcbs[req->tag];
++
++			dev_dbg(anv->dev,
++				"tcb[%d]: opcode=%#x flags=%#x cid=%#x "
++				 "length=%#x prp1=%#llx prp2=%#llx\n",
++				 req->tag, tcb->opcode, tcb->dma_flags,
++				 tcb->command_id, tcb->length,
++				 le64_to_cpu(tcb->prp1),
++				 le64_to_cpu(tcb->prp2));
++		}
+ 		if (blk_mq_request_started(req) &&
+ 		    !blk_mq_request_completed(req)) {
+ 			nvme_req(req)->status = NVME_SC_HOST_ABORTED_CMD;
+@@ -1028,13 +1115,48 @@ static void apple_nvme_init_queue(struct apple_nvme_queue *q)
+ 	q->sq_tail = 0;
+ 	q->cq_head = 0;
+ 	q->cq_phase = 1;
+-	if (anv->hw->has_lsq_nvmmu)
+-		memset(q->tcbs, 0, anv->hw->max_queue_depth
++	if (anv->hw->has_nvmmu)
++		memset(q->tcbs, 0, anv->hw->nvmmu_tcbs
+ 			* sizeof(struct apple_nvmmu_tcb));
+ 	memset(q->cqes, 0, depth * sizeof(struct nvme_completion));
+ 	apple_nvme_enable_queue(q);
+ }
+ 
++/*
++ * The ANS firmware on T8020 crashes with "cmd fetch error for host 0 Admin SQ,
++ * rresp code 2" a few milliseconds after it logs "boot mode normal", which is
++ * before Linux writes ASQ. rresp 2 is an AXI SLVERR, so a read was refused.
++ * One explanation is that the registers still hold what iBoot left, and the
++ * firmware resumes against a queue the SART no longer allows. Print the state
++ * at the two points that would tell the difference.
++ */
++static void apple_nvme_dump_regs(struct apple_nvme *anv, const char *when)
++{
++	dev_dbg(anv->dev,
++		"regs %s: CC=%#x CSTS=%#x INTMS=%#x AQA=%#x ASQ=%#llx "
++		 "ACQ=%#llx CAP=%#llx BOOT_STATUS=%#x CPU_CONTROL=%#x\n",
++		 when,
++		 readl(anv->mmio_nvme + NVME_REG_CC),
++		 readl(anv->mmio_nvme + NVME_REG_CSTS),
++		 readl(anv->mmio_nvme + NVME_REG_INTMS),
++		 readl(anv->mmio_nvme + NVME_REG_AQA),
++		 readq(anv->mmio_nvme + NVME_REG_ASQ),
++		 readq(anv->mmio_nvme + NVME_REG_ACQ),
++		 readq(anv->mmio_nvme + NVME_REG_CAP),
++		 readl(anv->mmio_nvme + APPLE_ANS_BOOT_STATUS),
++		 readl(anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL));
++	dev_dbg(anv->dev,
++		"ans  %s: LINEAR_SQ_CTRL=%#x MAX_PEND=%#x NVMMU_NUM_TCBS=%#x "
++		 "NVMMU_ASQ_TCB=%#llx NVMMU_IOSQ_TCB=%#llx NVMMU_TCB_STAT=%#x\n",
++		 when,
++		 readl(anv->mmio_nvme + APPLE_ANS_LINEAR_SQ_CTRL),
++		 readl(anv->mmio_nvme + APPLE_ANS_MAX_PEND_CMDS_CTRL),
++		 readl(anv->mmio_nvme + APPLE_NVMMU_NUM_TCBS),
++		 readq(anv->mmio_nvme + APPLE_NVMMU_ASQ_TCB_BASE),
++		 readq(anv->mmio_nvme + APPLE_NVMMU_IOSQ_TCB_BASE),
++		 readl(anv->mmio_nvme + APPLE_NVMMU_TCB_STAT));
++}
++
+ static void apple_nvme_reset_work(struct work_struct *work)
+ {
+ 	unsigned int nr_io_queues = 1;
+@@ -1044,6 +1166,8 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 		container_of(work, struct apple_nvme, ctrl.reset_work);
+ 	enum nvme_ctrl_state state = nvme_ctrl_state(&anv->ctrl);
+ 
++	apple_nvme_dump_regs(anv, "on entry to reset_work");
++
+ 	if (state != NVME_CTRL_RESETTING) {
+ 		dev_warn(anv->dev, "ctrl state %d is not RESETTING\n", state);
+ 		ret = -ENODEV;
+@@ -1090,6 +1214,33 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 		if (ret)
+ 			goto out;
+ 
++		/*
++		 * Point the admin queue registers at our own queues before the
++		 * coprocessor runs.
++		 *
++		 * iBoot leaves its queue programmed, and on T8020 the firmware
++		 * fetches from whatever ASQ holds as soon as it finishes
++		 * booting, which is well before the "Setup the admin queue"
++		 * block below gets a chance to run. iBoot's queue is not in the
++		 * SART allow list any more by then, so the fetch comes back as
++		 * an AXI SLVERR and the firmware asserts with "cmd fetch error
++		 * for host 0 Admin SQ, rresp code 2" a few milliseconds after
++		 * it logs "boot mode normal". Observed values on entry here
++		 * were ASQ=0x8788e0000 ACQ=0x8788e1000 AQA=0xf000f, none of
++		 * which any bootloader SART entry covers.
++		 *
++		 * Writing our own addresses first leaves the firmware fetching
++		 * from a region it is allowed to read, and the queue is empty,
++		 * so there is nothing for it to act on. The later writes repeat
++		 * these values and are harmless.
++		 */
++		aqa = APPLE_NVME_AQ_DEPTH - 1;
++		aqa |= aqa << 16;
++		writel(0, anv->mmio_nvme + NVME_REG_CC);
++		writel(aqa, anv->mmio_nvme + NVME_REG_AQA);
++		writeq(anv->adminq.sq_dma_addr, anv->mmio_nvme + NVME_REG_ASQ);
++		writeq(anv->adminq.cq_dma_addr, anv->mmio_nvme + NVME_REG_ACQ);
++
+ 		writel(APPLE_ANS_COPROC_CPU_CONTROL_RUN,
+ 		       anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL);
+ 
+@@ -1124,11 +1275,8 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 
+ 	dma_set_max_seg_size(anv->dev, 0xffffffff);
+ 
+-	if (anv->hw->has_lsq_nvmmu) {
+-		/*
+-		 * Enable NVMMU and linear submission queues which is required
+-		 * since T6000.
+-		 */
++	/* Linear submission queues are required since T6000. */
++	if (anv->hw->has_linear_sq) {
+ 		writel(APPLE_ANS_LINEAR_SQ_EN,
+ 			anv->mmio_nvme + APPLE_ANS_LINEAR_SQ_CTRL);
+ 
+@@ -1136,12 +1284,16 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 		writel(anv->hw->max_queue_depth
+ 			| (anv->hw->max_queue_depth << 16), anv->mmio_nvme
+ 			+ APPLE_ANS_MAX_PEND_CMDS_CTRL);
++	}
+ 
+-		/* Setup the NVMMU for the maximum admin and IO queue depth */
+-		writel(anv->hw->max_queue_depth - 1,
++	if (anv->hw->has_nvmmu) {
++		/* Setup the NVMMU for the whole tag space */
++		writel(anv->hw->nvmmu_tcbs - 1,
+ 			anv->mmio_nvme + APPLE_NVMMU_NUM_TCBS);
+ 	}
+ 
++	apple_nvme_dump_regs(anv, "after ANS boot, before the admin queue");
++
+ 	/* Setup the admin queue */
+ 	aqa = APPLE_NVME_AQ_DEPTH - 1;
+ 	aqa |= aqa << 16;
+@@ -1149,7 +1301,7 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 	writeq(anv->adminq.sq_dma_addr, anv->mmio_nvme + NVME_REG_ASQ);
+ 	writeq(anv->adminq.cq_dma_addr, anv->mmio_nvme + NVME_REG_ACQ);
+ 
+-	if (anv->hw->has_lsq_nvmmu) {
++	if (anv->hw->has_nvmmu) {
+ 		/* Setup NVMMU for both queues */
+ 		writeq(anv->adminq.tcb_dma_addr,
+ 			anv->mmio_nvme + APPLE_NVMMU_ASQ_TCB_BASE);
+@@ -1157,6 +1309,19 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 			anv->mmio_nvme + APPLE_NVMMU_IOSQ_TCB_BASE);
+ 	}
+ 
++	/*
++	 * Unmask the completion interrupt.
++	 *
++	 * On T8020 the firmware runs the first admin command and posts a valid
++	 * completion, but the interrupt never arrives: at the timeout the CQ
++	 * holds an entry with the phase bit set and cq_head is still 0. The
++	 * NVMe register block is not cleared by the coprocessor reset, which is
++	 * how iBoot's CC and ASQ survive into Linux, so whatever it left in the
++	 * interrupt mask survives too. INTMC is write one to clear, so this
++	 * clears every mask bit and is a no-op on a part that was not masked.
++	 */
++	writel(~0u, anv->mmio_nvme + NVME_REG_INTMC);
++
+ 	anv->ctrl.sqsize =
+ 		anv->hw->max_queue_depth - 1; /* 0's based queue depth */
+ 	anv->ctrl.cap = readq(anv->mmio_nvme + NVME_REG_CAP);
+@@ -1166,6 +1331,25 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 	if (ret)
+ 		goto out;
+ 
++	/*
++	 * Tell the controller that IO submission queue entries are 128 bytes.
++	 *
++	 * The ring path has always written them at that stride, and sizes the
++	 * allocation to match, but nothing ever said so in CC: nvme_enable_ctrl
++	 * hardcodes NVME_NVM_IOSQES, which is 6, or 64 bytes. The T8020
++	 * firmware checks, and answers Create IO SQ with status 2, invalid
++	 * field, until CC agrees with the queue the host actually built.
++	 *
++	 * The linear path allocates 64 byte entries, so it wants the value
++	 * nvme_enable_ctrl already wrote and is left alone.
++	 */
++	if (!anv->hw->has_linear_sq) {
++		anv->ctrl.ctrl_config &= ~NVME_CC_IOSQES_MASK;
++		anv->ctrl.ctrl_config |= APPLE_NVME_IOSQES
++					 << NVME_CC_IOSQES_SHIFT;
++		writel(anv->ctrl.ctrl_config, anv->mmio_nvme + NVME_REG_CC);
++	}
++
+ 	dev_dbg(anv->dev, "Starting admin queue");
+ 	apple_nvme_init_queue(&anv->adminq);
+ 	nvme_unquiesce_admin_queue(&anv->ctrl);
+@@ -1181,6 +1365,25 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 	if (ret)
+ 		goto out;
+ 
++	/*
++	 * Ask for the IO queue before creating it.
++	 *
++	 * This used to run after Create IO CQ and Create IO SQ, which is the
++	 * wrong way round: the spec has the host negotiate the number of
++	 * queues with Set Features first, and only then create queue ids
++	 * within that count. The M1 firmware does not care, the T8020 one
++	 * does, and it answers Create IO CQ for qid 1 with status 2, invalid
++	 * field, when nothing has asked for a queue yet.
++	 */
++	nr_io_queues = 1;
++	ret = nvme_set_queue_count(&anv->ctrl, &nr_io_queues);
++	if (ret)
++		goto out;
++	if (nr_io_queues != 1) {
++		ret = -ENXIO;
++		goto out;
++	}
++
+ 	dev_dbg(anv->dev, "Creating IOCQ");
+ 	ret = apple_nvme_create_cq(anv);
+ 	if (ret)
+@@ -1191,14 +1394,6 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 		goto out_remove_cq;
+ 
+ 	apple_nvme_init_queue(&anv->ioq);
+-	nr_io_queues = 1;
+-	ret = nvme_set_queue_count(&anv->ctrl, &nr_io_queues);
+-	if (ret)
+-		goto out_remove_sq;
+-	if (nr_io_queues != 1) {
+-		ret = -ENXIO;
+-		goto out_remove_sq;
+-	}
+ 
+ 	anv->ctrl.queue_count = nr_io_queues + 1;
+ 
+@@ -1347,11 +1542,68 @@ static int apple_nvme_alloc_tagsets(struct apple_nvme *anv)
+ 	return 0;
+ }
+ 
++/*
++ * Let the coprocessor reach a queue it has just been handed.
++ *
++ * SART is the only thing between ANS and memory on T8020: /arm-io/ans names
++ * sart-ans as its iommu-parent and there is no dart-ans anywhere in the ADT.
++ * Nothing permits the queues today. apple_nvme_sart_dma_setup() runs for RTKit
++ * shmem only, which is exactly why the firmware's syslog arrives and its first
++ * fetch of the admin submission queue does not:
++ *
++ *   assert failed: [7442]:cmd fetch error for host 0 Admin SQ, rresp code 2
++ *
++ * rresp 2 is a bus error on a DMA read, which is what a denied region looks
++ * like from the far side.
++ *
++ * SART wants both ends on a 4K boundary and a queue is usually smaller than
++ * that. Rounding to 16K instead, to match the granule every bootloader entry
++ * uses, was tried and is worse: the firmware then fails before it logs
++ * anything at all.
++ *
++ * Permitting the queues one at a time is not enough either. Identify completes
++ * that way, but the next admin command, a SMART log page, dies with
++ *
++ *   assert failed: [11956]:NVME_PERM_ERR ... mmu[fffffff7, ...]
++ *
++ * on a buffer the host allocated a moment earlier. The firmware writes that
++ * log out of its own DMA engine rather than through the NVMMU translation
++ * block the queues use, so every buffer the host hands it would have to be
++ * permitted, and there are sixteen SART entries in total. One entry across
++ * all of DRAM costs one of those sixteen and covers every case.
++ *
++ * ponytail: this hands ANS the whole of memory. It is the right trade for a
++ * development board and the wrong one for anything else. The narrower fix is
++ * to permit each mapping as the driver creates it and to recycle entries as
++ * they are unmapped, which needs more entries than this SART has, so it would
++ * mean an allocator over a scarce resource in the DMA path.
++ */
++static int apple_nvme_sart_allow(struct apple_nvme *anv, dma_addr_t addr,
++				 size_t size)
++{
++	phys_addr_t start = memblock_start_of_DRAM();
++	size_t len = memblock_end_of_DRAM() - start;
++	int ret;
++
++	if (anv->sart_allows_all)
++		return 0;
++
++	ret = apple_sart_add_allowed_region(anv->sart, start, len);
++	if (ret)
++		return ret;
++
++	dev_info(anv->dev, "permitted all of DRAM [%pa, 0x%zx] to ANS\n",
++		 &start, len);
++	anv->sart_allows_all = true;
++	return 0;
++}
++
+ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
+ 				  struct apple_nvme_queue *q)
+ {
+ 	unsigned int depth = apple_nvme_queue_depth(q);
+ 	size_t iosq_size;
++	int ret;
+ 
+ 	q->cqes = dmam_alloc_coherent(anv->dev,
+ 				      depth * sizeof(struct nvme_completion),
+@@ -1359,7 +1611,12 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
+ 	if (!q->cqes)
+ 		return -ENOMEM;
+ 
+-	if (anv->hw->has_lsq_nvmmu)
++	ret = apple_nvme_sart_allow(anv, q->cq_dma_addr,
++				    depth * sizeof(struct nvme_completion));
++	if (ret)
++		return ret;
++
++	if (anv->hw->has_linear_sq)
+ 		iosq_size = depth * sizeof(struct nvme_command);
+ 	else
+ 		iosq_size = depth << APPLE_NVME_IOSQES;
+@@ -1369,17 +1626,27 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
+ 	if (!q->sqes)
+ 		return -ENOMEM;
+ 
+-	if (anv->hw->has_lsq_nvmmu) {
++	ret = apple_nvme_sart_allow(anv, q->sq_dma_addr, iosq_size);
++	if (ret)
++		return ret;
++
++	if (anv->hw->has_nvmmu) {
+ 		/*
+ 		 * We need the maximum queue depth here because the NVMMU only
+ 		 * has a single depth configuration shared between both queues.
+ 		 */
+ 		q->tcbs = dmam_alloc_coherent(anv->dev,
+-			anv->hw->max_queue_depth *
++			anv->hw->nvmmu_tcbs *
+ 				sizeof(struct apple_nvmmu_tcb),
+ 			&q->tcb_dma_addr, GFP_KERNEL);
+ 		if (!q->tcbs)
+ 			return -ENOMEM;
++
++		ret = apple_nvme_sart_allow(anv, q->tcb_dma_addr,
++					    anv->hw->nvmmu_tcbs *
++						sizeof(struct apple_nvmmu_tcb));
++		if (ret)
++			return ret;
+ 	}
+ 
+ 	/*
+@@ -1501,7 +1768,7 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
+ 		goto put_dev;
+ 	}
+ 
+-	if (anv->hw->has_lsq_nvmmu) {
++	if (anv->hw->has_linear_sq) {
+ 		anv->adminq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_ASQ_DB;
+ 		anv->adminq.cq_db = anv->mmio_nvme + APPLE_ANS_ACQ_DB;
+ 		anv->ioq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_IOSQ_DB;
+@@ -1698,17 +1965,37 @@ static DEFINE_SIMPLE_DEV_PM_OPS(apple_nvme_pm_ops, apple_nvme_suspend,
+ 				apple_nvme_resume);
+ 
+ static const struct apple_nvme_hw apple_nvme_t8015_hw = {
+-	.has_lsq_nvmmu = false,
++	.has_nvmmu = false,
++	.has_linear_sq = false,
++	.max_queue_depth = 16,
++};
++
++/*
++ * iBoot leaves APPLE_NVMMU_NUM_TCBS at 0x3f here, so the NVMMU is present and
++ * sixty four translation blocks deep, while APPLE_ANS_LINEAR_SQ_CTRL reads 0,
++ * so submission still goes through an ordinary ring with a tail doorbell.
++ *
++ * The queues are sixteen entries deep despite those sixty four blocks. Asking
++ * for sixty four gets Create IO CQ rejected with status 2, invalid field, and
++ * iBoot's own crash dump agrees: "I/O SQ : 0x8788de000, size: 16".
++ */
++static const struct apple_nvme_hw apple_nvme_t8020_hw = {
++	.has_nvmmu = true,
++	.has_linear_sq = false,
+ 	.max_queue_depth = 16,
++	.nvmmu_tcbs = 64,
+ };
+ 
+ static const struct apple_nvme_hw apple_nvme_t8103_hw = {
+-	.has_lsq_nvmmu = true,
++	.has_nvmmu = true,
++	.has_linear_sq = true,
+ 	.max_queue_depth = 64,
++	.nvmmu_tcbs = 64,
+ };
+ 
+ static const struct of_device_id apple_nvme_of_match[] = {
+ 	{ .compatible = "apple,t8015-nvme-ans2", .data = &apple_nvme_t8015_hw },
++	{ .compatible = "apple,t8020-nvme-ans2", .data = &apple_nvme_t8020_hw },
+ 	{ .compatible = "apple,t8103-nvme-ans2", .data = &apple_nvme_t8103_hw },
+ 	{ .compatible = "apple,nvme-ans2", .data = &apple_nvme_t8103_hw },
+ 	{},
