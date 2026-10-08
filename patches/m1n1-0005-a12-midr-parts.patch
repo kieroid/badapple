@@ -1,8 +1,17 @@
 diff --git a/src/chickens.c b/src/chickens.c
-index 7fd4bc2..ccfb01c 100644
+index 7fd4bc2..98bfa5c 100644
 --- a/src/chickens.c
 +++ b/src/chickens.c
-@@ -137,6 +137,22 @@ const struct midr_part_info midr_parts[] = {
+@@ -15,6 +15,8 @@ void init_t8010_2_hurricane_zephyr(int rev);
+ void init_t8011_hurricane_zephyr(int rev);
+ void init_t8015_monsoon(int rev);
+ void init_t8015_mistral(int rev);
++void init_t8020_vortex(int rev);
++void init_t8020_tempest(int rev);
+ void init_t8015_monsoon(int rev);
+ void init_m1_icestorm(int rev);
+ void init_t8103_firestorm(int rev);
+@@ -137,6 +139,22 @@ const struct midr_part_info midr_parts[] = {
       &features_a10},
      {MIDR_PART_T8015_MONSOON, "A11 Monsoon", init_t8015_monsoon, &features_a11},
      {MIDR_PART_T8015_MISTRAL, "A11 Mistral", init_t8015_mistral, &features_a11},
@@ -20,8 +29,8 @@ index 7fd4bc2..ccfb01c 100644
 +     * apple_sysregs_unlocked set. If one of its other bits is wrong for A12 it
 +     * will surface as a new fault with its own PC to resolve.
 +     */
-+    {MIDR_PART_T8020_VORTEX, "A12 Vortex", NULL, &features_a11},
-+    {MIDR_PART_T8020_TEMPSET, "A12 Tempest", NULL, &features_a11},
++    {MIDR_PART_T8020_VORTEX, "A12 Vortex", init_t8020_vortex, &features_a11},
++    {MIDR_PART_T8020_TEMPSET, "A12 Tempest", init_t8020_tempest, &features_a11},
      {MIDR_PART_T8103_FIRESTORM, "M1 Firestorm", init_t8103_firestorm, &features_m1},
      {MIDR_PART_T6000_FIRESTORM, "M1 Pro Firestorm", init_t6000_firestorm, &features_m1},
      {MIDR_PART_T6001_FIRESTORM, "M1 Max Firestorm", init_t6001_firestorm, &features_m1},

@@ -37,8 +37,9 @@ KBUILD := LLVM=1 ARCH=arm64
 # phone itself. The interactive shell arrives separately, over the USB CDC-ACM
 # gadget the initramfs brings up, as /dev/ttyACM0 on the host.
 # earlycon picks up UART0 through stdout-path.
-# maxcpus=1 is here because m1n1 has no CPU start offset for T8020 yet, so the
-# secondaries would never come up anyway. Drop it once SMP works.
+# maxcpus=1 is here because releasing the secondaries into Linux hangs or
+# panics a few hundred milliseconds in. m1n1 does start all five and parks
+# them, see "SMP" in NOTES.md. Drop it once that is fixed.
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1
 
 .PHONY: check deps patch pmgr m1n1 kernel initramfs blob pongo boot-m1n1 pc-boot \

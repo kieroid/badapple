@@ -69,44 +69,44 @@
 
 		/*
 		 * These must equal MPIDR_EL1 & 0xFFFFFF, which is what m1n1's
-		 * dt_set_cpus matches against. The ADT's reg is not that value:
-		 * it reports 0 for cpu0 and 256 for cpu4, missing the Aff2 bit.
-		 * The boot CPU reported MPIDR 0x80010100, so the real affinity
-		 * for cluster 1 core 0 is 0x10100, and the ADT values are the
-		 * same numbers with 0x10000 missing. Get this wrong and m1n1
-		 * prunes every CPU node, including the one it is running on,
-		 * leaving Linux a device tree with no CPUs at all.
+		 * dt_set_cpus matches against, and get it wrong and m1n1 refuses
+		 * to boot at all ("FDT: DT CPU 0 MPIDR mismatch: 0x10000 != 0x0").
+		 * The ADT's reg is not that value. It reports 0 to 3 for the
+		 * E cores and 256 and 257 for the P cores, while the hardware
+		 * reads 0x0 to 0x3 and 0x10100 and 0x10101: the P cluster
+		 * carries Aff2 as well as Aff1, the same scheme as M1. Read with
+		 * the m1n1 proxy and from m1n1's own handoff log.
 		 */
-		cpu_e0: cpu@10000 {
+		cpu_e0: cpu@0 {
 			compatible = "apple,tempest";
-			reg = <0x0 0x10000>;
+			reg = <0x0 0x0>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
 		};
 
-		cpu_e1: cpu@10001 {
+		cpu_e1: cpu@1 {
 			compatible = "apple,tempest";
-			reg = <0x0 0x10001>;
+			reg = <0x0 0x1>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
 		};
 
-		cpu_e2: cpu@10002 {
+		cpu_e2: cpu@2 {
 			compatible = "apple,tempest";
-			reg = <0x0 0x10002>;
+			reg = <0x0 0x2>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
 		};
 
-		cpu_e3: cpu@10003 {
+		cpu_e3: cpu@3 {
 			compatible = "apple,tempest";
-			reg = <0x0 0x10003>;
+			reg = <0x0 0x3>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			enable-method = "spin-table";
 			device_type = "cpu";
@@ -371,6 +371,45 @@
 };
 
 #include "t8020-pmgr.dtsi"
+
+/*
+ * The CPU and CPU power manager domains, marked always-on as core devices the
+ * same way upstream T8015 does. Without it "Disabling unused power domains"
+ * tries to switch off the cluster the kernel is running on, which only
+ * survives because the hardware refuses ("PS pcpu0: Failed to reach power
+ * state 0x0"), and would take down any secondary m1n1 has already started.
+ */
+&ps_ecpu0 {
+	apple,always-on;
+};
+
+&ps_ecpu1 {
+	apple,always-on;
+};
+
+&ps_ecpu2 {
+	apple,always-on;
+};
+
+&ps_ecpu3 {
+	apple,always-on;
+};
+
+&ps_pcpu0 {
+	apple,always-on;
+};
+
+&ps_pcpu1 {
+	apple,always-on;
+};
+
+&ps_ecpm {
+	apple,always-on;
+};
+
+&ps_pcpm {
+	apple,always-on;
+};
 
 /*
  * Keep the interrupt controller powered.

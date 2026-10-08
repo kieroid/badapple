@@ -82,7 +82,7 @@ dying mid-boot.
 
 ## m1n1 patches
 
-Seven, in `patches/`. Four were T8020 bugs, three were about seeing anything.
+Nine, in `patches/`. Six are T8020 support, three are about seeing anything.
 
 1. **`0001` USB complex registers.** `usb-complex,t8020` fell through to the
    `t8011` case and got its DMA remap offsets. See below.
@@ -108,6 +108,10 @@ Seven, in `patches/`. Four were T8020 bugs, three were about seeing anything.
    it fell through to the ULPI case with an 8 bit turnaround. Both faults look
    identical from the host: attach, high speed chirp, then
    `device descriptor read/64, error -110`.
+
+5. **`0008` CPU start offset** and **`0009` A12 chicken bits**, see [SMP](#smp).
+   `0005` also carries the hook-up for `0009`, because both touch the same
+   table and `make patch` checks each patch on its own.
 
 `0003`, `0004` and `0006` exist because the framebuffer is the only console
 without a serial cable, and a `RELEASE` build defines `FB_SILENT_MODE`, which
@@ -370,8 +374,8 @@ Until someone does that, leave all six alone.
 
 ## The gadget sometimes never takes an address
 
-Open. Two boots out of about seven failed like this, both after NVMe started
-working and while the SART still permitted all of DRAM to ANS. The host log,
+Open. Three boots out of about eleven failed like this, the third after the
+SART had already been narrowed. The host log,
 in `/var/log/kern.log` on the PC, has the first error:
 
     usb 3-2: device not accepting address 71, error -62
@@ -392,12 +396,13 @@ What is settled:
 - **Not timing within the boot.** One working boot enumerated at 1.50 and
   1.62 seconds, the same as both failures.
 
-The suspect, unproven, is ANS writing into Linux memory. Its firmware still
-carries addresses iBoot gave it (its crash dump printed iBoot's IO queue at
-`0x8788de000`), and with all of DRAM permitted any write to one of those
-lands wherever Linux has since put something. Narrowing the SART to one entry
-per queue was right regardless, and three boots after it all enumerated. That
-is not yet enough boots to call it fixed.
+- **Not ANS writing through a wide-open SART.** That was the leading theory,
+  and narrowing the SART to one entry per queue was right regardless, but the
+  failure came back afterwards.
+- **The kernel stays alive.** In the third failure the 15 second timer still
+  fired at 16.37 s with USB dead, so the gadget stopped taking interrupts
+  while everything else ran. Its report line was lost that time only because
+  a PMGR probe hung the CPU first.
 
 `linux-0002` carries a one-shot report to settle it the next time it happens.
 Fifteen seconds after the gadget starts it prints:
@@ -409,6 +414,57 @@ seconds. No line at all means the kernel hung. A line with only a handful of
 `irqs` means the controller stopped interrupting. Plenty of `irqs` with few
 `setups` means the gadget saw traffic and did not answer it, and `last` is
 the request it choked on.
+
+## SMP
+
+Open, and close. m1n1 starts all five secondaries and Linux sees six CPUs,
+but a boot without `maxcpus=1` dies a few hundred milliseconds in.
+
+What works, all in `patches/m1n1-0008` and `0009` and `dts/t8020.dtsi`:
+
+- **The CPU start block is A11's, `pmgr + 0xd4000`.** `ApplePMGR` starts a
+  core by writing `+4` and `+8 + 4 * cluster` relative to a base it keeps at
+  object offset `0x26d0`. Where that base comes from was not found in the
+  kexts, so it was tested instead: with `0xd4000` m1n1 prints `Started.` for
+  CPUs 0 to 3 and 5. T8020 has A11's PMGR layout generally, with the CPU and
+  CPM power states at `0x80000` on both.
+- **RVBAR is writable.** All six `cpu-impl-reg` RVBARs read back as m1n1's
+  base with the lock bit clear.
+- **MPIDRs.** E cores are `0x0` to `0x3`, P cores `0x10100` and `0x10101`.
+  The DT had the E cores at `0x1000x` and m1n1 refused to hand over at all.
+- **CPU power domains.** `ps_ecpu0..3`, `ps_pcpu0..1`, `ps_ecpm` and
+  `ps_pcpm` are now always-on, as upstream T8015 marks them. Before that
+  genpd tried to switch off the boot core's own cluster at late init.
+- **A12 chicken bits.** m1n1 set none. `0009` adds the APPLEVORTEX block of
+  XNU's `start.s` (xnu-6153), quoted rdar titles included, among them "data
+  corruption due to incorrect branch predictor resolution".
+
+What fails, three boots, with `CONFIG_PANIC_TIMEOUT=-1` explaining why the
+phone kept resetting to iOS (a panic reboots at once):
+
+1. Reached `/init`, then the framebuffer filled with garbage and it reset.
+2. With the chicken bits, reset around `apple_soc_cpufreq_init`.
+3. With `panic=0`, a silent stop at 0.319 s, no panic text.
+
+A silent stop at a random point is what a cross-call looks like when the IPI
+never arrives. With `compatible = "apple,aic"` Linux uses AIC's own IPI
+registers. A11 introduced the per-core fast IPI registers and upstream T8015
+uses them. The next boot to try adds `"apple,t8015-aic"` between the two
+existing AIC compatibles, which selects fast IPIs, with `panic=0` and no
+`maxcpus`. One caution: m1n1's own `smp_call_sync` through the proxy hung on
+a secondary too, and m1n1 already uses fast IPIs on A12, so that may not be
+the whole story.
+
+Things that do not work for finding out more:
+
+- **Scanning PMGR from Linux.** Unimplemented pages raise a synchronous
+  abort, which a work item survives, but some pages stall the bus instead,
+  and on one CPU that freezes the whole machine.
+- **CPU hotplug.** Spin-table CPUs cannot be brought online after boot, so
+  `maxcpus=1` plus `echo 1 > online` is not available.
+
+`boot_delay=150` slows the early console enough to film, and `panic=0` keeps
+a panic on screen instead of rebooting.
 
 ## NVMe on T8020, ANS2 bring-up
 
@@ -783,7 +839,8 @@ not the exception level we are handed.
 1. **NVMe writes.** Reads work, see
    [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up). Nothing has been written
    yet.
-2. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
+2. **SMP.** All six cores start, Linux dies once it releases them, hence
+   `maxcpus=1`. See [SMP](#smp).
 3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
    is in bypass. l41ka's author vendored m1n1's DART driver into their PongoOS
    fork, which suggests that assumption is wrong. m1n1 does its own cache
