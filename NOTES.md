@@ -6,16 +6,20 @@ things that turned out to be wrong.
 ## Reading the ADT
 
     ipsw extract --pattern 'DeviceTree.*' -o work <ipsw>
-    ipsw dtree --json DeviceTree.d331pap.im4p > refs/iosdt/d331pap.json
-    python3 tools/iosdt.py refs/iosdt/d331pap.json uart
+    pyimg4 im4p extract -i refs/iosdt/DeviceTree.d331pap.im4p -o build/adt-d331p.bin
+    cd build/m1n1/proxyclient
+    ../../venv/bin/python -c '
+    from m1n1.adt import load_adt
+    adt = load_adt(open("../../adt-d331p.bin", "rb").read())
+    for c in adt["/arm-io/usb-complex"]:
+        print(c._path, [hex(c.get_reg(i)[0]) for i in range(len(c.reg))])'
 
 Every `reg` in that tree is an offset from its parent's base, and it nests.
 `/arm-io` sets the window from its `ranges`, so `usb-complex` at `0x39000000`
 is really `0x239000000`, and `usb-device` at `0x100000` under it is
-`0x239100000`, not `0x200100000`. `tools/iosdt.py` accumulates the base down
-the tree. Getting it wrong is silent, so:
-
-    python3 tools/iosdt.py --selfcheck
+`0x239100000`, not `0x200100000`. Read the raw `reg` and you get the second
+number, silently. `get_reg()` walks the `ranges` up the tree and gives the
+first, so use it rather than reading `reg` by hand.
 
 ## Addresses
 

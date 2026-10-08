@@ -5,7 +5,8 @@
  * Other names: H11
  *
  * Every address and interrupt number here was read out of the DeviceTree
- * shipped in the iPhone11,2 IPSW (see tools/iosdt.py), not guessed from T8015.
+ * shipped in the iPhone11,2 IPSW (see "Reading the ADT" in NOTES.md), not
+ * guessed from T8015.
  * The arm-io ranges property maps child 0x0 to parent 0x200000000, so a
  * peripheral offset of 0x35200000 is absolute address 0x235200000.
  *
