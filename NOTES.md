@@ -371,11 +371,9 @@ PCIe. The stack is SART, then an RTKit mailbox, then ANS2, then `nvme-apple`.
 All four are already in the Hoolock kernel and enabled in `config_16k`, so the
 work is device tree plus working out where T8020 sits between T8015 and T8103.
 
-It is not finished, but it is close. The admin queue now works end to end:
-RTKit talks, the firmware boots clean, Identify Controller and Set Features
-both complete, and Create IO CQ is accepted. Create IO SQ comes back with
-status 2, invalid field, and that is the only thing between here and a block
-device.
+It works. `nvme0n1` comes up with its GPT and APFS container intact, plus
+seven small vendor namespaces, and a 64 MiB sequential read runs at about
+400 MB/s with two reads of the same range hashing the same.
 
 Seven separate faults stood between the first attempt and that point, and each
 one hid the next, so the order below is the order they were found in.
@@ -453,6 +451,11 @@ fails and takes RTKit with it. `nvme_init_ctrl_finish` turns the resulting
 controller works fine without hwmon, so the whole device is lost over a
 temperature reading. `CONFIG_NVME_HWMON` is disabled in the Makefile.
 
+This diagnosis predates fault 7, and fault 7 could explain it just as well: a
+SMART log read is an admin command with a buffer, and half of those landed in
+ring slot 1 with an empty translation block. The flash explanation is unproven. Re-enabling hwmon is the
+test.
+
 ### 6. Set Features has to come before Create IO CQ
 
 `apple_nvme_reset_work` called `nvme_set_queue_count` after creating both
@@ -461,52 +464,41 @@ queue ids within it. M1 does not care. T8020 answers Create IO CQ with status
 2 until something has asked for a queue. Moving those lines up gets the CQ
 created.
 
-### 7. Create IO SQ, still open
+### 7. The NVMMU indexes translation blocks by ring slot
 
-Still status 2, invalid field. The firmware says why in its own syslog, which
-is worth more than the status code:
+The symptom was two problems that turned out to be one. Create IO SQ was
+refused:
 
     host_ans2.c:1545: cmd parsing error for tag 0 fast decode err 0x4
     host_ans2.c:1450: tag 0, completed with err BAD_CMD-
 
-So its fast path decoder refuses to parse the command at all.
+and every admin command after Identify that carried a buffer died with:
 
-Ruled out so far:
+    NVME_PERM_ERR ... mmu[fffffff7, 0, 0, 0, a3000000, 0, 40f]
 
-- **Queue depth.** 64 and 16 both refused. iBoot's own crash dump reports
-  `I/O SQ : 0x8788de000, size: 16`, so 16 is what the hardware uses, and the
-  same depth is accepted for the CQ.
-- **Entry size.** The ring path writes IO entries at a 128 byte stride and
-  sizes the allocation to match, while `nvme_enable_ctrl` hardcodes
-  `CC.IOSQES` to 6, 64 bytes. Setting it to 7 is at least self consistent and
-  the readback confirms `CC=0x470001`, but the command is refused either way.
-- **NVMMU depth.** `NUM_TCBS` was being set from the queue depth, which left
-  the NVMMU shorter than the queue. iBoot sets 0x3f on a part with 16 entry
-  queues, so the tag space and the queue depth are separate numbers and the
-  driver now has a separate field for it. Still refused.
-- **Missing completion queue.** The CQ is created first and returns status 0.
-  A bad `cqid` would be status 0x100, Completion Queue Invalid, not 0x2.
+The driver filled translation block `tcbs[tag]`. On the linear queue that is
+right, because there the tag is the slot. On a ring it is not. The admin queue
+has two entries and one tag, so every command is tag 0 while the ring position
+alternates between 0 and 1. The firmware reads the block at the ring position,
+so every odd command found slot 1 empty. Identify is slot 0, Set Features is
+slot 1 but carries no buffer, Create IO CQ is slot 0, and Create IO SQ is slot
+1, which is exactly the pattern that was seen.
 
-- **The queue base registers.** iOS does write two registers Linux knows
-  nothing about, found by decompiling the kext, see below. They are written
-  now, in the same order iOS writes them, and the command is still refused.
-- **MAX_PEND_CMDS.** iBoot leaves it at 0 and writing it changes nothing
-  either way, so it stays grouped with the linear queues as upstream had it.
+Invalidation is the other way round and still takes the tag. Passing the slot
+there got this on the third admin command:
 
-The command itself is not the problem. `IONVMeController::EnableSubmissionQueue`
-builds Create IO SQ as
+    assert failed: [7446]:duplicate tag error for tag 24576
 
-    cdw0  = opcode 1 | cid << 16
-    prp1  = queue physical address
-    cdw10 = qid | (qsize - 1) << 16
-    cdw11 = cqid << 16 | prio << 1 | 1
+So fill by slot, invalidate by tag.
 
-with `cqid` hardcoded to 1, which is byte for byte what this driver sends. The
-Create IO CQ builder next to it matches too, and that one is accepted. Only
-`AppleANS2NVMeController` overrides `EnableSubmissionQueue`, and its override
-calls the generic one first and only writes the base register if it returned
-success, so iOS really does send this command to this firmware and it really
-is accepted there. Whatever differs is controller state, not the command.
+Ruled out before this was found, all of which can now be put down to the slot:
+IO queue depth 64 and 16, `CC.IOSQES` 6 and 7, 64 and 128 byte entries,
+`NUM_TCBS` 15 and 63, the 0x1200 and 0x1208 base registers in either order,
+and `MAX_PEND_CMDS` on and off. Two experiments that pointed at it without
+saying so: skipping the admin translation blocks entirely broke Identify too,
+and skipping Create IO SQ got the firmware reading
+`LBA 0x106b106b`, 0x106b being Apple's PCI vendor id, which is what it reports
+when the block it reads holds nothing.
 
 ### What iOS programs that this driver does not
 
@@ -518,31 +510,14 @@ From `AppleANS2NVMeController`:
 | IOCQ base address | `nvme + 0x1208`, after Create IO CQ returns |
 | "modesel" | `nvme + 0x1304`, from `SetModeselRegister(uint32_t)` |
 
-The first two are implemented. `0x1304` is not: `SetModeselRegister` is a
-virtual call with no direct xref, so neither its caller nor its argument has
-been recovered, and the ADT carries no obvious value for it.
+The first two are written, though nothing has shown they are needed.
+`0x1304` is not: it reads 0 both before and after ANS boots, and storage works
+without it.
 
-Beyond registers, iOS pushes ADT blobs into the firmware as vendor "tunnel"
-commands, opcode 0xb1. `IONVMeFamily` contains the property names `namespaces`,
-`power-budget-platform-modes`, `low-latency-profile` and `nand-debug`, and
-`/arm-io/ans` carries all four. `namespaces` is 96 bytes of what look like
-twelve byte records and is the interesting one: a firmware that has not been
-told its namespace table may well refuse to create a queue to serve it.
-
-### Where to try next
-
-1. The `namespaces` tunnel command. Push `/arm-io/ans namespaces` with vendor
-   opcode 0xb1 before creating the IO queues. `SetTTParams` is a worked
-   example of the shape: an args buffer whose word at +0xc is the subcommand
-   and a separate data buffer.
-2. `nvme + 0x1304`. Read what iBoot leaves there first, it costs one boot.
-3. Failing both, decompile `AppleANS2NVMeController::start` properly and list
-   every register it touches, rather than the four methods looked at so far.
-
-One thing to watch while doing it: a failed admin command appears to poison
-the next one. An extra Identify issued by hand from the driver failed, and the
-Create IO CQ after it then failed too, where it had succeeded in the boot
-before. That may be its own bug in the NVMMU invalidation path.
+iOS also pushes ADT blobs into the firmware as vendor "tunnel" commands, opcode
+0xb1: `namespaces`, `power-budget-platform-modes`, `low-latency-profile` and
+`nand-debug`, all four carried by `/arm-io/ans`. None of them turned out to be
+needed for reads.
 
 ### What the ADT settles
 
@@ -664,14 +639,6 @@ carries the useful looking `_makeRegion(regions[i].size, regions[i].base & 1)`,
 but it is a different generation. Getting the v1 register semantics out of the
 kernel means disassembling the PPL, not the kext.
 
-### Where to pick this up
-
-Create IO SQ, and the kernelcache is the place to go. Pull
-`AppleANS2NVMeController` out of `IONVMeFamily` and read what it passes to
-Create IO SQ: the fields are few enough that seeing the real ones settles it.
-Everything the host can vary from this side has been tried, see the numbered
-list at the top of this section.
-
 ### A trap when reading these crash dumps
 
 ANS appears to keep its crashlog across a reset, and RTKit reports whatever it
@@ -767,11 +734,10 @@ not the exception level we are handed.
 
 ## Known gaps
 
-1. **NVMe.** The admin queue works: SART, the mailbox and RTKit all bind,
-   ANS2 boots clean, and Identify Controller, Set Features and Create IO CQ
-   all complete. Create IO SQ is refused with status 2, invalid field, so
-   there is no `nvme0n1` yet. See
-   [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
+1. **NVMe writes.** Reads work, see
+   [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up). Nothing has been written
+   yet, and the SART permits the whole of DRAM, which is fine for a
+   development phone and nothing else.
 2. **SMP.** No `cpu_start_off` for T8020 in m1n1, hence `maxcpus=1`.
 3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
    is in bypass. l41ka's author vendored m1n1's DART driver into their PongoOS
