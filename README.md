@@ -1,186 +1,85 @@
 # linux4a12
 
-Mainline Linux on the Apple A12 (T8020), targeting the iPhone XS Max
-(iPhone11,6, board D331pAP).
+Mainline Linux on the Apple A12 (T8020), on an iPhone XS Max (iPhone11,6,
+D331pAP).
 
-Scope: serial console and an initramfs shell. No display driver, touch, wifi,
-cellular or GPU. Same finish line as the A10 and A11 ports.
+The goal is a console and an initramfs shell, the same finish line as the A10
+and A11 ports. No display driver, touch, wifi, cellular or GPU.
 
-Nothing is written to the phone. Linux reads the internal storage but has
-never written to it, and a reboot returns the phone to iOS.
-
-Detailed findings, register dumps, the block addresses and the debugging
-history are in [NOTES.md](NOTES.md). What is left to do is under
-[known gaps](NOTES.md#known-gaps).
+Nothing is written to the phone. A reboot returns it to iOS.
 
 ## Status
 
-It boots to a root shell.
+| | |
+|---|---|
+| Boot to a root shell | works |
+| Framebuffer console | works (handover from iBoot) |
+| USB gadget, telnet over CDC-NCM | works, fails to enumerate on roughly 1 boot in 4 |
+| AIC interrupts | works |
+| NVMe storage | reads work, about 400 MB/s, writes untested |
+| SMP | m1n1 starts all six cores, Linux hangs once it releases them, so `maxcpus=1` |
+| cpufreq, display, everything else | not started |
 
-Linux 7.3.0-rc1 runs on one Vortex core with a framebuffer console. UART0, the
-generated power domains, the handover framebuffer, AIC interrupts and the USB
-gadget all work. The gadget enumerates as `05ac:4142` and brings up a CDC-NCM
-network interface alongside a CDC-ACM serial port, so the phone answers on
-`172.16.42.1`:
-
-    telnet 172.16.42.1
-
-    HoolockLinux test ramdisk shell
-
-    ~ # uname -a; id
+    $ telnet 172.16.42.1
+    ~ # uname -a
     Linux (none) 7.3.0-rc1 #33 SMP PREEMPT aarch64 Linux
-    uid=0 gid=0
-
-Interrupts arrive on both devices that have them:
-
-      34:      10926  AIC-FIQ     1 Level     arch_timer
-      35:          5  AIC      65922 Level     235200000.serial
-      36:        284  AIC      65987 Level     239100000.usbdev
-
-m1n1's own gadget also works, which is what `proxy-boot` uses.
-
-Internal storage works too, which was not in the original scope. The NVMe
-controller behind the ANS2 coprocessor comes up with the phone's GPT and APFS
-container intact:
-
     ~ # cat /proc/partitions
-    major minor  #blocks  name
      259        0   62500000 nvme0n1
      259        1   62499956 nvme0n1p1
-     ...
 
-plus seven small vendor namespaces. Sequential reads run at about 400 MB/s.
-Getting there took seven separate fixes, listed in order in
-[NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
-
-That is the scope this port set out to reach and then some. What is left is
-hardening: SMP, an intermittent USB enumeration failure, the gaps listed at
-the end, and making the patches fit to send upstream.
+Details, register dumps and the debugging history are in
+[NOTES.md](NOTES.md).
 
 ## Boot chain
 
     SecureROM
-      -> usbliter8 (RP2350 sends crafted USB setup packets in DFU)
-      -> PWND DFU
+      -> usbliter8, run from an RP2350 jig (l41ka)
       -> patched iBSS / iBEC
-      -> PongoOS
-      -> bootm
+      -> PongoOS, bootm
       -> m1n1
-      -> Linux (16K pages) + t8020-d331p.dtb + initramfs
+      -> Linux, 16K pages, t8020-d331p.dtb, initramfs
 
-l41ka is the only thing that gets an A12 this far. It runs usbliter8 from the
-RP2350 and embeds a PongoOS fork with T8020 support and the `bootm` command,
-neither of which upstream PongoOS has. It is "All Rights Reserved", so it stays
-a tool in `build/` and none of it is vendored here.
+l41ka is the only thing that gets an A12 this far. Its license is "All Rights
+Reserved", so it stays in `build/` and none of it is vendored here.
 
 ## Build
 
-    make deps       # clone m1n1, the Hoolock kernel, the docs, venv, apply patches/
-    make check      # compile the device tree, no kernel tree needed
-    make m1n1
-    make kernel     # Hoolock's config_16k, LLVM=1 ARCH=arm64
-    make initramfs
-    make blob       # build/m1n1-linux.bin
+    make deps       # clone m1n1, the Hoolock kernel and docs, set up a venv, apply patches/
+    make check      # compile the device tree on its own
+    make blob       # m1n1, kernel, initramfs, all in build/m1n1-linux.bin
 
-Neither m1n1 nor the kernel boots this phone unpatched, so `make deps` applies
-everything in `patches/` to the trees it clones. `make patch` does it on its
-own and is safe to re-run: an already applied patch reverses cleanly, so it is
-skipped, and anything that neither applies nor reverses is a real conflict and
-stops the build.
+`make patch` re-applies `patches/` and is safe to run again. A patch that is
+already applied is skipped, and a real conflict stops the build.
 
-## Running
+## Run
 
-Preferred. The phone leaves the jig once, before anything boots, so Linux comes
-up with the cable on the host for the whole boot:
+    make pongo      # phone in DFU on the jig, ends at a PongoOS shell
+                    # move the Lightning cable from the jig to the PC
+    make pc-boot    # upload over PongoOS's USB and boot
 
-    make pongo      # jig: DFU to a PongoOS shell
-                    # move the Lightning cable from the jig to this PC
-    make pc-boot    # upload and chainload over PongoOS's gadget (05ac:4141)
+About twenty seconds later the phone shows up as `05ac:4142`, hands the PC
+`172.16.42.2` over DHCP, and answers telnet on `172.16.42.1`.
+`tools/tsh.py "cmd"` runs one command there from a script.
 
-About twenty seconds later the phone is up as `05ac:4142`. The host takes
-`172.16.42.2` by DHCP from it, and the shell is on the other end:
-
-    telnet 172.16.42.1
-
-There is a getty on the CDC-ACM port too, as the `05ac:4142` `/dev/ttyACM*`
-rather than the jig's. It wants a keypress before it prints anything.
-
-m1n1 alone, which is how its proxy becomes usable:
-
-    make pongo
-                    # move the cable to the PC
-    build/venv/bin/python tools/pcboot.py build/m1n1/build/m1n1.bin
-
-It lands in `uartproxy_run()` and enumerates as `1209:316d`. Then:
-
-    make proxy-boot # load kernel, dtb and initramfs, no new DFU cycle
-
-One proxy session per m1n1 boot. A second one wedges it.
-
-### When the chain starts failing
-
-Retry first. The board drops off USB mid-`exploit` and the phone boots iOS.
-
-It degrades the more the phone comes off the jig. A firmware reset is not
-enough: unplug the RP2350 from USB for a few seconds and plug it back in.
+If the exploit stage keeps failing, unplug the RP2350 from USB for a few
+seconds. A firmware reset is not enough.
 
 ## Dependencies
 
-Host tools:
+| Host | For |
+|---|---|
+| `clang`, `ld.lld` | kernel and m1n1, no aarch64 GCC needed |
+| Rust with `rust-src` | m1n1 (`BUILDSTD=1`). On Gentoo a USE flag on `rust-bin` |
+| `dtc`, `cpp` | `make check` |
+| `python3` | `tools/`, m1n1's proxyclient |
+| `git`, `curl`, `unzip` | `make deps`, `make initramfs` |
+| `ipsw`, `pyimg4` | only to pull a DeviceTree out of a new IPSW |
 
-| Need                      | Why                                          |
-|---------------------------|----------------------------------------------|
-| `clang`, `ld.lld`         | kernel and m1n1; no aarch64 GCC needed       |
-| Rust with `rust-src`      | m1n1's `core`/`alloc` via `BUILDSTD=1`       |
-| `dtc`, `cpp`              | `make check`                                 |
-| `python3` with `venv`     | `tools/`, m1n1's proxyclient                 |
-| `git`, `curl`, `unzip`    | `make deps`, `make initramfs`                |
-| `cpio`, `gzip`            | initramfs repack                             |
-| `ipsw`                    | only for pulling a new DeviceTree from an IPSW |
-
-Python, into `build/venv` (`make deps` installs `construct`):
-
-| Package     | Used by                                  |
-|-------------|------------------------------------------|
-| `pyusb`     | `laikadbg.py`, `tools/pcboot.py`         |
-| `pyserial`  | m1n1 proxyclient                         |
-| `construct` | m1n1 proxyclient ADT parsing             |
-| `pyimg4`    | `make pmgr`, unwrapping the DeviceTree   |
-
-Cloned into `build/` by `make deps`:
-
-| Repo                          | Role                              |
-|-------------------------------|-----------------------------------|
-| `HoolockLinux/m1n1`           | chainloader                       |
-| `HoolockLinux/linux`          | kernel                            |
-| `HoolockLinux/docs`           | `config_16k`                      |
-
-Fetched by hand, not by `make deps`:
-
-| Thing                    | Where                                                |
-|--------------------------|------------------------------------------------------|
-| l41ka firmware + scripts | `build/l41ka/`, see [NOTES.md](NOTES.md#rp2350-firmware) |
-| PongoOS source           | `build/pongoos/`, reference only, pin the `t8030` branch |
-| Hoolock initramfs        | `make initramfs`, from nightly.link                  |
-
-On Gentoo, `rust-src` is a USE flag on `dev-lang/rust-bin`.
+`build/venv` gets `pyusb`, `pyserial` and `construct`. The l41ka firmware and
+scripts go in `build/l41ka/` by hand, see
+[NOTES.md](NOTES.md#rp2350-firmware).
 
 ## License
 
-Dual licensed, `GPL-2.0+ OR MIT`. See [LICENSE](LICENSE).
-
-`patches/` is excluded: those are changes to other people's code and carry that
-code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT. Each one is generated
-with `git diff` against the pinned checkout, so the trees rebuild from them
-byte for byte.
-
-`linux-0004` and `linux-0005` are the NVMe work: SART version 1 support, and
-the T8020 variant of the ANS2 driver. See
-[NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
-
-`linux-0002` keeps six `dev_info` calls that look like leftover debugging and
-are not: removing them stops the gadget enumerating. See the comment on them,
-and [NOTES.md](NOTES.md#the-gadget-prints-are-load-bearing). It also carries a
-one-shot report, printed 15 seconds after the gadget starts, that is there to
-catch the next enumeration failure. See
-[NOTES.md](NOTES.md#the-gadget-sometimes-never-takes-an-address).
+`GPL-2.0+ OR MIT`, see [LICENSE](LICENSE). `patches/` keeps the license of
+the code it patches: `linux-*` GPL-2.0, `m1n1-*` MIT.
