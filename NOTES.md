@@ -368,6 +368,48 @@ So they are delays wearing a print's clothing. The real fix is to find which
 gap matters and put an explicit delay there, which costs a DFU cycle per guess.
 Until someone does that, leave all six alone.
 
+## The gadget sometimes never takes an address
+
+Open. Two boots out of about seven failed like this, both after NVMe started
+working and while the SART still permitted all of DRAM to ANS. The host log,
+in `/var/log/kern.log` on the PC, has the first error:
+
+    usb 3-2: device not accepting address 71, error -62
+
+and then descriptor read timeouts and a port power cycle. The phone's screen
+showed two `new device is high-speed` lines and then nothing at all, not even
+for the resets the host went on to issue. So the gadget got through bus reset
+and enumeration speed, took SET_ADDRESS, never sent its status stage, and
+then stopped answering anything.
+
+What is settled:
+
+- **Not the USB DART.** The device is stream 0 of `/arm-io/dart-usb`
+  (`mapper-usbdev`, reg 0), and Linux finds that stream in bypass,
+  `TCR=0x100`, with `CONFIG=0`, so nothing is locked. PongoOS does run the
+  DART in translate mode for its own gadget, but its `usb_teardown()` puts it
+  back to bypass before `bootm`.
+- **Not timing within the boot.** One working boot enumerated at 1.50 and
+  1.62 seconds, the same as both failures.
+
+The suspect, unproven, is ANS writing into Linux memory. Its firmware still
+carries addresses iBoot gave it (its crash dump printed iBoot's IO queue at
+`0x8788de000`), and with all of DRAM permitted any write to one of those
+lands wherever Linux has since put something. Narrowing the SART to one entry
+per queue was right regardless, and three boots after it all enumerated. That
+is not yet enough boots to call it fixed.
+
+`linux-0002` carries a one-shot report to settle it the next time it happens.
+Fifteen seconds after the gadget starts it prints:
+
+    apple: irqs=194 setups=30 last=21 20 0000 ep0_state=0 ...
+
+That is a good boot. On a failing one, photograph the screen after 20
+seconds. No line at all means the kernel hung. A line with only a handful of
+`irqs` means the controller stopped interrupting. Plenty of `irqs` with few
+`setups` means the gadget saw traffic and did not answer it, and `last` is
+the request it choked on.
+
 ## NVMe on T8020, ANS2 bring-up
 
 Storage on this phone is NVMe behind the ANS2 coprocessor, not eMMC and not

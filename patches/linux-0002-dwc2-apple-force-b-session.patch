@@ -1,5 +1,5 @@
 diff --git a/drivers/usb/dwc2/gadget.c b/drivers/usb/dwc2/gadget.c
-index 102169b40..af5e6a294 100644
+index 102169b40..37021c1c1 100644
 --- a/drivers/usb/dwc2/gadget.c
 +++ b/drivers/usb/dwc2/gadget.c
 @@ -22,6 +22,7 @@
@@ -10,7 +10,59 @@ index 102169b40..af5e6a294 100644
  
  #include <linux/usb/ch9.h>
  #include <linux/usb/gadget.h>
-@@ -4577,6 +4578,73 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
+@@ -1920,6 +1921,33 @@ static void dwc2_hsotg_stall_ep0(struct dwc2_hsotg *hsotg)
+ 	 dwc2_hsotg_enqueue_setup(hsotg);
+ }
+ 
++/*
++ * ponytail: a one-shot report for the intermittent enumeration failure, see
++ * "The gadget sometimes never takes an address" in NOTES.md. It fires 15
++ * seconds after the gadget starts, long after enumeration has succeeded or
++ * the host has given up, so it cannot shift the timing it is there to watch.
++ * If the line never appears the kernel hung. If it does, the counters say
++ * whether the controller stopped interrupting or the gadget stopped
++ * answering. Remove it once a failing boot has been caught.
++ */
++static unsigned int apple_irqs, apple_setups;
++static struct usb_ctrlrequest apple_last_ctrl;
++static struct dwc2_hsotg *apple_report_hsotg;
++
++static void apple_report_fn(struct work_struct *work)
++{
++	struct dwc2_hsotg *hsotg = apple_report_hsotg;
++
++	dev_info(hsotg->dev,
++		 "apple: irqs=%u setups=%u last=%02x %02x %04x ep0_state=%d DSTS=%08x DCFG=%08x GINTSTS=%08x DOEPCTL0=%08x DIEPCTL0=%08x\n",
++		 apple_irqs, apple_setups, apple_last_ctrl.bRequestType,
++		 apple_last_ctrl.bRequest, le16_to_cpu(apple_last_ctrl.wValue),
++		 hsotg->ep0_state, dwc2_readl(hsotg, DSTS),
++		 dwc2_readl(hsotg, DCFG), dwc2_readl(hsotg, GINTSTS),
++		 dwc2_readl(hsotg, DOEPCTL(0)), dwc2_readl(hsotg, DIEPCTL(0)));
++}
++static DECLARE_DELAYED_WORK(apple_report, apple_report_fn);
++
+ /**
+  * dwc2_hsotg_process_control - process a control request
+  * @hsotg: The device state
+@@ -1936,6 +1964,9 @@ static void dwc2_hsotg_process_control(struct dwc2_hsotg *hsotg,
+ 	int ret = 0;
+ 	u32 dcfg;
+ 
++	apple_setups++;
++	apple_last_ctrl = *ctrl;
++
+ 	dev_dbg(hsotg->dev,
+ 		"ctrl Type=%02x, Req=%02x, V=%04x, I=%04x, L=%04x\n",
+ 		ctrl->bRequestType, ctrl->bRequest, ctrl->wValue,
+@@ -3712,6 +3743,7 @@ static irqreturn_t dwc2_hsotg_irq(int irq, void *pw)
+ 	u32 gintsts;
+ 	u32 gintmsk;
+ 
++	apple_irqs++;
+ 	if (!dwc2_is_device_mode(hsotg))
+ 		return IRQ_NONE;
+ 
+@@ -4577,6 +4609,76 @@ static int dwc2_hsotg_udc_start(struct usb_gadget *gadget,
  	}
  
  	hsotg->enabled = 0;
@@ -33,6 +85,9 @@ index 102169b40..af5e6a294 100644
 +
 +		hsotg->op_state = OTG_STATE_B_PERIPHERAL;
 +		hsotg->enabled = 1;
++
++		apple_report_hsotg = hsotg;
++		mod_delayed_work(system_wq, &apple_report, 15 * HZ);
 +
 +		/*
 +		 * ponytail: these prints are load bearing, which nobody wants
@@ -84,7 +139,7 @@ index 102169b40..af5e6a294 100644
  	spin_unlock_irqrestore(&hsotg->lock, flags);
  
  	gadget->sg_supported = using_desc_dma(hsotg);
-@@ -4705,6 +4773,23 @@ static int dwc2_hsotg_pullup(struct usb_gadget *gadget, int is_on)
+@@ -4705,6 +4807,23 @@ static int dwc2_hsotg_pullup(struct usb_gadget *gadget, int is_on)
  		/* Enable ACG feature in device mode,if supported */
  		dwc2_enable_acg(hsotg);
  		dwc2_hsotg_core_connect(hsotg);
