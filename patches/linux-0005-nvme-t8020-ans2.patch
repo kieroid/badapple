@@ -1,5 +1,5 @@
 diff --git a/drivers/nvme/host/apple.c b/drivers/nvme/host/apple.c
-index c63e28c75..a65c81b12 100644
+index c63e28c75..2181003ab 100644
 --- a/drivers/nvme/host/apple.c
 +++ b/drivers/nvme/host/apple.c
 @@ -28,6 +28,7 @@
@@ -10,7 +10,31 @@ index c63e28c75..a65c81b12 100644
  #include <linux/soc/apple/sart.h>
  #include <linux/reset.h>
  #include <linux/time64.h>
-@@ -182,9 +183,26 @@ struct apple_nvme_iod {
+@@ -42,6 +43,23 @@
+ #define APPLE_ANS_ACQ_DB  0x1004
+ #define APPLE_ANS_IOCQ_DB 0x100c
+ 
++/*
++ * Where ANS2 wants the IO queue base addresses, on top of the Create IO CQ and
++ * Create IO SQ admin commands. iOS writes them from
++ * AppleANS2NVMeController::EnableCompletionQueue and ::EnableSubmissionQueue,
++ * each one straight after the matching admin command returns:
++ *
++ *   nvme: Setting IOCQ base addr %p   ->  0x1208
++ *   nvme: Setting IOSQ base addr %p   ->  0x1200
++ *
++ * The order is what matters. Until 0x1208 holds the completion queue, the
++ * firmware does not consider that queue usable, and Create IO SQ naming it as
++ * its cqid comes back as status 2, invalid field, even though the Create IO CQ
++ * before it was accepted.
++ */
++#define APPLE_ANS_IOSQ_BASE 0x1200
++#define APPLE_ANS_IOCQ_BASE 0x1208
++
+ #define APPLE_ANS_MAX_PEND_CMDS_CTRL 0x1210
+ 
+ #define APPLE_ANS_BOOT_STATUS	 0x1300
+@@ -182,9 +200,28 @@ struct apple_nvme_iod {
  	struct scatterlist *sg;
  };
  
@@ -35,10 +59,12 @@ index c63e28c75..a65c81b12 100644
 +	 * Create IO CQ, which needs no blocks, is accepted.
 +	 */
 +	u32 nvmmu_tcbs;
++	/* ANS2 wants the IO queue bases in MMIO as well as in the command. */
++	bool has_queue_base_regs;
  };
  
  struct apple_nvme {
-@@ -199,6 +217,7 @@ struct apple_nvme {
+@@ -199,6 +236,7 @@ struct apple_nvme {
  	int pd_count;
  
  	struct apple_sart *sart;
@@ -46,7 +72,7 @@ index c63e28c75..a65c81b12 100644
  	struct apple_rtkit *rtk;
  	struct reset_control *reset;
  
-@@ -294,6 +313,8 @@ static const struct apple_rtkit_ops apple_nvme_rtkit_ops = {
+@@ -294,6 +332,8 @@ static const struct apple_rtkit_ops apple_nvme_rtkit_ops = {
  	.shmem_destroy = apple_nvme_sart_dma_destroy,
  };
  
@@ -55,7 +81,7 @@ index c63e28c75..a65c81b12 100644
  static void apple_nvmmu_inval(struct apple_nvme_queue *q, unsigned int tag)
  {
  	struct apple_nvme *anv = queue_to_apple_nvme(q);
-@@ -304,7 +325,27 @@ static void apple_nvmmu_inval(struct apple_nvme_queue *q, unsigned int tag)
+@@ -304,7 +344,27 @@ static void apple_nvmmu_inval(struct apple_nvme_queue *q, unsigned int tag)
  				     "NVMMU TCB invalidation failed\n");
  }
  
@@ -84,7 +110,7 @@ index c63e28c75..a65c81b12 100644
  				  struct nvme_command *cmd)
  {
  	struct apple_nvme *anv = queue_to_apple_nvme(q);
-@@ -322,28 +363,38 @@ static void apple_nvme_submit_cmd_t8015(struct apple_nvme_queue *q,
+@@ -322,28 +382,38 @@ static void apple_nvme_submit_cmd_t8015(struct apple_nvme_queue *q,
  
  	writel(q->sq_tail, q->sq_db);
  	spin_unlock_irq(&anv->lock);
@@ -138,7 +164,7 @@ index c63e28c75..a65c81b12 100644
  
  	memcpy(&q->sqes[tag], cmd, sizeof(*cmd));
  
-@@ -637,9 +688,13 @@ static inline void apple_nvme_handle_cqe(struct apple_nvme_queue *q,
+@@ -637,9 +707,13 @@ static inline void apple_nvme_handle_cqe(struct apple_nvme_queue *q,
  	__u16 command_id = READ_ONCE(cqe->command_id);
  	struct request *req;
  
@@ -153,7 +179,7 @@ index c63e28c75..a65c81b12 100644
  	req = nvme_find_rq(apple_nvme_queue_tagset(anv, q), command_id);
  	if (unlikely(!req)) {
  		dev_warn(anv->dev, "invalid id %d completed", command_id);
-@@ -814,10 +869,13 @@ static blk_status_t apple_nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
+@@ -814,10 +888,13 @@ static blk_status_t apple_nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
  
  	nvme_start_request(req);
  
@@ -170,7 +196,7 @@ index c63e28c75..a65c81b12 100644
  
  	return BLK_STS_OK;
  
-@@ -954,6 +1012,35 @@ static enum blk_eh_timer_return apple_nvme_timeout(struct request *req)
+@@ -954,6 +1031,35 @@ static enum blk_eh_timer_return apple_nvme_timeout(struct request *req)
  		dev_warn(anv->dev,
  			 "I/O %d(aq:%d) timeout while not in live state\n",
  			 req->tag, q->is_adminq);
@@ -206,7 +232,7 @@ index c63e28c75..a65c81b12 100644
  		if (blk_mq_request_started(req) &&
  		    !blk_mq_request_completed(req)) {
  			nvme_req(req)->status = NVME_SC_HOST_ABORTED_CMD;
-@@ -1028,13 +1115,48 @@ static void apple_nvme_init_queue(struct apple_nvme_queue *q)
+@@ -1028,13 +1134,48 @@ static void apple_nvme_init_queue(struct apple_nvme_queue *q)
  	q->sq_tail = 0;
  	q->cq_head = 0;
  	q->cq_phase = 1;
@@ -257,7 +283,7 @@ index c63e28c75..a65c81b12 100644
  static void apple_nvme_reset_work(struct work_struct *work)
  {
  	unsigned int nr_io_queues = 1;
-@@ -1044,6 +1166,8 @@ static void apple_nvme_reset_work(struct work_struct *work)
+@@ -1044,6 +1185,8 @@ static void apple_nvme_reset_work(struct work_struct *work)
  		container_of(work, struct apple_nvme, ctrl.reset_work);
  	enum nvme_ctrl_state state = nvme_ctrl_state(&anv->ctrl);
  
@@ -266,7 +292,7 @@ index c63e28c75..a65c81b12 100644
  	if (state != NVME_CTRL_RESETTING) {
  		dev_warn(anv->dev, "ctrl state %d is not RESETTING\n", state);
  		ret = -ENODEV;
-@@ -1090,6 +1214,33 @@ static void apple_nvme_reset_work(struct work_struct *work)
+@@ -1090,6 +1233,33 @@ static void apple_nvme_reset_work(struct work_struct *work)
  		if (ret)
  			goto out;
  
@@ -300,7 +326,7 @@ index c63e28c75..a65c81b12 100644
  		writel(APPLE_ANS_COPROC_CPU_CONTROL_RUN,
  		       anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL);
  
-@@ -1124,11 +1275,8 @@ static void apple_nvme_reset_work(struct work_struct *work)
+@@ -1124,24 +1294,31 @@ static void apple_nvme_reset_work(struct work_struct *work)
  
  	dma_set_max_seg_size(anv->dev, 0xffffffff);
  
@@ -314,15 +340,22 @@ index c63e28c75..a65c81b12 100644
  		writel(APPLE_ANS_LINEAR_SQ_EN,
  			anv->mmio_nvme + APPLE_ANS_LINEAR_SQ_CTRL);
  
-@@ -1136,12 +1284,16 @@ static void apple_nvme_reset_work(struct work_struct *work)
+-		/* Allow as many pending command as possible for both queues */
++		/*
++		 * Allow as many pending command as possible for both queues.
++		 * iBoot leaves this at 0 on T8020 and writing it changes
++		 * nothing there, so it stays with the linear queues that
++		 * upstream grouped it with.
++		 */
  		writel(anv->hw->max_queue_depth
  			| (anv->hw->max_queue_depth << 16), anv->mmio_nvme
  			+ APPLE_ANS_MAX_PEND_CMDS_CTRL);
 +	}
++
++	if (anv->hw->has_nvmmu) {
  
 -		/* Setup the NVMMU for the maximum admin and IO queue depth */
 -		writel(anv->hw->max_queue_depth - 1,
-+	if (anv->hw->has_nvmmu) {
 +		/* Setup the NVMMU for the whole tag space */
 +		writel(anv->hw->nvmmu_tcbs - 1,
  			anv->mmio_nvme + APPLE_NVMMU_NUM_TCBS);
@@ -333,7 +366,7 @@ index c63e28c75..a65c81b12 100644
  	/* Setup the admin queue */
  	aqa = APPLE_NVME_AQ_DEPTH - 1;
  	aqa |= aqa << 16;
-@@ -1149,7 +1301,7 @@ static void apple_nvme_reset_work(struct work_struct *work)
+@@ -1149,7 +1326,7 @@ static void apple_nvme_reset_work(struct work_struct *work)
  	writeq(anv->adminq.sq_dma_addr, anv->mmio_nvme + NVME_REG_ASQ);
  	writeq(anv->adminq.cq_dma_addr, anv->mmio_nvme + NVME_REG_ACQ);
  
@@ -342,7 +375,7 @@ index c63e28c75..a65c81b12 100644
  		/* Setup NVMMU for both queues */
  		writeq(anv->adminq.tcb_dma_addr,
  			anv->mmio_nvme + APPLE_NVMMU_ASQ_TCB_BASE);
-@@ -1157,6 +1309,19 @@ static void apple_nvme_reset_work(struct work_struct *work)
+@@ -1157,6 +1334,19 @@ static void apple_nvme_reset_work(struct work_struct *work)
  			anv->mmio_nvme + APPLE_NVMMU_IOSQ_TCB_BASE);
  	}
  
@@ -362,7 +395,7 @@ index c63e28c75..a65c81b12 100644
  	anv->ctrl.sqsize =
  		anv->hw->max_queue_depth - 1; /* 0's based queue depth */
  	anv->ctrl.cap = readq(anv->mmio_nvme + NVME_REG_CAP);
-@@ -1166,6 +1331,25 @@ static void apple_nvme_reset_work(struct work_struct *work)
+@@ -1166,6 +1356,25 @@ static void apple_nvme_reset_work(struct work_struct *work)
  	if (ret)
  		goto out;
  
@@ -388,7 +421,7 @@ index c63e28c75..a65c81b12 100644
  	dev_dbg(anv->dev, "Starting admin queue");
  	apple_nvme_init_queue(&anv->adminq);
  	nvme_unquiesce_admin_queue(&anv->ctrl);
-@@ -1181,6 +1365,25 @@ static void apple_nvme_reset_work(struct work_struct *work)
+@@ -1181,24 +1390,42 @@ static void apple_nvme_reset_work(struct work_struct *work)
  	if (ret)
  		goto out;
  
@@ -414,8 +447,18 @@ index c63e28c75..a65c81b12 100644
  	dev_dbg(anv->dev, "Creating IOCQ");
  	ret = apple_nvme_create_cq(anv);
  	if (ret)
-@@ -1191,14 +1394,6 @@ static void apple_nvme_reset_work(struct work_struct *work)
+ 		goto out;
++	if (anv->hw->has_queue_base_regs)
++		writeq(anv->ioq.cq_dma_addr,
++		       anv->mmio_nvme + APPLE_ANS_IOCQ_BASE);
++
+ 	dev_dbg(anv->dev, "Creating IOSQ");
+ 	ret = apple_nvme_create_sq(anv);
+ 	if (ret)
  		goto out_remove_cq;
++	if (anv->hw->has_queue_base_regs)
++		writeq(anv->ioq.sq_dma_addr,
++		       anv->mmio_nvme + APPLE_ANS_IOSQ_BASE);
  
  	apple_nvme_init_queue(&anv->ioq);
 -	nr_io_queues = 1;
@@ -429,7 +472,7 @@ index c63e28c75..a65c81b12 100644
  
  	anv->ctrl.queue_count = nr_io_queues + 1;
  
-@@ -1347,11 +1542,68 @@ static int apple_nvme_alloc_tagsets(struct apple_nvme *anv)
+@@ -1347,11 +1574,68 @@ static int apple_nvme_alloc_tagsets(struct apple_nvme *anv)
  	return 0;
  }
  
@@ -498,7 +541,7 @@ index c63e28c75..a65c81b12 100644
  
  	q->cqes = dmam_alloc_coherent(anv->dev,
  				      depth * sizeof(struct nvme_completion),
-@@ -1359,7 +1611,12 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
+@@ -1359,7 +1643,12 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
  	if (!q->cqes)
  		return -ENOMEM;
  
@@ -512,7 +555,7 @@ index c63e28c75..a65c81b12 100644
  		iosq_size = depth * sizeof(struct nvme_command);
  	else
  		iosq_size = depth << APPLE_NVME_IOSQES;
-@@ -1369,17 +1626,27 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
+@@ -1369,17 +1658,27 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
  	if (!q->sqes)
  		return -ENOMEM;
  
@@ -542,7 +585,7 @@ index c63e28c75..a65c81b12 100644
  	}
  
  	/*
-@@ -1501,7 +1768,7 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
+@@ -1501,7 +1800,7 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
  		goto put_dev;
  	}
  
@@ -551,7 +594,7 @@ index c63e28c75..a65c81b12 100644
  		anv->adminq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_ASQ_DB;
  		anv->adminq.cq_db = anv->mmio_nvme + APPLE_ANS_ACQ_DB;
  		anv->ioq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_IOSQ_DB;
-@@ -1698,17 +1965,37 @@ static DEFINE_SIMPLE_DEV_PM_OPS(apple_nvme_pm_ops, apple_nvme_suspend,
+@@ -1698,17 +1997,38 @@ static DEFINE_SIMPLE_DEV_PM_OPS(apple_nvme_pm_ops, apple_nvme_suspend,
  				apple_nvme_resume);
  
  static const struct apple_nvme_hw apple_nvme_t8015_hw = {
@@ -575,6 +618,7 @@ index c63e28c75..a65c81b12 100644
 +	.has_linear_sq = false,
  	.max_queue_depth = 16,
 +	.nvmmu_tcbs = 64,
++	.has_queue_base_regs = true,
  };
  
  static const struct apple_nvme_hw apple_nvme_t8103_hw = {

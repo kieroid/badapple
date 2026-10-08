@@ -463,7 +463,15 @@ created.
 
 ### 7. Create IO SQ, still open
 
-Still status 2, invalid field. Ruled out so far:
+Still status 2, invalid field. The firmware says why in its own syslog, which
+is worth more than the status code:
+
+    host_ans2.c:1545: cmd parsing error for tag 0 fast decode err 0x4
+    host_ans2.c:1450: tag 0, completed with err BAD_CMD-
+
+So its fast path decoder refuses to parse the command at all.
+
+Ruled out so far:
 
 - **Queue depth.** 64 and 16 both refused. iBoot's own crash dump reports
   `I/O SQ : 0x8788de000, size: 16`, so 16 is what the hardware uses, and the
@@ -479,10 +487,57 @@ Still status 2, invalid field. Ruled out so far:
 - **Missing completion queue.** The CQ is created first and returns status 0.
   A bad `cqid` would be status 0x100, Completion Queue Invalid, not 0x2.
 
-That leaves `prp1`, `sq_flags` and `sqid`, none of which have anywhere
-obvious to be wrong. The next step is the iOS kernelcache: what
-`AppleANS2NVMeController` passes to Create IO SQ on this SoC settles it, and
-guessing has run out of road.
+- **The queue base registers.** iOS does write two registers Linux knows
+  nothing about, found by decompiling the kext, see below. They are written
+  now, in the same order iOS writes them, and the command is still refused.
+- **MAX_PEND_CMDS.** iBoot leaves it at 0 and writing it changes nothing
+  either way, so it stays grouped with the linear queues as upstream had it.
+
+The command itself is not the problem. `IONVMeController::EnableSubmissionQueue`
+builds Create IO SQ as
+
+    cdw0  = opcode 1 | cid << 16
+    prp1  = queue physical address
+    cdw10 = qid | (qsize - 1) << 16
+    cdw11 = cqid << 16 | prio << 1 | 1
+
+with `cqid` hardcoded to 1, which is byte for byte what this driver sends. The
+Create IO CQ builder next to it matches too, and that one is accepted. Only
+`AppleANS2NVMeController` overrides `EnableSubmissionQueue`, and its override
+calls the generic one first and only writes the base register if it returned
+success, so iOS really does send this command to this firmware and it really
+is accepted there. Whatever differs is controller state, not the command.
+
+### What iOS programs that this driver does not
+
+From `AppleANS2NVMeController`:
+
+| What | Where |
+|---|---|
+| IOSQ base address | `nvme + 0x1200`, after Create IO SQ returns |
+| IOCQ base address | `nvme + 0x1208`, after Create IO CQ returns |
+| "modesel" | `nvme + 0x1304`, from `SetModeselRegister(uint32_t)` |
+
+The first two are implemented. `0x1304` is not: `SetModeselRegister` is a
+virtual call with no direct xref, so neither its caller nor its argument has
+been recovered, and the ADT carries no obvious value for it.
+
+Beyond registers, iOS pushes ADT blobs into the firmware as vendor "tunnel"
+commands, opcode 0xb1. `IONVMeFamily` contains the property names `namespaces`,
+`power-budget-platform-modes`, `low-latency-profile` and `nand-debug`, and
+`/arm-io/ans` carries all four. `namespaces` is 96 bytes of what look like
+twelve byte records and is the interesting one: a firmware that has not been
+told its namespace table may well refuse to create a queue to serve it.
+
+### Where to try next
+
+1. The `namespaces` tunnel command. Push `/arm-io/ans namespaces` with vendor
+   opcode 0xb1 before creating the IO queues. `SetTTParams` is a worked
+   example of the shape: an args buffer whose word at +0xc is the subcommand
+   and a separate data buffer.
+2. `nvme + 0x1304`. Read what iBoot leaves there first, it costs one boot.
+3. Failing both, decompile `AppleANS2NVMeController::start` properly and list
+   every register it touches, rather than the four methods looked at so far.
 
 One thing to watch while doing it: a failed admin command appears to poison
 the next one. An extra Identify issued by hand from the driver failed, and the
