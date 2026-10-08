@@ -6,7 +6,8 @@ Mainline Linux on the Apple A12 (T8020), targeting the iPhone XS Max
 Scope: serial console and an initramfs shell. No display driver, touch, wifi,
 cellular or GPU. Same finish line as the A10 and A11 ports.
 
-Nothing is written to the phone. Reboot returns it to iOS.
+Nothing is written to the phone. Linux reads the internal storage but has
+never written to it, and a reboot returns the phone to iOS.
 
 Detailed findings, register dumps, the block addresses and the debugging
 history are in [NOTES.md](NOTES.md). What is left to do is under
@@ -38,8 +39,23 @@ Interrupts arrive on both devices that have them:
 
 m1n1's own gadget also works, which is what `proxy-boot` uses.
 
-That is the scope this port set out to reach. What is left is hardening: SMP,
-the gaps listed at the end, and making the patches fit to send upstream.
+Internal storage works too, which was not in the original scope. The NVMe
+controller behind the ANS2 coprocessor comes up with the phone's GPT and APFS
+container intact:
+
+    ~ # cat /proc/partitions
+    major minor  #blocks  name
+     259        0   62500000 nvme0n1
+     259        1   62499956 nvme0n1p1
+     ...
+
+plus seven small vendor namespaces. Sequential reads run at about 400 MB/s.
+Getting there took seven separate fixes, listed in order in
+[NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
+
+That is the scope this port set out to reach and then some. What is left is
+hardening: SMP, an intermittent USB enumeration failure, the gaps listed at
+the end, and making the patches fit to send upstream.
 
 ## Boot chain
 
@@ -120,7 +136,7 @@ Host tools:
 | `python3` with `venv`     | `tools/`, m1n1's proxyclient                 |
 | `git`, `curl`, `unzip`    | `make deps`, `make initramfs`                |
 | `cpio`, `gzip`            | initramfs repack                             |
-| `ipsw`                    | only for `make pmgr` and refreshing the ADT  |
+| `ipsw`                    | only for pulling a new DeviceTree from an IPSW |
 
 Python, into `build/venv` (`make deps` installs `construct`):
 
@@ -129,6 +145,7 @@ Python, into `build/venv` (`make deps` installs `construct`):
 | `pyusb`     | `laikadbg.py`, `tools/pcboot.py`         |
 | `pyserial`  | m1n1 proxyclient                         |
 | `construct` | m1n1 proxyclient ADT parsing             |
+| `pyimg4`    | `make pmgr`, unwrapping the DeviceTree   |
 
 Cloned into `build/` by `make deps`:
 
@@ -157,10 +174,13 @@ code's license. `linux-*` are GPL-2.0, `m1n1-*` are MIT. Each one is generated
 with `git diff` against the pinned checkout, so the trees rebuild from them
 byte for byte.
 
-`linux-0004` and `linux-0005` are NVMe bring-up and do not finish the job on
-their own. Both are necessary and neither is sufficient, see
+`linux-0004` and `linux-0005` are the NVMe work: SART version 1 support, and
+the T8020 variant of the ANS2 driver. See
 [NOTES.md](NOTES.md#nvme-on-t8020-ans2-bring-up).
 
 `linux-0002` keeps six `dev_info` calls that look like leftover debugging and
 are not: removing them stops the gadget enumerating. See the comment on them,
-and [NOTES.md](NOTES.md#the-gadget-prints-are-load-bearing).
+and [NOTES.md](NOTES.md#the-gadget-prints-are-load-bearing). It also carries a
+one-shot report, printed 15 seconds after the gadget starts, that is there to
+catch the next enumeration failure. See
+[NOTES.md](NOTES.md#the-gadget-sometimes-never-takes-an-address).
