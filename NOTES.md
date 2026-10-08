@@ -443,22 +443,17 @@ differently. Writing 1 aims everything at a Tempest core and even the mailbox
 stops arriving. The value has to be `BIT(AIC_WHOAMI)` for the core doing the
 programming, which is what `aic_cpu_index` already recorded for the IPI path.
 
-### 5. The SMART log kills the firmware
+### 5. The SMART log looked like it killed the firmware
 
     assert failed: [11956]:NVME_PERM_ERR F2H 1 SL[0] ERR 0x408 ... LBA 0x64013200
 
-Not a permission problem despite the name: permitting the whole of DRAM
-through the SART changed nothing. The firmware reads flash to answer a SMART
-log page, this NAND has been through a great many unclean resets, and the read
-fails and takes RTKit with it. `nvme_init_ctrl_finish` turns the resulting
-`-EINTR` into a failed controller reset even though its own comment says the
-controller works fine without hwmon, so the whole device is lost over a
-temperature reading. `CONFIG_NVME_HWMON` is disabled in the Makefile.
-
-This diagnosis predates fault 7, and fault 7 could explain it just as well: a
-SMART log read is an admin command with a buffer, and half of those landed in
-ring slot 1 with an empty translation block. The flash explanation is unproven. Re-enabling hwmon is the
-test.
+This was blamed on worn flash failing the read behind a SMART log page, and
+`CONFIG_NVME_HWMON` was disabled to avoid it. It was fault 7 instead: a SMART
+log read is an admin command with a buffer, and half of those landed in a ring
+slot with an empty translation block. With 7 fixed, hwmon is back on and the
+log reads fine. Worth noting because `nvme_init_ctrl_finish` turns a hwmon
+failure into a failed controller reset, despite its own comment calling hwmon
+optional, so the next unrelated admin fault will look like this one again.
 
 ### 6. Set Features has to come before Create IO CQ
 
