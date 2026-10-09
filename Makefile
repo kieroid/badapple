@@ -150,7 +150,7 @@ pongoos: $(PONGO)
 
 $(PONGO_RAW):
 	mkdir -p build
-	test -d $(PONGO_SRC) || git clone --depth 1 -b t8027 \
+	test -d $(PONGO_SRC) || git clone --depth 1 -b t8030 \
 	    https://github.com/0cyn/PongoOS.git $(PONGO_SRC)
 	$(MAKE) -C $(PONGO_SRC) EMBEDDED_CFLAGS="$(PONGO_LD)" build/Pongo.bin
 

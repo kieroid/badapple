@@ -41,6 +41,18 @@ _start:
 	movz	x5, #T8020_SRAM_BASE_HI, lsl #16
 	movk	x5, #T8020_SRAM_BASE_TOP, lsl #32
 	mov	sp, x5
+
+	/*
+	 * With SPSel set the write above lands in the SP of whatever exception
+	 * level the ROM entered at, so at EL2 or EL3 it is not the SP_EL1 that
+	 * PongoOS reads. Write that one too. The register is only reachable
+	 * from EL2 and up, so skip it when we are already at EL1.
+	 */
+	mrs	x6, CurrentEL
+	cmp	x6, #(1 << 2)
+	b.eq	Lsp_done
+	msr	sp_el1, x5
+Lsp_done:
 	mov	x0, #1
 	mov	x30, #0
 	b	Lpongo
