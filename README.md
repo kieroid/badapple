@@ -1,4 +1,4 @@
-# linux4a12
+# Bad Apple
 
 Mainline Linux on the Apple A12 (T8020), on an iPhone XS Max (iPhone11,6,
 D331pAP).
