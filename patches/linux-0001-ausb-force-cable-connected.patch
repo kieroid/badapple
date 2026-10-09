@@ -10,7 +10,7 @@ index 39ba39d83..048a6887d 100644
  };
  
  static inline void mask32(void __iomem *reg, u32 mask, u32 set)
-@@ -94,9 +95,37 @@ static __maybe_unused int ausb_phy_usb2_set_mode(struct phy *phy, enum phy_mode
+@@ -94,9 +95,44 @@ static __maybe_unused int ausb_phy_usb2_set_mode(struct phy *phy, enum phy_mode
  }
  #endif
  
@@ -34,8 +34,15 @@ index 39ba39d83..048a6887d 100644
 +	 * the domain but never writes the enable bit. m1n1 does it explicitly
 +	 * and its gadget works on this SoC, and m1n1 disables USB again on
 +	 * handoff, so by the time Linux runs the block is off.
++	 *
++	 * The mapping has to be non-posted, like everything else on this bus
++	 * (the parent node has nonposted-mmio, but that only reaches
++	 * devm_platform_ioremap_resource, not a bare ioremap). A posted write
++	 * to CTL raises an asynchronous SError with L2C_ERR_ADR pointing here.
++	 * The P cluster happens not to report it, so this only showed up as
++	 * a random SMP hang whenever the probe or gadget bind ran on an E core.
 +	 */
-+	complex = ioremap(aphy->reg_base - AUSB_COMPLEX_FROM_PHY, 0x1000);
++	complex = ioremap_np(aphy->reg_base - AUSB_COMPLEX_FROM_PHY, 0x1000);
 +	if (complex) {
 +		set32(complex + AUSB_COMPLEX_CTL, AUSB_COMPLEX_CTL_EN);
 +		dev_info(aphy->dev, "apple phy: complex CTL=0x%08x REMAP=0x%08x\n",
@@ -48,7 +55,7 @@ index 39ba39d83..048a6887d 100644
  
  	/* set a sane tunable */
  	writel(aphy->cfg0_device, aphy->base + AUSB_CFG0);
-@@ -108,8 +137,29 @@ static int ausb_phy_usb2_power_on(struct phy *phy)
+@@ -108,8 +144,29 @@ static int ausb_phy_usb2_power_on(struct phy *phy)
  	udelay(20);
  	clear32(aphy->base + AUSB_CTL, AUSB_CTL_RESET);
  	udelay(1500);
@@ -78,7 +85,7 @@ index 39ba39d83..048a6887d 100644
  	return 0;
  }
  
-@@ -160,6 +210,7 @@ static int ausb_usbphy_probe(struct platform_device *pdev) {
+@@ -160,6 +217,7 @@ static int ausb_usbphy_probe(struct platform_device *pdev) {
  	aphy->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
  	if (IS_ERR(aphy->base))
  		return PTR_ERR(aphy->base);

@@ -37,13 +37,12 @@ KBUILD := LLVM=1 ARCH=arm64
 # phone itself. The interactive shell arrives separately, over the USB CDC-ACM
 # gadget the initramfs brings up, as /dev/ttyACM0 on the host.
 # earlycon picks up UART0 through stdout-path.
-# maxcpus=1 is here because releasing the secondaries into Linux hangs or
-# panics a few hundred milliseconds in. m1n1 does start all five and parks
-# them, see "SMP" in NOTES.md. Drop it once that is fixed.
-BOOTARGS ?= earlycon console=tty0 ignore_loglevel maxcpus=1
+BOOTARGS ?= earlycon console=tty0 ignore_loglevel
 
 .PHONY: check deps patch pmgr m1n1 kernel initramfs blob pongo boot-m1n1 pc-boot \
-	proxy-boot clean
+	proxy-boot clean FORCE
+FORCE:
+
 check: $(DTB)
 
 $(DTB): $(DTS) dts/t8020.dtsi dts/t8020-pmgr.dtsi
@@ -95,7 +94,7 @@ m1n1: $(M1N1)
 # sources: on Gentoo that is the rust-src USE flag.
 BUILDSTD ?= 1
 
-$(M1N1):
+$(M1N1): FORCE
 	$(MAKE) -C $(M1N1_SRC) RELEASE=1 CHAINLOADING=1 USE_CLANG=1 BUILDSTD=$(BUILDSTD)
 
 kernel: $(IMAGE)
@@ -107,9 +106,16 @@ kernel: $(IMAGE)
 #
 # It has to be reapplied after the config copy, otherwise it is silently
 # undone on the next build.
-$(IMAGE):
+#
+# KCONFIG_EXTRA takes more scripts/config arguments for one-off debug builds,
+# e.g. KCONFIG_EXTRA="--enable CONFIG_SOFTLOCKUP_DETECTOR".
+#
+# FORCE because make cannot see the kernel sources. Without it an edit under
+# build/linux never reaches the blob once Image.gz exists; kbuild itself keeps
+# the rerun incremental.
+$(IMAGE): FORCE
 	cp $(CONFIG_16K) $(KDIR)/.config
-	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD
+	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD $(KCONFIG_EXTRA)
 	$(MAKE) -C $(KDIR) $(KBUILD) olddefconfig
 	$(MAKE) -C $(KDIR) $(KBUILD) -j$$(nproc) Image.gz
 

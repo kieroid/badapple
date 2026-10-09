@@ -263,10 +263,11 @@ without it).
 
 ## SMP
 
-Open, and close. m1n1 starts all five secondaries and Linux sees six CPUs, but
-without `maxcpus=1` the boot dies a few hundred ms in.
+Works, all six cores, no `maxcpus` and no `isolcpus`. A parallel `dd`/`find`/
+`md5sum` load on all six finishes cleanly, and every core takes function-call
+IPIs.
 
-Works (`patches/m1n1-0008`, `0009`, `dts/t8020.dtsi`):
+What it needs (`patches/m1n1-0008`, `0009`, `linux-0001`, `dts/t8020.dtsi`):
 
 - **CPU start block is A11's, `pmgr + 0xd4000`.** `ApplePMGR` starts a core by
   writing `+4` and `+8 + 4 * cluster` off a base it keeps at object offset
@@ -283,24 +284,48 @@ Works (`patches/m1n1-0008`, `0009`, `dts/t8020.dtsi`):
 - **A12 chicken bits.** m1n1 set none. `0009` is the APPLEVORTEX block of XNU's
   `start.s` (xnu-6153), rdar titles included.
 
-Fails (three boots; `CONFIG_PANIC_TIMEOUT=-1` is why it kept resetting to iOS):
+- **Fast IPIs.** The AIC node lists `"apple,t8015-aic"` before `"apple,aic"`,
+  so Linux uses the per-core fast IPI registers (`IPI_RR_GLOBAL_EL1`) as on
+  A11. Plain `"apple,aic"` IPIs were never shown to be broken, but this is what
+  the hardware and upstream T8015 use.
 
-1. Reached `/init`, framebuffer filled with garbage, reset.
-2. With the chicken bits, reset near `apple_soc_cpufreq_init`.
-3. With `panic=0`, a silent stop at 0.319s, no panic text.
+What actually broke it was the USB PHY, not SMP. `ausb_phy_usb2_power_on`
+(`linux-0001`) mapped the USB complex at `0x239000000` with a bare `ioremap`,
+which is posted. Everything on that bus has to be non-posted; the parent node's
+`nonposted-mmio` only applies to `devm_platform_ioremap_resource`. The posted
+write to the complex CTL register raises an asynchronous SError. On a P core
+nothing is reported, which is why UP never saw it. On an E core it is a fatal
+SError (`ESR 0xbc000000`, `L2C_ERR_STS` ACCESS_FAULT, `L2C_ERR_ADR` low 40 bits
+`0x239000000`). The PHY powers on in a kworker at probe (about 0.31s) and again
+at gadget bind, so the boot died at whichever of those happened to land on an E
+core. That matches every symptom: random stop points around 0.3s or right after
+the gadget comes up, fine with `maxcpus=1`, fine with `isolcpus=1`, fine with
+only the two P cores. Fixed with `ioremap_np`.
 
-A silent stop at a random point is a cross-call whose IPI never arrives. With
-`compatible = "apple,aic"` Linux uses AIC's own IPI registers; A11 added the
-per-core fast IPI registers and upstream T8015 uses them. Next to try: add
-`"apple,t8015-aic"` between the two existing AIC compatibles, `panic=0`, no
-`maxcpus`. Caution: m1n1's own `smp_call_sync` through the proxy hung on a
-secondary too, and m1n1 already uses fast IPIs, so that may not be the whole
-story.
+Why it looked like a silent hang: simpledrm draws the console through fbdev
+deferred I/O, so text only reaches the panel when a worker copies the shadow
+buffer. After a panic that worker never runs and the screen just stops. For
+hang hunting, build with
+`KCONFIG_EXTRA="--disable CONFIG_DRM_SIMPLEDRM --enable CONFIG_FB_SIMPLE"`
+so fbcon writes the framebuffer synchronously, plus the lockup detectors.
+
+What found it was a temporary `do_serror` hook that, on Apple cores, logged
+`L2C_ERR_STS`/`L2C_ERR_ADR` (`sys_reg(3, 3, 15, 8, 0)`/`(3, 3, 15, 9, 0)`),
+cleared them and set `PSTATE.A` in the saved frame so the kernel survived. The
+logged pc landed in `ausb_phy_usb2_power_on`. Also learned on the way: the E
+cluster DVFS block at `0x210e20000` faults on a read of `+0x58`; both clusters
+come up in P-state 2 (`DVFS_STATUS` `0x22`).
+
+Wasted evenings, so they are not repeated: the `$(IMAGE)` rule had no
+prerequisites, so once `Image.gz` existed edits under `build/linux` never
+reached the blob. It now depends on `FORCE`. Check the timestamp of the object
+you changed before trusting a test.
 
 No help for digging: scanning PMGR from Linux (unimplemented pages abort, some
-stall the bus and freeze the CPU), and CPU hotplug (spin-table CPUs cannot come
-online after boot). `boot_delay=150` slows the console enough to film; `panic=0`
-keeps a panic on screen.
+stall the bus and freeze the CPU), CPU hotplug (spin-table CPUs cannot come
+online after boot), and m1n1's USB proxy, which reset the phone to recovery on
+the one attempt this time. `boot_delay=150` slows the console enough to film;
+`panic=0` keeps a panic on screen (with the simplefb build above).
 
 ## NVMe on T8020, ANS2 bring-up
 
@@ -543,8 +568,7 @@ Things this repo previously asserted that are wrong.
 ## Known gaps
 
 1. **NVMe writes.** Reads work; nothing has been written.
-2. **SMP.** All six cores start, Linux dies once it releases them, hence
-   `maxcpus=1`. See [SMP](#smp).
+2. **SMP.** Works on all six cores. See [SMP](#smp).
 3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
    is in bypass. l41ka vendored m1n1's DART driver into its PongoOS fork, which
    suggests that is wrong; m1n1 does its own cache maintenance for the same

@@ -326,7 +326,7 @@
 		};
 
 		aic: interrupt-controller@23b100000 {
-			compatible = "apple,t8020-aic", "apple,aic";
+			compatible = "apple,t8020-aic", "apple,t8015-aic", "apple,aic";
 			reg = <0x2 0x3b100000 0x0 0x8000>;
 			#interrupt-cells = <3>;
 			interrupt-controller;

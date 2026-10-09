@@ -17,7 +17,7 @@ Nothing is written to the phone. A reboot returns it to iOS.
 | USB gadget, telnet over CDC-NCM | works, fails to enumerate on roughly 1 boot in 4 |
 | AIC interrupts | works |
 | NVMe storage | reads work, about 400 MB/s, writes untested |
-| SMP | m1n1 starts all six cores, Linux hangs once it releases them, so `maxcpus=1` |
+| SMP | works, all six cores |
 | cpufreq, display, everything else | not started |
 
     $ telnet 172.16.42.1
