@@ -36,7 +36,7 @@ while deadline_hits < 3:
             verb, option = chunk[i + 1], chunk[i + 2]
             if verb in (WILL, WONT):
                 sock.sendall(bytes([IAC, DONT, option]))
-            elif verb in (DO,):
+            elif verb == DO:
                 sock.sendall(bytes([IAC, WONT, option]))
             i += 3
             continue

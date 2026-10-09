@@ -8,10 +8,9 @@
 # kernel     build Image.gz with Hoolock's 16K config
 # initramfs  download Hoolock's test initramfs
 # blob       concatenate m1n1, the device tree, the kernel and the initramfs
-# pongo      drive the phone from DFU to a PongoOS shell with l41ka
-# pc-boot    same, but over PongoOS's USB with the cable already on the PC
-# boot-m1n1  send m1n1 alone, leaving it parked in its USB proxy
-# proxy-boot load kernel, dtb and initramfs over m1n1's proxy (cable on the PC)
+# pongoos    build PongoOS with T8020 support
+# pongo      upload PongoOS to a phone the jig has left in pwned DFU
+# pc-boot    upload the blob to PongoOS, over its own USB gadget
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -30,6 +29,16 @@ M1N1      ?= $(M1N1_SRC)/build/m1n1.bin
 IMAGE     ?= $(KDIR)/arch/arm64/boot/Image.gz
 INITRAMFS ?= build/initramfs.gz
 BLOB      := build/m1n1-linux.bin
+PONGO_SRC ?= build/pongoos
+PONGO_RAW ?= $(PONGO_SRC)/build/Pongo.bin
+PONGO     ?= build/Pongo-a12.bin
+
+# PongoOS links Mach-O, which the system ld cannot do. ld64.lld can, but it
+# wants the arch and the platform spelled out because PongoOS's own Makefile
+# passes neither.
+LLVM_BINDIR ?= $(shell dirname $$(readlink -f $$(command -v clang)))
+PONGO_LD ?= -fuse-ld=$(LLVM_BINDIR)/ld64.lld -Wl,-arch,arm64 \
+	    -Wl,-platform_version,ios,12.0,12.0
 
 KBUILD := LLVM=1 ARCH=arm64
 
@@ -39,8 +48,8 @@ KBUILD := LLVM=1 ARCH=arm64
 # earlycon picks up UART0 through stdout-path.
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel
 
-.PHONY: check deps patch pmgr m1n1 kernel initramfs blob pongo boot-m1n1 pc-boot \
-	proxy-boot clean FORCE
+.PHONY: check deps patch pmgr m1n1 kernel initramfs blob pongoos pongo pc-boot \
+	clean FORCE
 FORCE:
 
 check: $(DTB)
@@ -135,73 +144,48 @@ $(BLOB): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS)
 	  cat $(DTB) $(IMAGE) $(INITRAMFS); } > $@
 	@echo "built $@ ($$(stat -c%s $@) bytes)"
 
-# l41ka is the only thing that gets an A12 to PongoOS: it runs usbliter8 from
-# the RP2350 and embeds a PongoOS fork with T8020 support, which upstream
-# PongoOS does not have. Its laikadbg.py speaks to the board over USB
-# 4141:4c41, so the board has to be plugged into this machine with the phone
-# connected through it.
+# PongoOS with T8020 support, which upstream does not have. MIT, same as
+# upstream it forks. Nothing from it is vendored here, see NOTICES.md.
+pongoos: $(PONGO)
 
-# Do not run the stages as separate laikadbg commands. Opening the board calls
-# set_configuration(), which re-enumerates it and drops the downstream link, so
-# a one-shot "exploit" fires at nothing, returns 0, and leaves pwned false.
-# tools/chain.py holds one session open across all the stages instead.
-pongo:
-	build/venv/bin/python tools/chain.py pongo
+$(PONGO_RAW):
+	mkdir -p build
+	test -d $(PONGO_SRC) || git clone --depth 1 -b t8027 \
+	    https://github.com/0cyn/PongoOS.git $(PONGO_SRC)
+	$(MAKE) -C $(PONGO_SRC) EMBEDDED_CFLAGS="$(PONGO_LD)" build/Pongo.bin
 
-# The same boot, but driven from this PC over PongoOS's own USB gadget rather
-# than through the jig:
+# PongoOS wants the SRAM base and a next stage handed to it, which the bootrom
+# does not do. The shim sets those up, see the comment in it.
+$(PONGO): $(PONGO_RAW) tools/a12-pongo-shim.S
+	clang --target=aarch64-none-elf -c tools/a12-pongo-shim.S -o build/shim.o
+	llvm-objcopy -O binary --only-section=.text build/shim.o build/shim.bin
+	cat build/shim.bin $(PONGO_RAW) > $@
+	@echo "built $@ ($$(stat -c%s $@) bytes)"
+
+# Getting an A12 to PongoOS, with the jig doing nothing but the exploit.
 #
-#   make pongo        jig: DFU -> exploit -> PongoOS shell
+# The RP2350 runs usbliter8 alone: plug a phone in DFU into it and the bootrom
+# exploit fires by itself, leaving the phone in DFU with a patched request
+# handler and PWND in its USB serial. Everything after that is this PC talking
+# to the phone directly.
+#
+#   phone in DFU on the jig, wait a second for the exploit
 #   move the Lightning cable from the jig to this PC, once
+#   make pongo        upload PongoOS to the pwned bootrom and run it
 #   make pc-boot      upload the blob and bootm, over 05ac:4141
 #
-# Linux then comes up with the cable already here for the whole boot, instead
-# of binding its gadget to the RP2350 and having to re-present itself after.
+# An earlier version let the jig firmware drive all of this. That firmware got
+# to PongoOS by patching iBoot's auto-boot path and installing a second stage
+# along it, so it stopped working the moment the phone had no bootable OS left
+# on its NAND. Handing the image straight to the bootrom does not care what is
+# on the flash, and keeps the licensing of this repo simple.
+pongo: $(PONGO)
+	build/venv/bin/python tools/dfuboot.py $(PONGO)
+
+# Linux comes up with the cable already here for the whole boot, instead of
+# binding its gadget to the RP2350 and having to re-present itself after.
 pc-boot: $(BLOB)
 	build/venv/bin/python tools/pcboot.py $(BLOB)
 
-# Sends m1n1 on its own, with nothing appended, so it lands in uartproxy_run
-# instead of handing off. First half of the proxy workflow below.
-boot-m1n1: $(M1N1)
-	build/venv/bin/python tools/chain.py boot $(M1N1)
-
-# The fast iteration loop, and the one that gives the gadget a chance:
-#
-#   make boot-m1n1          through the jig, leaves m1n1 sitting in its proxy
-#   move the Lightning cable from the jig to this PC
-#   make proxy-boot         loads kernel, dtb and initramfs over USB
-#
-# Two reasons this matters. m1n1's log arrives as text here rather than having
-# to be photographed off the screen, and a failed attempt retries without
-# re-running the exploit as long as m1n1 survives.
-#
-# The third reason is the USB gadget itself. Booting the blob through the jig
-# means dwc2 probes while the phone is attached to the RP2350, which is the
-# host running the exploit, so the gadget binds to that and the cable has to
-# move afterwards. Here the cable is already on the PC before the kernel
-# starts, which is the arrangement the A11 port gets for free from checkm8.
-#
-# This was dropped once on the grounds that the cable move "never worked on
-# this host". That was wrong: it had already worked, enumerating as
-# 1209:316d. Do not remove it again on that argument.
-#
-# Run ONE proxy session per m1n1 boot. Observed: three sessions worked, the
-# fourth got no reply to its very first request, while the phone stayed
-# enumerated and the screen's last line was still "Heap limit: 0x811e0c000
-# (128 MiB)". The mechanism is unproven, so treat the one-session rule as an
-# empirical workaround rather than an explanation.
-#
-# Pick the port by USB vendor id rather than guessing ttyACM0, which is the
-# l41ka board. m1n1's proxy is 1209:316d and exposes two ACM interfaces; the
-# first is the proxy.
-M1N1DEV ?= $(shell for d in /sys/class/tty/ttyACM*; do \
-	p=$$(readlink -f $$d/device); \
-	[ "$$(cat $$p/../idVendor 2>/dev/null)" = "1209" ] && \
-	    echo /dev/$$(basename $$d) && break; done)
-PROXY := M1N1DEVICE=$(M1N1DEV) build/venv/bin/python $(M1N1_SRC)/proxyclient
-
-proxy-boot: $(IMAGE) $(DTB) $(INITRAMFS)
-	$(PROXY)/tools/linux.py $(IMAGE) $(DTB) $(INITRAMFS) -b '$(BOOTARGS)'
-
 clean:
-	rm -f $(DTB) $(PP) $(BLOB)
+	rm -f $(DTB) $(PP) $(BLOB) $(PONGO) build/shim.o build/shim.bin

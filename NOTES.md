@@ -124,8 +124,8 @@ PongoOS:
 PongoOS's `t8030` branch gives `0x8015` and `0x8020` a shared case, enable at
 offset 0 and remap at 0x48, and only the 0x48 write matters. (An earlier try
 used the S5L8960X layout from the `iOS15` branch, where `0x8020` falls to
-`default`. Wrong branch. l41ka pins `t8030`; check the submodule before
-trusting that tree.)
+`default`. Wrong branch. The `t8027` branch this builds is the right one;
+check which branch a PongoOS tree is on before trusting it.)
 
 ### AUSB SIG bits are shifted on T8020
 
@@ -213,14 +213,22 @@ Settled:
 - **The kernel stays alive.** In the third failure the 15s report timer still
   fired with USB dead, so only the gadget stopped taking interrupts.
 
-`0002` carries a one-shot report, 15s after the gadget starts:
+A one-shot report, 15s after the gadget started, was in `0002` until a failing
+boot was caught. A working boot reads `irqs=194 setups=30 last=21 20 0000`. The
+failing one (P cores only, 2026-10-08):
 
-    apple: irqs=194 setups=30 last=21 20 0000 ep0_state=0 ...
+    apple: irqs=5 setups=1 last=80 06 0100 ep0_state=0 DSTS=000b7b00
+           DCFG=00840000 GINTSTS=0400b430 DOEPCTL0=00028000 DIEPCTL0=00028000
 
-On a failing boot, photograph it after 20s. No line means the kernel hung; few
-`irqs` means the controller stopped interrupting; many `irqs` with few
-`setups` means the gadget saw traffic and did not answer, and `last` is the
-request it choked on.
+Five interrupts and one setup packet, the first GET_DESCRIPTOR(device), then
+the controller stopped interrupting. It still printed `new address 7` and two
+more `new device is high-speed` after it, and the host logged
+`device descriptor read/64, error -71/-110` and `not accepting address`. So the
+descriptor IN transfer never completed and the interrupt line went quiet.
+
+m1n1's own proxy, a different USB stack, failed on the same host port the same
+way once, so the host side (port 3-2 on `0000:0a:00.3`, the cable) is not
+cleared either.
 
 ## No AIC interrupt is ever delivered, solved
 
@@ -513,36 +521,108 @@ register semantics are in the PPL, not the kext.
 
 ## Jig and firmware
 
-### Reliability
+The jig is a Pico 2 W running usbliter8 and nothing else. Plug a phone in DFU
+into it and the bootrom exploit fires on its own, about a second, leaving the
+phone in DFU with a patched request handler. Move the cable to the PC and
+everything after that is `tools/dfuboot.py` and `tools/pcboot.py` talking to
+the phone directly.
 
-The board caches the last device state it saw and keeps reporting it, which is
-worse than failing: it once reported a PongoOS shell for a phone in DFU.
-`chain.py` resets the board before trusting it, the only thing that clears it,
-and holds one session open across all stages. Do not run the stages as separate
-`laikadbg.py` commands: opening the board calls `set_configuration()`, which
-re-enumerates and drops the downstream link, so a one-shot `exploit` fires at
-nothing and returns 0 with `pwned` false.
+### Why the jig stopped at the exploit
+
+It used to drive the whole chain, as far as a PongoOS shell, through l41ka.
+That stopped working the moment Linux took the NAND, with the phone landing in
+recovery every time. l41ka reaches PongoOS by patching iBoot's auto-boot path
+(`ForceLocalAutobootPatcher`, `IgnoreBootCommandPatcher`,
+`ClearBootdelayPatcher` in its patchfinder) and installing laikaDFU as a stage2
+along it. With no bootable OS on the flash, iBoot never walks that path, so
+laikaDFU is never installed and iBoot drops into recovery. The stage sequence
+`dfu -> pwned-dfu -> laika-dfu -> pongo` dies at the third step.
+
+Nothing about that is fixable from this side, and l41ka ships no license at
+all, so it is gone. The replacement skips iBoot entirely: hand PongoOS to the
+pwned bootrom over DFU and jump to it. Nothing on the flash is read, so wiping
+the phone cannot break the boot chain again.
+
+### PongoOS does not come up from the bootrom, open
+
+`tools/dfuboot.py` uploads and the phone goes dark: no USB, no console, and a
+watchdog reset back to DFU some minutes later.
+
+PongoOS since 2.6.0 lives in SRAM and relocates itself there from wherever it
+was loaded. `src/boot/entry.S`:
+
+    // x30     = next-stage binary (iBoot/KPP/XNU)
+    //  x0     = argument to next stage
+    //  sp_el1 = sram base (inbound only, nullable and fully-optional pre-A12)
+
+and when SP is zero it falls back to `0x180000000`, which the next comment
+says is right for "all pre-A12 devices". Started from laikaDFU, inside iBoot,
+that ABI was being set up. Started from the bootrom nothing sets it, so on an
+A12 it copies itself somewhere wrong and dies.
+
+`tools/a12-pongo-shim.S` is 32 bytes prepended to the image that sets SP to
+T8020's SRAM base, `0x19c000000`, with x0 non-zero so the bss gets zeroed and
+x30 null for no next stage. The SRAM base is from the exploit's own T8020
+offsets, which put the ROM stack at `0x19c028bc0`, its trampoline at
+`0x19c018000` and its page tables at `0x19c004030`. That did not fix it alone.
+
+Not yet checked:
+
+- Which exception level the ROM's boot path enters the image at. `msr spsel,
+  #1` then `mov x1, sp` reads SP_EL3 at EL3, not SP_EL1, so the shim may be
+  setting a stack PongoOS never reads.
+- Whether a null x30 is survivable. It is passed on to `_trampoline_entry`.
+- Whether the image wants to be entered somewhere other than its first byte.
+
+Worth knowing either way: iBoot is what initialises the display, and
+`console=tty0` only works because m1n1 inherits the framebuffer iBoot leaves.
+Cutting iBoot out of the boot chain costs the on-screen console, leaving
+telnet as the only one.
+
+### The pwned DFU protocol
+
+The exploit leaves the standard DFU download request in place and adds two of
+its own, all on `bmRequestType` 0x21:
+
+| request | what it does |
+|---|---|
+| 1 | `DFU_DNLOAD`, up to 0x800 bytes a time, zero length ends the transfer |
+| 4 | `DFU_ABORT` |
+| 7 | demote the chip, not needed here |
+| 8 | jump to the image just uploaded |
+
+`tools/dfuboot.py` is those four lines. The device stops answering partway
+through request 8, which is the jump, not a failure.
 
 ### RP2350 firmware
 
-l41ka ships no binary in its git tree, only in a prerelease, so
-`releases/latest` 404s:
+Build usbliter8 from source, there is no release for this board:
 
-    https://github.com/0cyn/l41ka/releases/download/0.1.0/l41ka-waveshare-rp2350-usb-a.zip
+    cmake -S . -B build -DPICO_BOARD=pico2_w -DPICO_PLATFORM=rp2350
+    cmake --build build -j
 
-Unpacks to `l41ka.uf2`/`.elf`/`.bin`/`.hex`, a disassembly and a map. Lives in
-`build/l41ka-fw/` by hand. Flash with `picotool load -t elf
-build/l41ka-fw/l41ka.elf -x -f`, or hold BOOTSEL and copy the `.uf2`. The
-0.1.0 firmware and a current clone are the same version in practice.
+It needs `PICO_SDK_PATH` at pico-sdk 2.2.0 or newer, because `pico_status_led`
+does not exist before it, and `PICO_TOOLCHAIN_PATH` at an arm-none-eabi GCC.
+Gentoo has neither packaged, so both live under `3rd-party/` by hand. On 2.2.0
+the `pico2_w` board pulls in `pico_status_led`, which needs the `cyw43-driver`
+submodule even though we never touch the radio:
+
+    git submodule update --init --depth 1 lib/cyw43-driver
+
+`boards/pico2_w.cmake` is ours: same PIO pins as a Pico 2, no LED definitions,
+because the W's LED hangs off the radio rather than a GPIO. `led.c` has an
+empty fallback for that, so progress is read over the USB serial port instead.
+Flash by holding BOOTSEL and copying `build/usbliter8.uf2`, or with
+`picotool load -t elf build/usbliter8.elf -x -f`.
 
 ### Checking the phone is pwned
 
     cat /sys/bus/usb/devices/*/serial
     CPID:8020 ... BDID:1A ... SRTG:[iBoot-3865.0.0.4.7] PWND:[usbliter8]
 
-`CPID:8020` is the chip, `BDID:1A` the D331pAP board. Stages are
-`dfu -> pwned-dfu -> laika-dfu -> pongo`; `recovery` means the iBoot patchfinder
-did not install laikaDFU.
+`CPID:8020` is the chip, `BDID:1A` the D331pAP board. `PWND:[usbliter8]` is the
+whole test: with it the phone takes an image, without it the exploit has not
+run. Product id 0x1227 is DFU, 0x1281 recovery, 0x4141 PongoOS.
 
 ## Why no hypervisor target
 
@@ -570,9 +650,9 @@ Things this repo previously asserted that are wrong.
 1. **NVMe writes.** Reads work; nothing has been written.
 2. **SMP.** Works on all six cores. See [SMP](#smp).
 3. **DMA.** The USB bus uses a `dma-ranges` identity map, assuming the USB DART
-   is in bypass. l41ka vendored m1n1's DART driver into its PongoOS fork, which
-   suggests that is wrong; m1n1 does its own cache maintenance for the same
-   reason (`m1n1-0007`).
+   is in bypass. The PongoOS fork vendored m1n1's DART driver, which suggests
+   that is wrong; m1n1 does its own cache maintenance for the same reason
+   (`m1n1-0007`).
 4. **cpufreq.** Needs measured A12 operating points. Cluster controllers at
    0x210e20000 and 0x211e20000.
 5. **Chicken bits.** Applied in m1n1 at startup; the kernel does not reapply

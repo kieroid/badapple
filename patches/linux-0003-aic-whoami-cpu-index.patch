@@ -1,16 +1,8 @@
 diff --git a/drivers/irqchip/irq-apple-aic.c b/drivers/irqchip/irq-apple-aic.c
-index 4a3141d9f..1f085e7bb 100644
+index 4a3141d9f..64d9001d7 100644
 --- a/drivers/irqchip/irq-apple-aic.c
 +++ b/drivers/irqchip/irq-apple-aic.c
-@@ -386,6 +386,7 @@ static void aic_irq_unmask(struct irq_data *d)
- 	u32 irq = AIC_HWIRQ_IRQ(hwirq);
- 
- 	aic_ic_write(ic, ic->info.mask_clr + off + MASK_REG(irq), MASK_BIT(irq));
-+
- }
- 
- static void aic_irq_eoi(struct irq_data *d)
-@@ -442,6 +443,20 @@ static void __exception_irq_entry aic_handle_irq(struct pt_regs *regs)
+@@ -442,6 +442,20 @@ static void __exception_irq_entry aic_handle_irq(struct pt_regs *regs)
  	}
  }
  
@@ -31,7 +23,7 @@ index 4a3141d9f..1f085e7bb 100644
  static int aic_irq_set_affinity(struct irq_data *d,
  				const struct cpumask *mask_val, bool force)
  {
-@@ -456,7 +471,8 @@ static int aic_irq_set_affinity(struct irq_data *d,
+@@ -456,7 +470,8 @@ static int aic_irq_set_affinity(struct irq_data *d,
  	else
  		cpu = cpumask_any_and(mask_val, cpu_online_mask);
  
@@ -41,17 +33,7 @@ index 4a3141d9f..1f085e7bb 100644
  	irq_data_update_effective_affinity(d, cpumask_of(cpu));
  
  	return IRQ_SET_MASK_OK;
-@@ -840,7 +856,8 @@ static void aic_ipi_send_single(unsigned int cpu)
- 	if (static_branch_likely(&use_fast_ipi))
- 		aic_ipi_send_fast(cpu);
- 	else
--		aic_ic_write(aic_irqc, AIC_IPI_SEND, AIC_IPI_SEND_CPU(cpu));
-+		aic_ic_write(aic_irqc, AIC_IPI_SEND,
-+			     AIC_IPI_SEND_CPU(per_cpu(aic_cpu_index, cpu)));
- }
- 
- static int __init aic_init_smp(struct aic_irq_chip *irqc, struct device_node *node)
-@@ -892,12 +909,7 @@ static int aic_init_cpu(unsigned int cpu)
+@@ -892,12 +907,7 @@ static int aic_init_cpu(unsigned int cpu)
  	isb();
  
  	if (aic_irqc->info.version == 1) {
@@ -65,7 +47,7 @@ index 4a3141d9f..1f085e7bb 100644
  
  		/*
  		 * Always keep IPIs unmasked at the hardware level (except auto-masking
-@@ -1076,9 +1088,30 @@ static int __init aic_of_ic_init(struct device_node *node, struct device_node *p
+@@ -1076,9 +1086,30 @@ static int __init aic_of_ic_init(struct device_node *node, struct device_node *p
  			aic_ic_write(irqc, irqc->info.mask_set + off + i * 4, U32_MAX);
  		for (i = 0; i < BITS_TO_U32(irqc->nr_irq); i++)
  			aic_ic_write(irqc, irqc->info.sw_clr + off + i * 4, U32_MAX);

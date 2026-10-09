@@ -14,10 +14,10 @@ index 4c02f7b..24b3940 100644
  	dpav_ep.o \
 diff --git a/src/chickens/vortex_tempest.c b/src/chickens/vortex_tempest.c
 new file mode 100644
-index 0000000..3a7a7a9
+index 0000000..a50aec0
 --- /dev/null
 +++ b/src/chickens/vortex_tempest.c
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,51 @@
 +/* SPDX-License-Identifier: MIT */
 +
 +#include "cpu_regs.h"
@@ -30,6 +30,10 @@ index 0000000..3a7a7a9
 +
 +void init_t8020_vortex(int rev)
 +{
++    // Keep DC by-VA ops live for non-coherent DMA, whatever iBoot left here.
++    // See features_a12 in chickens.c.
++    reg_clr(SYS_IMP_APL_HID4, HID4_DISABLE_DC_MVA | HID4_DISABLE_DC_SW_L2_OPS);
++
 +    // "data corruption due to incorrect branch predictor resolution", B0 and later
 +    if (rev >= 0x10)
 +        reg_set(SYS_IMP_APL_HID1, HID1_ENABLE_BR_KILL_LIMIT);
@@ -51,6 +55,9 @@ index 0000000..3a7a7a9
 +void init_t8020_tempest(int rev)
 +{
 +    UNUSED(rev);
++
++    // As for Vortex.
++    reg_clr(SYS_IMP_APL_EHID4, EHID4_DISABLE_DC_MVA | EHID4_DISABLE_DC_SW_L2_OPS);
 +
 +    // "AF2 ordering rules allow ARM device ordering violations"
 +    reg_set(SYS_IMP_APL_EHID4, EHID4_FORCE_NS_ORD_LD_REQ_NO_OLDER_LD);
