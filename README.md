@@ -11,9 +11,8 @@ tethered: nothing on the flash is read to boot, so wiping it does not matter.
 
 ## Status
 
-| | |
-|---|---|
 | Boot to a root shell | works |
+| - | - |
 | Framebuffer console | works (handover from iBoot) |
 | USB gadget, telnet over CDC-NCM | works |
 | AIC interrupts | works |
