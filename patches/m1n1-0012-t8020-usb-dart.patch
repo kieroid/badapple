@@ -1,0 +1,112 @@
+diff --git a/src/usb.c b/src/usb.c
+--- a/src/usb.c
++++ b/src/usb.c
+@@ -6,6 +6,7 @@
+ #include "i2c.h"
+ #include "iodev.h"
+ #include "malloc.h"
++#include "memory.h"
+ #include "pmgr.h"
+ #include "soc.h"
+ #include "string.h"
+@@ -364,6 +365,49 @@
+     usb_t8020_ps_set(T8020_USB_PS2, true);
+ }
+ 
++/*
++ * The device controller sits behind a DART, which the ADT says outright:
++ * /arm-io/usb-complex/usb-device has an iommu-parent property pointing at
++ * /arm-io/dart-usb/mapper-usbdev, stream 0. iBSS leaves that DART in bypass,
++ * so the 32 bit address the controller emits reaches the fabric unchanged,
++ * and with DRAM starting at 0x800000000 there is nothing at 0x11fd8000 to
++ * answer it. That is the AHBErr on every SETUP packet.
++ *
++ * PongoOS gets away with this because it programs the DART for its own gadget
++ * and only puts it back in bypass on the way out, which is why the gadget used
++ * to work and stopped working when PongoOS left the boot chain.
++ *
++ * Rather than teach the dwc2 driver about IOVAs, give stream 0 a flat map of
++ * DRAM at the low 32 bits of each page's own address, which is exactly what
++ * the driver writes into DOEPDMA and DIEPDMA.
++ *
++ * That only lines up because the complex remap widget is told to splice zero
++ * into the top bits rather than 8. The widget sits in front of the DART, not
++ * behind it: with the 8 in place the DART sees 0x8_11fd8000 and needs a
++ * second window up there, and a Linux DMA address can never reach that, since
++ * dwc2 is a 32 bit master. The two bits above the splice value are not part of
++ * it. They are the DMA enables, and clearing them stops the controller
++ * reaching memory at all, whatever the address.
++ */
++static void usb_t8020_dart_setup(void)
++{
++    if (pmgr_adt_power_enable("/arm-io/dart-usb") < 0)
++        printf("usb: could not power /arm-io/dart-usb, trying it anyway\n");
++
++    dart_dev_t *dart = dart_init_adt("/arm-io/dart-usb", 0, 0, false);
++    if (!dart) {
++        printf("usb: no dart-usb, leaving translation as iBoot left it\n");
++        return;
++    }
++
++    if (dart_map(dart, ram_base & 0xffffffff, (void *)ram_base, mem_size_actual) < 0)
++        printf("usb: dart-usb flat map at 0x%lx failed\n", ram_base & 0xffffffff);
++
++    printf("usb: dart-usb TCR=%08x CONFIG=%08x STREAMS=%08x TTBR0=%08x ERR=%08x@%08x%08x\n",
++           read32(0x239900100), read32(0x239900060), read32(0x2399000fc), read32(0x239900200),
++           read32(0x239900040), read32(0x239900054), read32(0x239900050));
++}
++
+ int usb_complex_init(struct usb_complex_config *config)
+ {
+     usb_type = USB_TYPE_DWC2;
+@@ -417,7 +461,14 @@
+             usb_t8020_power_cycle();
+             write32(config->USBComplexBase + USBX_CTL_T8011, USBX_CTL_EN_T8011);
+             write32(config->USBComplexBase + USBX_USBDEV_REMAP_CTL_T8015,
+-                    USBX_REMAP_TO_DRAM_BITS_T8011);
++                    USBX_REMAP_DMA_EN_ONLY_T8020);
++            printf("usb: complex CTL=%08x remap 18=%08x 28=%08x 38=%08x 48=%08x\n",
++                   read32(config->USBComplexBase + USBX_CTL_T8011),
++                   read32(config->USBComplexBase + 0x18),
++                   read32(config->USBComplexBase + 0x28),
++                   read32(config->USBComplexBase + 0x38),
++                   read32(config->USBComplexBase + USBX_USBDEV_REMAP_CTL_T8015));
++            usb_t8020_dart_setup();
+             break;
+         default:
+             printf("usb: Unsupported complex type!\n");
+diff --git a/src/usb_complex.h b/src/usb_complex.h
+--- a/src/usb_complex.h
++++ b/src/usb_complex.h
+@@ -52,19 +52,21 @@
+ #define USBX_USBDEV_REMAP_CTL_T8015 0x48
+ 
+ /*
+- * T8020 has no registers of its own: it reuses the S5L8960X layout above.
++ * T8020 has no registers of its own: it takes the T8015 offsets above, and the
++ * ADT agrees. /arm-io/usb-complex usb_widget_with_mask is three (offset, value,
++ * mask) triplets at 0x28, 0x38 and 0x48, value 0x88, mask 0x030000ff, which is
++ * the T8011 bit layout at the T8015 offsets. 0x48 is the device controller.
+  *
+- * This was first written against the ADT, which lists /arm-io/usb-complex
+- * usb_widget_with_mask as three (offset, value, mask) triplets at 0x28, 0x38
+- * and 0x48, value 0x88, mask 0x030000ff, matching the T8011 bit layout. That
+- * reading is wrong. With it the PHY comes up and a host sees the attach and
+- * the high speed chirp, but the DMA remap is never programmed, so every
+- * control transfer times out with "device descriptor read/64, error -110".
++ * What the ADT does not explain is that the two bits the mask covers above the
++ * splice value are not part of it. They are the DMA enables. Clearing them on
++ * a live gadget, from the proxy, leaves the device enumerated and kills every
++ * transfer, so they have to be set whatever address the controller emits.
+  *
+- * PongoOS is the reference that settles it: it gives 0x8011 and 0x8015
+- * explicit cases and lets everything else, A12 included, fall through to the
+- * S5L8960X path. Its gadget works on this phone.
++ * The splice value itself is left at zero here, unlike T8011 and T8015, since
++ * on this SoC the DART behind the widget is what puts the address in DRAM.
+  */
++#define USBX_REMAP_DMA_EN_ONLY_T8020                                                               \
++    (USBX_REMAP_DMA_TO_DEVICE_EN_T8011 | USBX_REMAP_DMA_FROM_DEVICE_EN_T8011)
+ 
+ /* USB PHY registers */
+ 

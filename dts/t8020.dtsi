@@ -280,17 +280,47 @@
 		 * /dev/ttyACM0 on the host. Without it the framebuffer console
 		 * can print but you have nothing to type on.
 		 *
-		 * dma-ranges maps DMA address 0 to the start of DRAM, which is
-		 * the same thing T8015 does and assumes the USB DART is left in
-		 * bypass. If DMA is where this falls over, that assumption is
-		 * the first thing to check: the ADT has a dart-usb at
-		 * 0x239900000 with interrupt 454 that this tree ignores.
+		 * DMA is where this fell over, and dart_usb below is why. The
+		 * ADT says it outright: /arm-io/usb-complex/usb-device has an
+		 * iommu-parent pointing at /arm-io/dart-usb/mapper-usbdev,
+		 * stream 0. There is no bypass to leave that DART in. Bypassed,
+		 * the controller takes an AHB error on every DMA, which reaches
+		 * the host as "device descriptor read/64, error -110", and
+		 * m1n1's own gadget fails the same way on the same boot.
+		 *
+		 * The dma-ranges that used to be here, mapping DMA address 0 to
+		 * the start of DRAM the way T8015 does, is gone with it. That
+		 * translation is the DART's job now, and a dma-ranges offset on
+		 * an IOMMU translated device only confuses the DMA layer.
 		 */
+		/*
+		 * Stream 0 is the device controller, 1 is EHCI and 2 is OHCI,
+		 * from the mapper nodes under /arm-io/dart-usb in the ADT.
+		 *
+		 * No power-domains. The gate the ADT names, clock-gates 0xb1,
+		 * is not one of the power domains in t8020-pmgr.dtsi, so there
+		 * is nothing to point at and nothing that can switch it off
+		 * either. m1n1 powers it with pmgr_adt_power_enable() and
+		 * leaves it on, which is what the ADT asks for.
+		 *
+		 * apple,t8103-dart is the compatible the driver binds: it has
+		 * no entry for this SoC, and a T8020 DART is the same hardware,
+		 * 32 bit in and 36 bit out, which is exactly what is needed
+		 * here. dwc2 is a 32 bit master, so every address it emits fits
+		 * the input side, and the DART puts it anywhere in DRAM.
+		 */
+		dart_usb: iommu@239900000 {
+			compatible = "apple,t8020-dart", "apple,t8103-dart";
+			reg = <0x2 0x39900000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 454 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+		};
+
 		bus@239000000 {
 			compatible = "apple,t8020-usb-complex", "simple-pm-bus";
 			#address-cells = <2>;
 			#size-cells = <2>;
-			dma-ranges = <0x0 0x00000000 0x8 0x00000000 0x1 0x00000000>;
 
 			/*
 			 * of_mmio_is_nonposted() only looks at the node and its
@@ -325,6 +355,7 @@
 				phy-names = "usb2-phy";
 				power-domains = <&ps_usb2dev>;
 				resets = <&ps_usb2dev>;
+				iommus = <&dart_usb 0>;
 				dr_mode = "peripheral";
 			};
 		};
