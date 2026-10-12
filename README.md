@@ -3,105 +3,50 @@
 Mainline Linux on the Apple A12 (T8020), on an iPhone XS Max (iPhone11,6,
 D331pAP).
 
-The goal is a console and an initramfs shell, the same finish line as the A10
-and A11 ports. No display driver, touch, wifi, cellular or GPU.
+The target is a console and a shell, the same finish line as the A10 and A11
+ports. No display driver, touch, wifi, cellular or GPU.
 
-The phone's NAND now holds an ext4 filesystem, not iOS. Everything here is
-tethered: nothing on the flash is read to boot, so wiping it does not matter.
+The phone's NAND holds ext4, not iOS. The boot is tethered and reads nothing
+off the flash, so wiping it does not break anything.
 
 ## Status
 
 | | |
 |---|---|
 | Boot to a root shell | works |
-| Framebuffer console | works (handover from iBoot) |
-| USB gadget, telnet over CDC-NCM | works |
+| Framebuffer console | works, handed over by iBoot |
+| USB gadget, telnet over the cable | works |
 | AIC interrupts | works |
-| NVMe storage | works, reads and writes, ext4 mounted and verified |
+| NVMe storage | works, reads and writes, ext4 mounted |
 | SMP | works, all six cores |
-| cpufreq | OPP tables written from the ADT, never booted |
-| Boot chain without iBoot | in progress, PongoOS does not come up yet |
-| display, everything else | not started |
+| cpufreq | hangs the boot, build with it off |
+| Display, touch, wifi, cellular, GPU | not started |
 
-    $ telnet 172.16.42.1
-    ~ # uname -a
-    Linux (none) 7.3.0-rc1 #33 SMP PREEMPT aarch64 Linux
-    ~ # cat /proc/partitions
-     259        0   62500000 nvme0n1
-    ~ # mount /dev/nvme0n1 /mnt && df -h /mnt | tail -1
-    /dev/nvme0n1    58.4G    321.4M   55.1G   1% /mnt
+```console
+$ telnet 172.16.42.1
+~ # uname -a
+Linux (none) 7.3.0-rc1 #33 SMP PREEMPT aarch64 Linux
+~ # cat /proc/partitions
+ 259        0   62500000 nvme0n1
+~ # mount /dev/nvme0n1 /mnt && df -h /mnt | tail -1
+/dev/nvme0n1    58.4G    321.4M   55.1G   1% /mnt
+```
 
-Details, register dumps and the debugging history are in
-[NOTES.md](NOTES.md).
+Registers, dead ends and the debugging history are in [NOTES.md](NOTES.md).
 
 ## Boot chain
 
-    SecureROM
-      -> usbliter8, run from a Pico 2 W jig, leaves the phone in pwned DFU
-      -> PongoOS, uploaded to the bootrom over DFU by tools/dfuboot.py
-      -> m1n1, uploaded to PongoOS by tools/pcboot.py
-      -> Linux, 16K pages, t8020-d331p.dtb, initramfs
+```text
+SecureROM
+  -> usbliter8 on a Pico 2 W jig, fires the bootrom exploit, leaves pwned DFU
+  -> iBSS, patched to stop checking signatures, uploaded by usbliter8ctl
+  -> device tree and an empty trustcache, over Apple's recovery protocol
+  -> m1n1, handed to bootx where a restore kernelcache would go
+  -> Linux, 16K pages, t8020-d331p.dtb, initramfs
+```
 
-iBoot is not in that list, and that part does not work yet. See
-[what is broken](#what-is-broken).
-
-An earlier version went through iBoot, with the jig firmware patching its
-auto-boot path to install a second stage. That stopped working as soon as Linux
-took the NAND and there was no OS left to auto-boot, and that firmware carries
-no license, so it is gone. Handing PongoOS straight to the pwned bootrom reads
-nothing off the flash, so once it works, wiping the phone cannot break the boot
-chain again.
-
-## What is broken
-
-`make pongo` uploads PongoOS to the pwned bootrom and the phone goes dark: no
-USB, no console, and eventually a watchdog reset back to DFU.
-
-What is known:
-
-- The exploit is fine. The phone reports `PWND:[usbliter8]` and takes the
-  upload.
-- PongoOS since 2.6.0 relocates itself into SRAM and wants the SRAM base
-  handed to it in SP, falling back to `0x180000000`, which its own comment
-  says is right for pre-A12 only. The bootrom passes nothing.
-  `tools/a12-pongo-shim.S` sets SP to T8020's `0x19c000000`, taken from where
-  the exploit's own offsets point. That did not fix it on its own.
-- Still unchecked: whether PongoOS is entered at the exception level it
-  expects, and whether `x30` may be null.
-
-One consequence either way: iBoot is what sets the display up, and `console=tty0`
-is a handover of the framebuffer it leaves behind. With iBoot out of the boot
-chain there is no framebuffer, so the on-screen console goes away and telnet
-becomes the only one.
-
-## Build
-
-    make deps       # clone m1n1, the Hoolock kernel and docs, set up a venv, apply patches/
-    make pongoos    # build PongoOS with T8020 support
-    make check      # compile the device tree on its own
-    make blob       # m1n1, kernel, initramfs, all in build/m1n1-linux.bin
-
-`make patch` re-applies `patches/` and is safe to run again. A patch that is
-already applied is skipped, and a real conflict stops the build.
-
-## Run
-
-    # phone in DFU on the jig, the exploit fires by itself in about a second
-    # move the Lightning cable from the jig to the PC
-    make pongo      # upload PongoOS to the pwned bootrom and run it
-    make pc-boot    # upload the blob over PongoOS's USB and boot
-
-`make pongo` does not currently reach a PongoOS shell, see
-[what is broken](#what-is-broken).
-
-About twenty seconds later the phone shows up as `05ac:4142`, hands the PC
-`172.16.42.2` over DHCP, and answers telnet on `172.16.42.1`.
-`tools/tsh.py "cmd"` runs one command there from a script.
-
-If `make pongo` cannot find a pwned device, check the phone's USB serial for
-`PWND:[usbliter8]`. Without it the exploit has not run: unplug the jig from USB
-for a few seconds, a firmware reset is not enough, and put the phone back in
-DFU.
+iBSS stays in the chain on purpose. It brings up DRAM, the ADT and the display,
+and `console=tty0` is the framebuffer it leaves behind.
 
 ## Dependencies
 
@@ -112,13 +57,130 @@ DFU.
 | `dtc`, `cpp` | `make check` |
 | `python3` | `tools/`, m1n1's proxyclient |
 | `git`, `curl`, `unzip` | `make deps`, `make initramfs` |
-| `ipsw`, `pyimg4` | only to pull a DeviceTree out of a new IPSW |
+| `ipsw`, `pyimg4` | unpacking the IPSW, wrapping images in img4 |
+| `irecovery` | talking to iBSS in recovery mode |
+| [usbliter8ra1n-patch](https://github.com/Trussh/usbliter8ra1n-patch) | `usbliter8ctl`, which uploads iBSS over pwned DFU |
 
-`build/venv` gets `pyusb`, `pyserial` and `construct`. The jig firmware is
-built separately, see [NOTES.md](NOTES.md#rp2350-firmware).
+`make deps` clones m1n1, the Hoolock kernel and docs into `build/`, makes
+`build/venv` with `pyusb`, `pyserial` and `construct`, and applies `patches/`.
+The jig firmware is built separately, see
+[NOTES.md](NOTES.md#rp2350-firmware).
+
+You also need an iPhone11,6 IPSW. Everything below takes files out of it.
+
+## Build
+
+```sh
+make deps       # clone, venv, apply patches/
+make check      # compile the device tree on its own
+make m1n1       # build the m1n1 payload
+make initramfs  # download Hoolock's test initramfs
+make kernel KCONFIG_EXTRA="--disable CONFIG_ARM_APPLE_SOC_CPUFREQ"
+```
+
+`make check` is the only target that works on a bare checkout. `make patch`
+re-applies `patches/` and is safe to run again: an applied patch is skipped, a
+real conflict stops the build.
+
+cpufreq has to be off. `apple_soc_cpufreq_module_init` never returns and the
+boot stops there.
+
+## First time setup
+
+Done once, from an unpacked IPSW. Everything lands in `build/iboot/`.
+
+```sh
+mkdir -p build/iboot
+
+# iBSS and the device tree out of the IPSW
+ipsw img4 im4p extract -o build/iboot/iBSS.raw \
+    <ipsw>/Firmware/dfu/iBSS.d331p.RELEASE.im4p
+ipsw img4 im4p extract -o build/iboot/DeviceTree.bin \
+    <ipsw>/Firmware/all_flash/DeviceTree.d331pap.im4p
+
+# stop iBSS checking what is inside an img4
+python3 tools/iboot-image4-patch.py \
+    build/iboot/iBSS.raw build/iboot/iBSS.patched.raw
+
+# a trustcache with no entries, which is all iBoot wants here
+printf '\x01\x00\x00\x00\x6e\x17\x68\x17\x88\x2d\x44\x40\x83\xb6\xf3\x22\x06\xbc\x4f\x17\x00\x00\x00\x00' \
+    > build/iboot/empty_trustcache.bin
+
+# wrap both for bootx. Any IM4M works once iBSS is patched
+IM4M=build/hoolock-docs/binaries/im4m/0x8015.im4m
+ipsw img4 create --input build/iboot/DeviceTree.bin --type rdtr \
+    --im4m $IM4M --output build/iboot/devicetree.img4
+ipsw img4 create --input build/iboot/empty_trustcache.bin --type rtsc \
+    --im4m $IM4M --output build/iboot/trustcache.img4
+```
+
+## Run
+
+Pack m1n1, the device tree, the kernel and the initramfs into one fake restore
+kernelcache:
+
+```sh
+IM4M=build/hoolock-docs/binaries/im4m/0x8015.im4m
+{ cat build/m1n1/build/m1n1-idevice.macho
+  echo 'chosen.bootargs=earlycon console=tty0 ignore_loglevel'
+  cat build/t8020-d331p.dtb \
+      build/linux/arch/arm64/boot/Image.gz \
+      build/initramfs.gz
+} > build/iboot/m1n1-linux.macho
+
+ipsw img4 create --input build/iboot/m1n1-linux.macho --type rkrn \
+    --compress lzss --extra build/m1n1/build/monitor-stub.macho \
+    --im4m $IM4M --output build/iboot/kernelcache.img4
+```
+
+Put the phone in DFU on the jig. The exploit fires by itself in about a second.
+Move the cable to the PC, then:
+
+```sh
+./tools/iboot-boot.sh
+```
+
+The script wants `usbliter8ctl` at
+`../../3rd-party/usbliter8ra1n-patch/tools/usbliter8ctl`. Set `USBLITER8CTL` to
+point somewhere else.
+
+About twenty seconds later the phone is `05ac:4142`, hands the PC
+`172.16.42.2` over DHCP, and answers telnet on `172.16.42.1`.
+`tools/tsh.py "cmd"` runs one command there from a script.
+
+If the script says the phone is not pwned, check its USB serial for
+`PWND:[usbliter8]`. Without it the exploit has not run: unplug the jig from USB
+for a few seconds, a firmware reset is not enough, and put the phone back in
+DFU.
+
+## Implementation status
+
+Done:
+
+- [x] Boot from DFU, tethered, nothing read off the NAND
+- [x] Patched iBSS that takes an unsigned payload
+- [x] m1n1 as a fake restore kernelcache, with a real BootArgs
+- [x] Device tree for T8020, PMGR domains generated from the ADT
+- [x] Framebuffer console, handed over by iBoot
+- [x] AIC interrupts, including fast IPIs
+- [x] SMP on all six cores
+- [x] NVMe through ANS2, reads and writes, ext4 mounted
+- [x] USB gadget: telnet, DHCP, getty on `/dev/ttyGS0`
+- [x] USB DART, in m1n1 and through `apple-dart` in Linux
+
+Not done:
+
+- [ ] cpufreq. `apple_soc_cpufreq_module_init` never returns, OPPs untested
+- [ ] Display driver. The framebuffer is frozen as iBoot left it
+- [ ] Notch is not trimmed out of the framebuffer
+- [ ] Chicken bits are set in m1n1 only, never reapplied per core
+- [ ] m1n1's proxy dies after one client
+- [ ] Touch, wifi, cellular, GPU, audio
+- [ ] Makefile targets for the `build/iboot/` images, which are packed by hand
+- [ ] Anything upstream
 
 ## License
 
-`GPL-2.0+ OR MIT`, see [LICENSE](LICENSE). `patches/` keeps the license of
-the code it patches: `linux-*` GPL-2.0, `m1n1-*` MIT. Nothing third party is
-vendored here; what `make deps` fetches is listed in [NOTICES.md](NOTICES.md).
+`GPL-2.0+ OR MIT`, see [LICENSE](LICENSE). `patches/` keeps the license of the
+code it patches: `linux-*` GPL-2.0, `m1n1-*` MIT. Nothing third party is
+vendored here. What the boot depends on is listed in [NOTICES.md](NOTICES.md).
