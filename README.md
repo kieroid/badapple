@@ -155,28 +155,25 @@ DFU.
 
 ## Implementation status
 
-Done:
-
-- [x] Boot from DFU, tethered, nothing read off the NAND
-- [x] Patched iBSS that takes an unsigned payload
-- [x] m1n1 as a fake restore kernelcache, with a real BootArgs
+- [x] Boot chain, tethered, nothing read off the NAND
+  - [x] Patched iBSS that takes an unsigned payload
+  - [x] m1n1 as a fake restore kernelcache, with a real BootArgs
+  - [ ] Makefile targets for `build/iboot/`, packed by hand today
 - [x] Device tree for T8020, PMGR domains generated from the ADT
-- [x] Framebuffer console, handed over by iBoot
+- [x] Console
+  - [x] Framebuffer, handed over by iBoot
+  - [ ] Display driver. The picture is frozen as iBoot left it
+  - [ ] Notch trimmed out of the framebuffer
 - [x] AIC interrupts, including fast IPIs
 - [x] SMP on all six cores
+  - [ ] Chicken bits reapplied per core by the kernel, m1n1 does it once
 - [x] NVMe through ANS2, reads and writes, ext4 mounted
-- [x] USB gadget: telnet, DHCP, getty on `/dev/ttyGS0`
-- [x] USB DART, in m1n1 and through `apple-dart` in Linux
-
-Not done:
-
+- [x] USB
+  - [x] Gadget: telnet, DHCP, getty on `/dev/ttyGS0`
+  - [x] DART, in m1n1 and through `apple-dart` in Linux
+  - [ ] m1n1's proxy surviving more than one client
 - [ ] cpufreq. `apple_soc_cpufreq_module_init` never returns, OPPs untested
-- [ ] Display driver. The framebuffer is frozen as iBoot left it
-- [ ] Notch is not trimmed out of the framebuffer
-- [ ] Chicken bits are set in m1n1 only, never reapplied per core
-- [ ] m1n1's proxy dies after one client
 - [ ] Touch, wifi, cellular, GPU, audio
-- [ ] Makefile targets for the `build/iboot/` images, which are packed by hand
 - [ ] Anything upstream
 
 ## License
