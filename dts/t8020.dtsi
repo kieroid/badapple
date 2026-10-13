@@ -381,6 +381,23 @@
 			smc_hwmon: hwmon {
 				compatible = "apple,smc-hwmon";
 			};
+
+			/*
+			 * Reboot and poweroff. The T8015 compatible is the one
+			 * without the "phra" restart key, so a restart goes
+			 * through the watchdog below and only poweroff is the
+			 * SMC's job. The PMU cells are how the chip is told to
+			 * stay off instead of coming straight back up.
+			 */
+			smc_reboot: reboot {
+				compatible = "apple,t8015-smc-reboot";
+				nvmem-cells = <&shutdown_flag>, <&boot_stage>,
+					      <&boot_error_count>,
+					      <&panic_count>;
+				nvmem-cell-names = "shutdown_flag", "boot_stage",
+						   "boot_error_count",
+						   "panic_count";
+			};
 		};
 
 		/*
@@ -417,6 +434,63 @@
 			#size-cells = <1>;
 
 			reg = <0x2 0x3b000000 0 0x8c000>;
+		};
+
+		/*
+		 * The PMU side of the chip, reached over SPMI. The ADT node
+		 * /arm-io/spmi lists three register ranges and a wall of
+		 * interrupts; the driver only wants the first range.
+		 *
+		 * The PMIC is "pmu,imola" at slave id 0xf. Its scratchpad is
+		 * the nvmem the reboot handler writes: the ADT calls the base
+		 * info-leg_scrpad and puts it at 0xa000, with the regular
+		 * scratchpad starting at 0xa028. Everything the reboot handler
+		 * touches lives in those first 0x28 bytes, at the same offsets
+		 * T8015 and T8103 use.
+		 */
+		spmi: spmi@23d180700 {
+			compatible = "apple,t8020-spmi", "apple,t8103-spmi";
+			reg = <0x2 0x3d180700 0x0 0x100>;
+			#address-cells = <2>;
+			#size-cells = <0>;
+
+			pmic@f {
+				compatible = "apple,imola-pmic",
+					     "apple,spmi-pmic";
+				/* second cell 0 is SPMI_USID */
+				reg = <0xf 0>;
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				nvmem@a000 {
+					compatible = "apple,pmic-nvmem";
+					reg = <0xa000 0x28>;
+
+					nvmem-layout {
+						compatible = "fixed-layout";
+						#address-cells = <1>;
+						#size-cells = <1>;
+
+						boot_stage: boot-stage@1 {
+							reg = <0x1 0x1>;
+						};
+
+						boot_error_count: boot-error-count@2,0 {
+							reg = <0x2 0x1>;
+							bits = <0 4>;
+						};
+
+						panic_count: panic-count@2,4 {
+							reg = <0x2 0x1>;
+							bits = <4 4>;
+						};
+
+						shutdown_flag: shutdown-flag@f {
+							reg = <0xf 0x1>;
+						};
+					};
+				};
+			};
 		};
 
 		pmgr_mini: power-management@23d200000 {

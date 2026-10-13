@@ -119,7 +119,8 @@ a firmware reset is not enough, and put the phone back in DFU.
 - [x] SMC
   - [x] Battery: capacity, health, cycles, voltage, current, temperature
   - [x] Charger detection and the power button
-  - [ ] Reboot and poweroff, needs the nvmem cells macsmc-reboot wants
+  - [x] Poweroff, with the PMU scratchpad over SPMI so it stays off
+  - [x] Reboot, through the watchdog, lands back in recovery
   - [ ] SoC temperature sensors, no Linux driver for tempsensor,t8020
 - [x] USB
   - [x] Gadget: telnet, DHCP, getty on `/dev/ttyGS0`

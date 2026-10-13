@@ -869,16 +869,66 @@ charge_behaviour [auto] inhibit-charge force-discharge
 So battery, charger detection, battery temperature and the power button, which
 arrives as `Apple SMC power/lid events` on input0.
 
-Two cells do not probe yet, both expected:
+`macsmc-hwmon` does not probe, which is expected: it says "No valid sensors
+found of any supported type" because it looks for Mac sensor key sets. The
+SoC's own sensors are separate anyway: `/arm-io/tempsensor0` through
+`tempsensor8`, `tempsensor,t8020`, which Linux has no driver for at all.
 
-- `macsmc-hwmon` says "No valid sensors found of any supported type". It looks
-  for Mac sensor key sets. The SoC's own sensors are separate anyway:
-  `/arm-io/tempsensor0` through `tempsensor8`, `tempsensor,t8020`, which Linux
-  has no driver for at all.
-- `macsmc-reboot` returns `-ENODEV` because it wants nvmem cells:
-  `shutdown_flag`, `boot_stage`, `boot_error_count` and `panic_count`, which
-  the loader fills in on a Mac. Worth wiring up, since it is reboot and
-  poweroff.
+### Poweroff, and the PMU scratchpad
+
+`macsmc-reboot` is the SMC's poweroff cell. It wanted four nvmem cells that no
+node provided, so it used to return `-ENODEV`. The cells live in the PMU, not
+in the SoC, which is why wiring it up means adding a whole SPMI bus.
+
+| | |
+|---|---|
+| SPMI | 0x23d180700, 0x100 |
+| PMIC | slave id 0xf, `pmu,imola` |
+| scratchpad base | 0xa000 |
+
+The ADT node `/arm-io/spmi` lists three register ranges and 27 interrupts. The
+driver takes the first range and no interrupts. The PMIC's scratchpad base is
+`info-leg_scrpad` on `/arm-io/spmi/spmi-pmu`, 0xa000 here, with the regular
+`info-scrpad` right after it at 0xa028. Everything the reboot handler touches
+is in those first 0x28 bytes, at the offsets T8015 and T8103 also use:
+`boot_stage` at 1, `boot_error_count` at 2 bits 0-3, `panic_count` at 2 bits
+4-7, `shutdown_flag` at 0xf. The flag is a whole byte, not a bit, because the
+driver writes 0x10 or 0x90 into it.
+
+Proof the base is right, from the first boot with the node:
+
+```text
+macsmc-reboot macsmc-reboot: PMU logged 10 boot error(s) and 0 panic(s)
+macsmc-reboot macsmc-reboot: Handling reboot and poweroff requests via SMC
+```
+
+Ten boot errors is real history from all the failed boots, read back out of the
+scratchpad. A wrong base reads zeroes.
+
+The compatible is `apple,t8015-smc-reboot`, the one without the `phra` restart
+key, so the driver registers poweroff only and a restart falls through to the
+watchdog at 0x23d2b0000. Both work:
+
+| command | result |
+|---|---|
+| `poweroff -f` | off, USB gone, no `05ac:` device left |
+| `reboot -f` | back as `05ac:1281`, recovery mode |
+
+Plain `poweroff` and `reboot` in the test ramdisk do nothing; busybox hands
+them to init and init drops them. The `-f` goes straight to the syscall.
+
+Staying off rather than bouncing straight back into recovery is what
+`shutdown_flag` buys. Reboot ends in recovery because there is no OS on the
+flash, which is normal here and not a failure.
+
+One harmless warning per boot, three times:
+
+```text
+OF: Bad cell count for /soc/spmi@23d180700/pmic@f
+```
+
+The PMIC takes a two cell address from the bus and declares one cell addresses
+for its own children. Upstream Apple device trees are shaped the same way.
 
 ## cpufreq, the part that completes transitions is not running
 
@@ -1026,9 +1076,6 @@ Things this repo previously asserted that are wrong.
    [USB](#the-gadget-often-never-takes-an-address-open). Reboot until it comes
    up; the phone itself is fine either way, it is only the host link that
    fails.
-5. **SMC reboot and poweroff.** `macsmc-reboot` wants nvmem cells the loader
-   fills on a Mac. Small job, and it would mean rebooting without touching the
-   phone.
-6. **SoC temperature sensors.** `/arm-io/tempsensor0` to `tempsensor8`,
+5. **SoC temperature sensors.** `/arm-io/tempsensor0` to `tempsensor8`,
    `tempsensor,t8020`. No Linux driver exists. Battery temperature already
    works through the SMC.
