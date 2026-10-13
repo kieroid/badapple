@@ -9,30 +9,6 @@ ports. No display driver, touch, wifi, cellular or GPU.
 The phone's NAND holds ext4, not iOS. The boot is tethered and reads nothing
 off the flash, so wiping it does not break anything.
 
-## Status
-
-| | |
-|---|---|
-| Boot to a root shell | works |
-| Framebuffer console | works, handed over by iBoot |
-| USB gadget, telnet over the cable | works |
-| AIC interrupts | works |
-| NVMe storage | works, reads and writes, ext4 mounted |
-| Battery, charger, power button | works, through the SMC |
-| SMP | works, all six cores |
-| cpufreq | off, needs the CLPC coprocessor that arbitrates DVFS |
-| Display driver, touch, wifi, cellular, GPU | not started |
-
-```console
-$ telnet 172.16.42.1
-~ # uname -a
-Linux (none) 7.3.0-rc1 #33 SMP PREEMPT aarch64 Linux
-~ # cat /proc/partitions
- 259        0   62500000 nvme0n1
-~ # mount /dev/nvme0n1 /mnt && df -h /mnt | tail -1
-/dev/nvme0n1    58.4G    321.4M   55.1G   1% /mnt
-```
-
 Registers, dead ends and the debugging history are in [NOTES.md](NOTES.md).
 
 ## Boot chain
