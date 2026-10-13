@@ -19,7 +19,7 @@ off the flash, so wiping it does not break anything.
 | AIC interrupts | works |
 | NVMe storage | works, reads and writes, ext4 mounted |
 | SMP | works, all six cores |
-| cpufreq | off, the hardware refuses the transitions |
+| cpufreq | off, needs the CLPC coprocessor that arbitrates DVFS |
 | Display, touch, wifi, cellular, GPU | not started |
 
 ```console
@@ -86,9 +86,9 @@ are only separate targets when you want one of them on its own.
 re-applies `patches/` and is safe to run again: an applied patch is skipped, a
 real conflict stops the build.
 
-cpufreq has to be off. The DVFS registers take frequency requests that the
-hardware then refuses to complete, see
-[NOTES.md](NOTES.md#cpufreq-the-hardware-will-not-take-the-transitions).
+cpufreq has to be off. Frequency requests are accepted and then never
+completed, because the coprocessor that arbitrates DVFS is not running, see
+[NOTES.md](NOTES.md#cpufreq-the-part-that-completes-transitions-is-not-running).
 
 ## First time setup
 
@@ -144,7 +144,7 @@ a firmware reset is not enough, and put the phone back in DFU.
   - [x] DART, in m1n1 and through `apple-dart` in Linux
   - [x] Enumerating reliably
   - [ ] m1n1's proxy surviving more than one client
-- [ ] cpufreq. The DVFS hardware wedges without PMU voltage coordination
+- [ ] cpufreq. Needs the PMP/CLPC coprocessor that completes transitions
 - [ ] Touch, wifi, cellular, GPU, audio
 - [ ] Anything upstream
 

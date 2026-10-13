@@ -822,7 +822,7 @@ register semantics are in the PPL, not the kext.
   script that imports `m1n1.setup`. `p.nvme_init()` is not a shortcut: it stops
   at `asc: Unsupported compatible`, not knowing `iop,ascwrap-v2`.
 
-## cpufreq, the hardware will not take the transitions
+## cpufreq, the part that completes transitions is not running
 
 `CONFIG_ARM_APPLE_SOC_CPUFREQ` is off. With it on, the boot stops inside
 `apple_soc_cpufreq_module_init`, and chasing that through Linux cost a lot of
@@ -868,12 +868,27 @@ unchanged, while the E cluster sits happily at pstate 2 beside it. That is the
 cluster the kernel runs on, so schedutil asking for the top of the table early
 in boot is exactly the reset that was being chased.
 
-None of that is a driver bug. Apple's DVFS ramps voltage through the PMU
-alongside the frequency and the OPP tables here carry no voltage data at all,
-so the frequency side is being driven on its own. Until the voltage side is
-understood, the tables in `t8020.dtsi` are not safe to use, and capping them at
-the pstates that happen to work would still leave the P cluster wedging on its
-second transition.
+None of that is a driver bug, and it is not the hardware refusing outright
+either. The ADT says what is missing. `/arm-io/pmgr` has `cpu-apsc = 1`,
+`clusters = 4, 2`, and two children that matter: `clpc`, Apple's closed loop
+performance controller, carrying a full set of PID gains for utilisation,
+scheduler latency and power zones, and `pmp`, the coprocessor it runs on. On
+this generation DVFS is arbitrated by that controller rather than driven
+register by register by the OS, and we never boot it. That is exactly the P
+cluster symptom: the request is accepted, `BUSY` latches, and nothing ever
+completes it, because the thing that completes it is not running.
+
+The pstate frequency and voltage table is not in the ADT at all, so iBoot
+programs it into the cluster block from somewhere else. Two ways forward if
+this ever matters: bring up the PMP and CLPC path, which is an ANS2 sized
+coprocessor project, or find the per-pstate configuration registers in the
+cluster block and drive the state machine directly. The cheap first look for
+the second is to dump the cluster registers around the DVFS block on both
+clusters and diff them, since the E cluster manages four pstates and the P
+cluster manages one.
+
+None of this blocks anything. The phone runs pinned at pstate 2, 744 MHz on the
+P cores and 1056 MHz on the E cores.
 
 ## Reading the console at all
 
