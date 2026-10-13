@@ -628,10 +628,14 @@ Storage is NVMe behind the ANS2 coprocessor: SART, an RTKit mailbox, ANS2, then
 `nvme-apple`, all in the Hoolock kernel and `config_16k`. The work was device
 tree plus placing T8020 between T8015 and T8103.
 
-It works. `nvme0n1` comes up with its GPT and APFS container, plus seven small
-vendor namespaces, and a 64 MiB read runs at about 400 MB/s, two reads of the
-same range hashing alike. Seven faults, each hiding the next, in the order
-found.
+It works, both ways. `nvme0n1` comes up with its GPT and APFS container, plus
+seven small vendor namespaces. A 64 MiB read runs at about 467 MB/s and a 64
+MiB write at about 132 MB/s, and a 4 MiB file written, unmounted, re-mounted
+after `drop_caches` and hashed again comes back identical. Seven faults, each
+hiding the next, in the order found.
+
+Mount it as `mount -t ext4 /dev/nvme0n1 /mnt`. Without the type, busybox has
+nothing to autodetect with and the mount fails silently.
 
 ### 1. iBoot leaves its own admin queue programmed
 
@@ -865,20 +869,19 @@ Things this repo previously asserted that are wrong.
 
 ## Known gaps
 
-1. **NVMe writes.** Reads work; nothing has been written.
-2. **cpufreq.** `apple_soc_cpufreq_module_init` never returns, so the kernel is
+1. **cpufreq.** `apple_soc_cpufreq_module_init` never returns, so the kernel is
    built with `CONFIG_ARM_APPLE_SOC_CPUFREQ` off. The OPP tables were written
    from the ADT and never boot tested. Needs measured A12 operating points.
    Cluster controllers at 0x210e20000 and 0x211e20000.
-3. **Chicken bits.** Applied in m1n1 at startup; the kernel does not reapply
+2. **Chicken bits.** Applied in m1n1 at startup; the kernel does not reapply
    them per-core. Fine for bring-up.
-4. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
+3. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
    framebuffer includes the notch area. Cosmetic.
-5. **The gadget is only addressed on about half of boots.** See
+4. **The gadget is only addressed on about half of boots.** See
    [USB](#the-gadget-often-never-takes-an-address-open). Reboot until it comes
    up; the phone itself is fine either way, it is only the host link that
    fails.
-6. **The m1n1 proxy answers one client, then goes quiet.** The first connection
+5. **The m1n1 proxy answers one client, then goes quiet.** The first connection
    works and can pull the whole ADT over it, 0x44000 bytes, so DMA is fine. The
    next `read32` times out while the device is still enumerated on the host at
    the same device number, so the host never saw a disconnect. Does not affect

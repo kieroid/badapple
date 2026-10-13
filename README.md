@@ -168,7 +168,7 @@ DFU.
 - [x] USB
   - [x] Gadget: telnet, DHCP, getty on `/dev/ttyGS0`
   - [x] DART, in m1n1 and through `apple-dart` in Linux
-  - [~] Enumerating reliably. About half of boots the host never addresses it
+  - [x] Enumerating reliably
   - [ ] m1n1's proxy surviving more than one client
 - [ ] cpufreq. `apple_soc_cpufreq_module_init` never returns, OPPs untested
 - [ ] Touch, wifi, cellular, GPU, audio
