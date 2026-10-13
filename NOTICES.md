@@ -11,16 +11,16 @@ under what terms.
 | Linux | HoolockLinux/linux | GPL-2.0 |
 | Hoolock docs, 16K config, IM4M templates, empty trustcache | HoolockLinux/docs | MIT |
 | Test initramfs | HoolockLinux/HoolockRD | see that repo |
-| `usbliter8ctl`, jig firmware | Trussh/usbliter8ra1n-patch | MIT |
+| Jig firmware | Trussh/usbliter8ra1n-patch | MIT |
 | pico-sdk | raspberrypi/pico-sdk | BSD-3-Clause |
 | Arm GNU toolchain | developer.arm.com | GPL with runtime exception |
 
 ## usbliter8
 
 The bootrom exploit. It runs on the RP2350 jig and never on the phone's side of
-the boot. `usbliter8ctl` from the same tree uploads the patched iBSS over pwned
-DFU. See [NOTES.md](NOTES.md#rp2350-firmware) for building and flashing it.
-`boards/pico2_w.cmake` is ours.
+the boot. See [NOTES.md](NOTES.md#rp2350-firmware) for building and flashing
+it. `boards/pico2_w.cmake` is ours, and so is `tools/dfuboot.py`, which uploads
+the patched iBSS to the exploited bootrom.
 
 Trussh/usbliter8ra1n-patch is MIT. The older Trussh/usbliter8 ships no license
 file, so nothing here is taken from it.

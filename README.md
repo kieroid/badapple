@@ -15,7 +15,7 @@ off the flash, so wiping it does not break anything.
 |---|---|
 | Boot to a root shell | works |
 | Framebuffer console | works, handed over by iBoot |
-| USB gadget, telnet over the cable | works |
+| USB gadget, telnet over the cable | unreliable, enumerates on about half of boots |
 | AIC interrupts | works |
 | NVMe storage | works, reads and writes, ext4 mounted |
 | SMP | works, all six cores |
@@ -39,7 +39,7 @@ Registers, dead ends and the debugging history are in [NOTES.md](NOTES.md).
 ```text
 SecureROM
   -> usbliter8 on a Pico 2 W jig, fires the bootrom exploit, leaves pwned DFU
-  -> iBSS, patched to stop checking signatures, uploaded by usbliter8ctl
+  -> iBSS, patched to stop checking signatures, uploaded by tools/dfuboot.py
   -> device tree and an empty trustcache, over Apple's recovery protocol
   -> m1n1, handed to bootx where a restore kernelcache would go
   -> Linux, 16K pages, t8020-d331p.dtb, initramfs
@@ -59,10 +59,11 @@ and `console=tty0` is the framebuffer it leaves behind.
 | `git`, `curl`, `unzip` | `make deps`, `make initramfs` |
 | `ipsw`, `pyimg4` | unpacking the IPSW, wrapping images in img4 |
 | `irecovery` | talking to iBSS in recovery mode |
-| [usbliter8ra1n-patch](https://github.com/Trussh/usbliter8ra1n-patch) | `usbliter8ctl`, which uploads iBSS over pwned DFU |
+| [usbliter8ra1n-patch](https://github.com/Trussh/usbliter8ra1n-patch) | the jig firmware, built and flashed once |
 
 `make deps` clones m1n1, the Hoolock kernel and docs into `build/`, makes
 `build/venv` with `pyusb`, `pyserial` and `construct`, and applies `patches/`.
+`tools/dfuboot.py` needs that venv, since `pyusb` is what talks to DFU.
 The jig firmware is built separately, see
 [NOTES.md](NOTES.md#rp2350-firmware).
 
@@ -140,10 +141,6 @@ Move the cable to the PC, then:
 ./tools/iboot-boot.sh
 ```
 
-The script wants `usbliter8ctl` at
-`../../3rd-party/usbliter8ra1n-patch/tools/usbliter8ctl`. Set `USBLITER8CTL` to
-point somewhere else.
-
 About twenty seconds later the phone is `05ac:4142`, hands the PC
 `172.16.42.2` over DHCP, and answers telnet on `172.16.42.1`.
 `tools/tsh.py "cmd"` runs one command there from a script.
@@ -171,6 +168,7 @@ DFU.
 - [x] USB
   - [x] Gadget: telnet, DHCP, getty on `/dev/ttyGS0`
   - [x] DART, in m1n1 and through `apple-dart` in Linux
+  - [~] Enumerating reliably. About half of boots the host never addresses it
   - [ ] m1n1's proxy surviving more than one client
 - [ ] cpufreq. `apple_soc_cpufreq_module_init` never returns, OPPs untested
 - [ ] Touch, wifi, cellular, GPU, audio
