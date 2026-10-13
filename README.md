@@ -15,7 +15,7 @@ off the flash, so wiping it does not break anything.
 |---|---|
 | Boot to a root shell | works |
 | Framebuffer console | works, handed over by iBoot |
-| USB gadget, telnet over the cable | unreliable, enumerates on about half of boots |
+| USB gadget, telnet over the cable | works |
 | AIC interrupts | works |
 | NVMe storage | works, reads and writes, ext4 mounted |
 | Battery, charger, power button | works, through the SMC |
@@ -149,7 +149,6 @@ a firmware reset is not enough, and put the phone back in DFU.
   - [x] Gadget: telnet, DHCP, getty on `/dev/ttyGS0`
   - [x] DART, in m1n1 and through `apple-dart` in Linux
   - [x] Enumerating reliably
-  - [ ] m1n1's proxy surviving more than one client
 - [ ] cpufreq. Needs the PMP/CLPC coprocessor that completes transitions
 - [ ] Touch, wifi, cellular, GPU, audio
 - [ ] Anything upstream

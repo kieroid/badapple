@@ -996,8 +996,8 @@ Things this repo previously asserted that are wrong.
 
 ## Known gaps
 
-1. **cpufreq.** Off, and now for a measured reason. See
-   [cpufreq](#cpufreq-the-hardware-will-not-take-the-transitions).
+1. **cpufreq.** Off. Needs the CLPC coprocessor, see
+   [cpufreq](#cpufreq-the-part-that-completes-transitions-is-not-running).
 2. **Chicken bits.** Applied in m1n1 at startup; the kernel does not reapply
    them per-core. Fine for bring-up.
 3. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
@@ -1006,8 +1006,9 @@ Things this repo previously asserted that are wrong.
    [USB](#the-gadget-often-never-takes-an-address-open). Reboot until it comes
    up; the phone itself is fine either way, it is only the host link that
    fails.
-5. **The m1n1 proxy answers one client, then goes quiet.** The first connection
-   works and can pull the whole ADT over it, 0x44000 bytes, so DMA is fine. The
-   next `read32` times out while the device is still enumerated on the host at
-   the same device number, so the host never saw a disconnect. Does not affect
-   Linux.
+5. **SMC reboot and poweroff.** `macsmc-reboot` wants nvmem cells the loader
+   fills on a Mac. Small job, and it would mean rebooting without touching the
+   phone.
+6. **SoC temperature sensors.** `/arm-io/tempsensor0` to `tempsensor8`,
+   `tempsensor,t8020`. No Linux driver exists. Battery temperature already
+   works through the SMC.
