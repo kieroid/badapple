@@ -22,7 +22,6 @@ Usage:
 """
 
 import sys
-import time
 from pathlib import Path
 
 import usb.core
@@ -41,17 +40,13 @@ CHUNK = 0x800
 
 
 def find_pwned():
-    for attempt in range(20):
-        for device in usb.core.find(find_all=True, idProduct=DFU_PRODUCT):
-            try:
-                serial = device.serial_number
-            except (usb.core.USBError, NotImplementedError):
-                continue
-            if serial and "PWND:[" in serial:
-                return device, serial
-        if attempt == 0:
-            print("  waiting for a pwned DFU device")
-        time.sleep(1.0)
+    for device in usb.core.find(find_all=True, idProduct=DFU_PRODUCT):
+        try:
+            serial = device.serial_number
+        except (usb.core.USBError, NotImplementedError):
+            continue
+        if serial and "PWND:[" in serial:
+            return device, serial
 
     raise SystemExit(
         "no pwned DFU device (05ac:1227 with PWND in its serial). Put the "

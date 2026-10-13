@@ -936,6 +936,26 @@ register by register by the OS, and we never boot it. That is exactly the P
 cluster symptom: the request is accepted, `BUSY` latches, and nothing ever
 completes it, because the thing that completes it is not running.
 
+The frequencies, which used to live in the device tree as OPP tables and are
+kept here now that nothing can use them. Read from a live system with the
+PongoOS `dt` command, from `voltage-states1-sram` (E) and `voltage-states5-sram`
+(P); the copies in the IPSW are zeroed. `opp-level` is the table index plus one,
+as on A10 and A11, and iBoot leaves both clusters at level 2.
+
+| pstate | E, Tempest | P, Vortex |
+|---|---|---|
+| 1 | 528 MHz | 504 MHz |
+| 2 | 792 MHz | 744 MHz |
+| 3 | 1056 MHz | 1176 MHz |
+| 4 | 1308 MHz | 1704 MHz |
+| 5 | 1572 MHz | 2136 MHz |
+| 6 | | 2376 MHz |
+| 7 | | 2436 MHz, boost |
+| 8 | | 2496 MHz, boost |
+
+Latencies, in the same order, were A11's: 1800, 140000, 105000, 115000 and
+125000 ns on E, and 1400, 140000, 110000, 110000, 125000, 130000 ns on P.
+
 The pstate frequency and voltage table is not in the ADT at all, so iBoot
 programs it into the cluster block from somewhere else. Two ways forward if
 this ever matters: bring up the PMP and CLPC path, which is an ANS2 sized

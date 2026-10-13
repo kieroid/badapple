@@ -78,8 +78,6 @@
 			compatible = "apple,tempest";
 			reg = <0x0 0x0>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
-			performance-domains = <&cpufreq_e>;
-			operating-points-v2 = <&tempest_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -89,8 +87,6 @@
 			compatible = "apple,tempest";
 			reg = <0x0 0x1>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
-			performance-domains = <&cpufreq_e>;
-			operating-points-v2 = <&tempest_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -100,8 +96,6 @@
 			compatible = "apple,tempest";
 			reg = <0x0 0x2>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
-			performance-domains = <&cpufreq_e>;
-			operating-points-v2 = <&tempest_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -111,8 +105,6 @@
 			compatible = "apple,tempest";
 			reg = <0x0 0x3>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
-			performance-domains = <&cpufreq_e>;
-			operating-points-v2 = <&tempest_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -122,8 +114,6 @@
 			compatible = "apple,vortex";
 			reg = <0x0 0x10100>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
-			performance-domains = <&cpufreq_p>;
-			operating-points-v2 = <&vortex_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_1>;
@@ -133,8 +123,6 @@
 			compatible = "apple,vortex";
 			reg = <0x0 0x10101>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
-			performance-domains = <&cpufreq_p>;
-			operating-points-v2 = <&vortex_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_1>;
@@ -156,109 +144,12 @@
 		};
 	};
 
-	/*
-	 * Frequencies are the iBoot-filled voltage-states1-sram (E) and
-	 * voltage-states5-sram (P) of the live DeviceTree, read from PongoOS
-	 * with "dt pmgr voltage-states1-sram -4". The copies in the IPSW are
-	 * zeroed. opp-level is the table index plus one, as on A10 and A11;
-	 * iBoot leaves both clusters at level 2. Latencies are A11's.
-	 */
-	tempest_opp: opp-table-0 {
-		compatible = "operating-points-v2";
-		opp01 {
-			opp-hz = /bits/ 64 <528000000>;
-			opp-level = <1>;
-			clock-latency-ns = <1800>;
-		};
-		opp02 {
-			opp-hz = /bits/ 64 <792000000>;
-			opp-level = <2>;
-			clock-latency-ns = <140000>;
-		};
-		opp03 {
-			opp-hz = /bits/ 64 <1056000000>;
-			opp-level = <3>;
-			clock-latency-ns = <105000>;
-		};
-		opp04 {
-			opp-hz = /bits/ 64 <1308000000>;
-			opp-level = <4>;
-			clock-latency-ns = <115000>;
-		};
-		opp05 {
-			opp-hz = /bits/ 64 <1572000000>;
-			opp-level = <5>;
-			clock-latency-ns = <125000>;
-		};
-	};
-
-	vortex_opp: opp-table-1 {
-		compatible = "operating-points-v2";
-		opp01 {
-			opp-hz = /bits/ 64 <504000000>;
-			opp-level = <1>;
-			clock-latency-ns = <1400>;
-		};
-		opp02 {
-			opp-hz = /bits/ 64 <744000000>;
-			opp-level = <2>;
-			clock-latency-ns = <140000>;
-		};
-		opp03 {
-			opp-hz = /bits/ 64 <1176000000>;
-			opp-level = <3>;
-			clock-latency-ns = <110000>;
-		};
-		opp04 {
-			opp-hz = /bits/ 64 <1704000000>;
-			opp-level = <4>;
-			clock-latency-ns = <110000>;
-		};
-		opp05 {
-			opp-hz = /bits/ 64 <2136000000>;
-			opp-level = <5>;
-			clock-latency-ns = <125000>;
-		};
-		opp06 {
-			opp-hz = /bits/ 64 <2376000000>;
-			opp-level = <6>;
-			clock-latency-ns = <130000>;
-		};
-#if 0
-		/* Probably boost only, like the top A11 states. Not until CPU deep sleep is implemented. */
-		opp07 {
-			opp-hz = /bits/ 64 <2436000000>;
-			opp-level = <7>;
-			clock-latency-ns = <140000>;
-			turbo-mode;
-		};
-		opp08 {
-			opp-hz = /bits/ 64 <2496000000>;
-			opp-level = <8>;
-			clock-latency-ns = <140000>;
-			turbo-mode;
-		};
-#endif
-	};
-
 	soc {
 		compatible = "simple-bus";
 		#address-cells = <2>;
 		#size-cells = <2>;
 		nonposted-mmio;
 		ranges;
-
-		cpufreq_e: performance-controller@210e20000 {
-			compatible = "apple,t8020-cluster-cpufreq", "apple,t8103-cluster-cpufreq", "apple,cluster-cpufreq";
-			reg = <0x2 0x10e20000 0 0x1000>;
-			#performance-domain-cells = <0>;
-		};
-
-		cpufreq_p: performance-controller@211e20000 {
-			compatible = "apple,t8020-cluster-cpufreq", "apple,t8103-cluster-cpufreq", "apple,cluster-cpufreq";
-			reg = <0x2 0x11e20000 0 0x1000>;
-			#performance-domain-cells = <0>;
-		};
 
 		/* iBoot calls this one debug-console and leaves it running. */
 		serial0: serial@235200000 {

@@ -17,11 +17,10 @@
 set -u
 cd "$(dirname "$0")/.."
 
-IBSS=${IBSS:-build/iboot/iBSS.patched.raw}
-RDTR=${RDTR:-build/iboot/devicetree.img4}
-RTSC=${RTSC:-build/iboot/trustcache.img4}
+IBSS=build/iboot/iBSS.patched.raw
+RDTR=build/iboot/devicetree.img4
+RTSC=build/iboot/trustcache.img4
 KRNL=${1:-build/iboot/kernelcache.img4}
-PYTHON=${PYTHON:-build/venv/bin/python}
 
 mode() { irecovery -q 2>/dev/null | sed -n 's/^MODE: //p'; }
 pwnd() { irecovery -q 2>/dev/null | sed -n 's/^PWND: //p'; }
@@ -76,7 +75,7 @@ if [ -z "$(pwnd)" ]; then
 fi
 
 echo "pwned DFU, booting $IBSS"
-timeout 90 "$PYTHON" tools/dfuboot.py "$IBSS" >/dev/null 2>&1
+timeout 90 build/venv/bin/python tools/dfuboot.py "$IBSS" >/dev/null 2>&1
 
 wait_mode Recovery 20 || {
 	echo "iBSS did not come up, mode is '$(mode)'"

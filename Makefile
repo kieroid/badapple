@@ -38,7 +38,7 @@ KBUILD := LLVM=1 ARCH=arm64
 IBOOT       := build/iboot
 MACHO       := $(IBOOT)/m1n1-linux.macho
 KERNELCACHE := $(IBOOT)/kernelcache.img4
-MONITOR     ?= $(M1N1_SRC)/build/monitor-stub.macho
+MONITOR     := $(M1N1_SRC)/build/monitor-stub.macho
 
 # Any manifest does once tools/iboot-image4-patch.py has stopped iBSS looking
 # inside one. There is no 0x8020 template and there cannot be: from A11 on a
@@ -109,10 +109,8 @@ m1n1: $(M1N1)
 # want without rustup. m1n1 already exports RUSTC_BOOTSTRAP=1, so the -Z flag
 # this needs works on a stable rustc. It does need the Rust standard library
 # sources: on Gentoo that is the rust-src USE flag.
-BUILDSTD ?= 1
-
 $(M1N1): FORCE
-	$(MAKE) -C $(M1N1_SRC) RELEASE=1 CHAINLOADING=1 USE_CLANG=1 BUILDSTD=$(BUILDSTD)
+	$(MAKE) -C $(M1N1_SRC) RELEASE=1 CHAINLOADING=1 USE_CLANG=1 BUILDSTD=1
 
 kernel: $(IMAGE)
 
@@ -202,14 +200,9 @@ $(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS) FORCE | $(IBOOT)
 	@echo "built $@ ($$(stat -c%s $@) bytes)"
 
 # Phone in DFU on the jig, exploit fires by itself, move the cable here.
-#
-# The one-time images are checked for rather than depended on, so a tree that
-# already has them never goes looking for an IPSW it does not need.
+# iboot-boot.sh checks for the one-time images itself and says what is missing,
+# so this does not depend on them and never goes looking for an IPSW.
 boot: $(KERNELCACHE)
-	@for f in $(IBOOT)/iBSS.patched.raw $(IBOOT)/devicetree.img4 \
-	          $(IBOOT)/trustcache.img4; do \
-	    test -f $$f || { echo "missing $$f, run: make images IPSW=<dir>"; exit 1; }; \
-	done
 	./tools/iboot-boot.sh $(KERNELCACHE)
 
 clean:
