@@ -822,6 +822,64 @@ register semantics are in the PPL, not the kext.
   script that imports `m1n1.setup`. `p.nvme_init()` is not a shortcut: it stops
   at `asc: Unsupported compatible`, not knowing `iop,ascwrap-v2`.
 
+## The SMC, which is battery and buttons
+
+`/arm-io/smc` is an `iop,ascwrap-v2` with RTKit behind it, the same shape as
+ANS, and it came up first try. Linux already has every driver for it, and they
+were all running and finding nothing because no node existed.
+
+Addresses, and A12 matches T8103 exactly:
+
+| | |
+|---|---|
+| ASC wrapper | 0x23e400000, 0x20000 |
+| mailbox | 0x23e408000, ASC + 0x8000 |
+| SRAM | 0x23fe00000, 0x50000 |
+| interrupts | 253 to 256 |
+
+The SRAM is the part worth writing down: it is not in the SMC node's `reg` at
+all. It is `region-base` and `region-size` on the child
+`/arm-io/smc/iop-smc-nub`, which also names the firmware, `t8020smc`. The
+node's `reg` second entry, 0x23e050000, is something else and is not what the
+driver wants.
+
+The ADT lists the interrupts as 254, 253, 256, 255, two descending pairs,
+exactly as it does for ANS. Read each pair as (not-empty, empty) and they come
+out ascending in the order the binding wants.
+
+No `power-domains`. `clock-gates` and `power-gates` on the ADT node are both
+empty, which is what you would expect of the thing that runs when the rest of
+the SoC does not.
+
+The compatible is `apple,t8015-smc` rather than the T8103 one, so the MFD
+instantiates the A11 cell list: input, power, gpio, hwmon and reboot, with no
+RTC. `macsmc-power` and `macsmc-input` need no node of their own.
+
+What works, read over telnet:
+
+```text
+/sys/class/power_supply/macsmc-ac       Mains
+/sys/class/power_supply/macsmc-battery  Battery
+capacity 51   capacity_level Normal   health Good   cycle_count 601
+charge_full 2683000   charge_full_design 3156000
+voltage_now 3906000   current_now 444000   power_now 1734000   temp 294
+charge_behaviour [auto] inhibit-charge force-discharge
+```
+
+So battery, charger detection, battery temperature and the power button, which
+arrives as `Apple SMC power/lid events` on input0.
+
+Two cells do not probe yet, both expected:
+
+- `macsmc-hwmon` says "No valid sensors found of any supported type". It looks
+  for Mac sensor key sets. The SoC's own sensors are separate anyway:
+  `/arm-io/tempsensor0` through `tempsensor8`, `tempsensor,t8020`, which Linux
+  has no driver for at all.
+- `macsmc-reboot` returns `-ENODEV` because it wants nvmem cells:
+  `shutdown_flag`, `boot_stage`, `boot_error_count` and `panic_count`, which
+  the loader fills in on a Mac. Worth wiring up, since it is reboot and
+  poweroff.
+
 ## cpufreq, the part that completes transitions is not running
 
 `CONFIG_ARM_APPLE_SOC_CPUFREQ` is off. With it on, the boot stops inside

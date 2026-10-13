@@ -121,8 +121,13 @@ kernel: $(IMAGE)
 # nothing follows. Hoolock ships it enabled for pmOS netboot, which we do not
 # use.
 #
-# It has to be reapplied after the config copy, otherwise it is silently
-# undone on the next build.
+# Same for CONFIG_ARM_APPLE_SOC_CPUFREQ, which hangs the boot one initcall
+# after Bluetooth: requests are accepted and never completed, because the
+# coprocessor that arbitrates DVFS is not running. See NOTES.md.
+#
+# Both have to be reapplied after the config copy, otherwise they are silently
+# undone on the next build. Passing KCONFIG_EXTRA does not carry them either,
+# which is worth knowing before blaming whatever driver you just added.
 #
 # KCONFIG_EXTRA takes more scripts/config arguments for one-off debug builds,
 # e.g. KCONFIG_EXTRA="--enable CONFIG_SOFTLOCKUP_DETECTOR".
@@ -132,7 +137,8 @@ kernel: $(IMAGE)
 # keeps the rerun incremental.
 $(IMAGE): FORCE
 	cp $(CONFIG_16K) $(KDIR)/.config
-	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD $(KCONFIG_EXTRA)
+	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD \
+	    --disable CONFIG_ARM_APPLE_SOC_CPUFREQ $(KCONFIG_EXTRA)
 	$(MAKE) -C $(KDIR) $(KBUILD) olddefconfig
 	$(MAKE) -C $(KDIR) $(KBUILD) -j$$(nproc) Image.gz
 

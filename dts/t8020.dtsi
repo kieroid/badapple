@@ -462,6 +462,56 @@
 			resets = <&ps_ans2>;
 		};
 
+		/*
+		 * The SMC, which owns the battery, the charger, the temperature
+		 * sensors and the power button. Same RTKit over ASC mailbox
+		 * shape as ANS, and the addresses line up with T8103 exactly:
+		 * the ASC wrapper is at 0x23e400000 and the shared memory the
+		 * ADT calls region-base on /arm-io/smc/iop-smc-nub is at
+		 * 0x23fe00000, 0x50000 long.
+		 *
+		 * No power-domains. clock-gates and power-gates on the ADT node
+		 * are both empty, which is what you would expect of the thing
+		 * that runs when the rest of the SoC does not.
+		 *
+		 * apple,t8015-smc rather than the T8103 compatible, so the MFD
+		 * instantiates the A11 cell list: input, power, gpio, hwmon and
+		 * reboot, with no RTC. macsmc-power and macsmc-input need no
+		 * node of their own.
+		 */
+		smc: smc@23e400000 {
+			compatible = "apple,t8020-smc", "apple,t8015-smc",
+				     "apple,t8103-smc";
+			reg = <0x2 0x3e400000 0x0 0x20000>,
+			      <0x2 0x3fe00000 0x0 0x50000>;
+			reg-names = "smc", "sram";
+			mboxes = <&smc_mbox>;
+
+			smc_hwmon: hwmon {
+				compatible = "apple,smc-hwmon";
+			};
+		};
+
+		/*
+		 * The ADT lists these as 254, 253, 256, 255, two descending
+		 * pairs, exactly as it does for ANS. Read each pair as
+		 * (not-empty, empty) and they come out ascending in the order
+		 * the binding wants.
+		 */
+		smc_mbox: mbox@23e408000 {
+			compatible = "apple,t8020-asc-mailbox",
+				     "apple,t8015-asc-mailbox";
+			reg = <0x2 0x3e408000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 253 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 254 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 255 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 256 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+					  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+		};
+
 		aic: interrupt-controller@23b100000 {
 			compatible = "apple,t8020-aic", "apple,t8015-aic", "apple,aic";
 			reg = <0x2 0x3b100000 0x0 0x8000>;

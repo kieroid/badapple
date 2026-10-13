@@ -18,9 +18,10 @@ off the flash, so wiping it does not break anything.
 | USB gadget, telnet over the cable | unreliable, enumerates on about half of boots |
 | AIC interrupts | works |
 | NVMe storage | works, reads and writes, ext4 mounted |
+| Battery, charger, power button | works, through the SMC |
 | SMP | works, all six cores |
 | cpufreq | off, needs the CLPC coprocessor that arbitrates DVFS |
-| Display, touch, wifi, cellular, GPU | not started |
+| Display driver, touch, wifi, cellular, GPU | not started |
 
 ```console
 $ telnet 172.16.42.1
@@ -139,6 +140,11 @@ a firmware reset is not enough, and put the phone back in DFU.
 - [x] SMP on all six cores
   - [ ] Chicken bits reapplied per core by the kernel, m1n1 does it once
 - [x] NVMe through ANS2, reads and writes, ext4 mounted
+- [x] SMC
+  - [x] Battery: capacity, health, cycles, voltage, current, temperature
+  - [x] Charger detection and the power button
+  - [ ] Reboot and poweroff, needs the nvmem cells macsmc-reboot wants
+  - [ ] SoC temperature sensors, no Linux driver for tempsensor,t8020
 - [x] USB
   - [x] Gadget: telnet, DHCP, getty on `/dev/ttyGS0`
   - [x] DART, in m1n1 and through `apple-dart` in Linux
