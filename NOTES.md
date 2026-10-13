@@ -822,6 +822,59 @@ register semantics are in the PPL, not the kext.
   script that imports `m1n1.setup`. `p.nvme_init()` is not a shortcut: it stops
   at `asc: Unsupported compatible`, not knowing `iop,ascwrap-v2`.
 
+## cpufreq, the hardware will not take the transitions
+
+`CONFIG_ARM_APPLE_SOC_CPUFREQ` is off. With it on, the boot stops inside
+`apple_soc_cpufreq_module_init`, and chasing that through Linux cost a lot of
+DFU trips for very little. Driving the DVFS registers directly from the m1n1
+proxy answered it in two sessions.
+
+Cluster controllers are at 0x210e20000 (E) and 0x211e20000 (P). As iBoot leaves
+them, both read:
+
+```text
+CMD 0x20 = 01900102   PS1=2, PS2=0, SET and BUSY clear
+STATUS 0x50 = 00000022   CUR_PS=2, TGT_PS=2
+PLL_STATUS 0xc0 = a0000000
+PLL_FACTOR 0xc8 = 04200005 on E, 03f00005 on P
+```
+
+So `DVFS_STATUS` is the T8103 layout, CUR_PS at bits 7:4, which also matches
+what the driver reports for the current frequency. What is not upstream's
+assumption:
+
+- **`DVFS_CMD` ignores 32 bit writes.** A `writel` changes nothing at all. A
+  `writeq` of the same value moves `CUR_PS`. Reads work at either width, so
+  upstream's `readq`/`writeq` is right and any 32 bit shortcut is silently
+  useless.
+- **`ioremap_np` wedges the E cluster.** With the DVFS block mapped
+  non-posted, the P policy comes up and reads its status fine, then the first
+  access to 0x210e20000 never returns. Plain `ioremap` gets further. That is
+  the opposite of the rule everywhere else on this SoC, where non-posted is
+  mandatory, so it is worth remembering that the rule is per block.
+
+The transitions themselves are what kill it, measured by walking the pstates
+one at a time from m1n1:
+
+| cluster | result |
+|---|---|
+| E, pstates 1 to 4 | complete, `CUR_PS` follows each request |
+| E, pstate 5 (1572 MHz) | hangs the SoC hard, m1n1 included |
+| P, first transition | completes |
+| P, every later one | `BUSY` sticks forever at CUR_PS=1, TGT_PS=2 |
+
+A stuck `BUSY` on the P cluster is permanent: five seconds later it is
+unchanged, while the E cluster sits happily at pstate 2 beside it. That is the
+cluster the kernel runs on, so schedutil asking for the top of the table early
+in boot is exactly the reset that was being chased.
+
+None of that is a driver bug. Apple's DVFS ramps voltage through the PMU
+alongside the frequency and the OPP tables here carry no voltage data at all,
+so the frequency side is being driven on its own. Until the voltage side is
+understood, the tables in `t8020.dtsi` are not safe to use, and capping them at
+the pstates that happen to work would still leave the P cluster wedging on its
+second transition.
+
 ## Reading the console at all
 
 simpledrm's fbcon paints in lagging bursts, so a quiet boot looks like it died
@@ -870,10 +923,8 @@ Things this repo previously asserted that are wrong.
 
 ## Known gaps
 
-1. **cpufreq.** `apple_soc_cpufreq_module_init` never returns, so the kernel is
-   built with `CONFIG_ARM_APPLE_SOC_CPUFREQ` off. The OPP tables were written
-   from the ADT and never boot tested. Needs measured A12 operating points.
-   Cluster controllers at 0x210e20000 and 0x211e20000.
+1. **cpufreq.** Off, and now for a measured reason. See
+   [cpufreq](#cpufreq-the-hardware-will-not-take-the-transitions).
 2. **Chicken bits.** Applied in m1n1 at startup; the kernel does not reapply
    them per-core. Fine for bring-up.
 3. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the

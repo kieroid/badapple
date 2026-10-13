@@ -11,6 +11,7 @@
 #            needs IPSW=<unpacked ipsw dir>
 # kernelcache  pack m1n1, the device tree, the kernel and the initramfs as a
 #            fake restore kernelcache that bootx will take
+# m1n1cache  pack m1n1 on its own, for poking registers over its proxy
 # boot       build that and hand the whole chain to a phone in pwned DFU
 #
 # "make check" is the only target that works on a bare checkout. The headers
@@ -56,7 +57,7 @@ ADT_IM4P  = $(firstword $(wildcard $(IPSW)/Firmware/all_flash/DeviceTree.d331pap
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel
 
 .PHONY: check deps patch pmgr m1n1 kernel initramfs images kernelcache \
-	boot clean FORCE
+	m1n1cache boot clean FORCE
 FORCE:
 
 check: $(DTB)
@@ -173,9 +174,20 @@ $(IBOOT)/trustcache.img4: $(IBOOT)/empty_trustcache.bin
 
 kernelcache: $(KERNELCACHE)
 
+# m1n1 on its own, no Linux, for poking registers over its proxy.
+m1n1cache: $(IBOOT)/kernelcache-m1n1.img4
+
+$(IBOOT)/kernelcache-m1n1.img4: $(M1N1) FORCE | $(IBOOT)
+	ipsw img4 create --input $(M1N1) --type rkrn --compress lzss \
+	    --extra $(MONITOR) --im4m $(IM4M) --output $@
+
 # The payload has to be a Mach-O and has to be lzss compressed, which --extra
 # requires anyway for the monitor stub.
-$(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS) | $(IBOOT)
+#
+# FORCE because BOOTARGS is not a file: without it an override on the command
+# line, say to add initcall_debug for one boot, is silently ignored whenever
+# the kernel itself has not changed. Packing costs a couple of seconds.
+$(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS) FORCE | $(IBOOT)
 	{ cat $(M1N1); \
 	  echo 'chosen.bootargs=$(BOOTARGS)'; \
 	  cat $(DTB) $(IMAGE) $(INITRAMFS); } > $(MACHO)
