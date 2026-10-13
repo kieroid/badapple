@@ -23,8 +23,6 @@ RET = 0xD65F03C0
 
 # movz wN, #0x4559 / movk wN, #0x454b, lsl #16, ignoring which register
 EKEY_MOVZ, EKEY_MOVK = 0x5288AB20, 0x72A8A960
-# the same pair in the other order, which older compilers emit
-EKEY_MOVZ_ALT, EKEY_MOVK_ALT = 0x52A8A960, 0x7288AB20
 REG_MASK = 0xFFFFFFE0
 
 
@@ -34,8 +32,7 @@ def words(buf):
 
 def find_callback(w):
     for i in range(len(w) - 1):
-        a, b = w[i] & REG_MASK, w[i + 1] & REG_MASK
-        if (a, b) not in ((EKEY_MOVZ, EKEY_MOVK), (EKEY_MOVZ_ALT, EKEY_MOVK_ALT)):
+        if (w[i] & REG_MASK, w[i + 1] & REG_MASK) != (EKEY_MOVZ, EKEY_MOVK):
             continue
         for j in range(i, max(i - 0x400, -1), -1):
             if w[j] == PACIBSP:
@@ -48,14 +45,16 @@ def main():
         sys.exit(f"usage: {sys.argv[0]} <iboot.raw> <patched.raw>")
 
     data = bytearray(open(sys.argv[1], "rb").read())
-    hits = {start: anchor for start, anchor in find_callback(words(data))}
-    if not hits:
-        sys.exit("no EKEY anchor found, not an iBoot image for this patch")
-    if len(hits) > 1:
-        found = ", ".join(hex(o) for o in sorted(hits))
-        sys.exit(f"EKEY anchor resolved to several functions: {found}")
+    # Keyed by function, because the callback compares against EKEY more than
+    # once and every one of those walks back to the same entry.
+    hits = {}
+    for start, anchor in find_callback(words(data)):
+        hits.setdefault(start, anchor)
+    if len(hits) != 1:
+        sys.exit(f"expected one function with an EKEY anchor, found "
+                 f"{len(hits)}: {[hex(o) for o in sorted(hits)]}")
 
-    start, anchor = next(iter(hits.items()))
+    (start, anchor), = hits.items()
     struct.pack_into("<I", data, start, MOV_W0_0)
     struct.pack_into("<I", data, start + 4, RET)
     open(sys.argv[2], "wb").write(bytes(data))

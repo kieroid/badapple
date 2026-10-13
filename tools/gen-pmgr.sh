@@ -18,7 +18,12 @@
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-im4p=${1:-$root/refs/iosdt/DeviceTree.d331pap.im4p}
+im4p=${1:-}
+if [ -z "$im4p" ]; then
+	echo "usage: $0 <DeviceTree.d331pap.im4p>" >&2
+	echo "it is in Firmware/all_flash of an unpacked iPhone11,6 IPSW" >&2
+	exit 1
+fi
 m1n1=${M1N1_SRC:-$root/build/m1n1}
 python=${PYTHON:-$root/build/venv/bin/python}
 adt=$root/build/adt-d331p.bin

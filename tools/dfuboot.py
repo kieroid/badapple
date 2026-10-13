@@ -3,7 +3,7 @@
 # Copyright (c) 2026 kiki <kieran@lavato.net>
 """Upload an image to a pwned DFU device and run it.
 
-The board exploits the phone's bootrom over USB and leaves it in DFU with a
+The jig exploits the phone's bootrom over USB and leaves it in DFU with a
 patched request handler. That handler keeps the standard DFU download request
 and adds two of its own, so sending an image is DFU_DNLOAD in chunks, a zero
 length DNLOAD to end the transfer, and then request 8 to jump to what was just
@@ -14,14 +14,11 @@ instance:
 
     CPID:8020 CPRV:11 CPFM:03 SCEP:01 BDID:1A ECID:... PWND:[usbliter8]
 
-This replaces the iBoot route the jig firmware used to take. That route patched
-iBoot's auto-boot path and installed its own second stage along the way, which
-means it only worked while the phone still had a bootable OS on the NAND. Here
-the bootrom is handed an image directly and nothing on the flash is involved,
-so it keeps working on a phone whose storage belongs to Linux.
+The image is the patched iBSS. The bootrom jumps to it without checking a
+signature, which is what puts the phone in recovery mode with DRAM up.
 
 Usage:
-    dfuboot.py <image>      upload and jump to it, normally PongoOS
+    dfuboot.py <image>      upload and jump to it
 """
 
 import sys
@@ -32,10 +29,10 @@ import usb.core
 
 DFU_PRODUCT = 0x1227
 
-# Request 1 is DFU_DNLOAD from the DFU spec. 4 is DFU_ABORT. 8 is the exploit
+# 1 and 6 are DFU_DNLOAD and DFU_ABORT from the DFU spec. 8 is the exploit
 # handler's own "jump to the uploaded image".
 REQ_DNLOAD = 1
-REQ_ABORT = 4
+REQ_ABORT = 6
 REQ_BOOT = 8
 OUT_REQUEST = 0x21
 

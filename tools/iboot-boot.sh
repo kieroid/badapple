@@ -1,5 +1,5 @@
 #!/bin/bash
-# Boot the blob through Apple's own recovery chain instead of PongoOS.
+# Boot the blob through Apple's own recovery chain.
 #
 # iBoot is asked to restore a device, and m1n1 is handed to it where the
 # restore kernelcache would go. That keeps iBSS in the picture, so DRAM, the
@@ -21,7 +21,7 @@ IBSS=${IBSS:-build/iboot/iBSS.patched.raw}
 RDTR=${RDTR:-build/iboot/devicetree.img4}
 RTSC=${RTSC:-build/iboot/trustcache.img4}
 KRNL=${1:-build/iboot/kernelcache.img4}
-USBLITER8CTL=${USBLITER8CTL:-../../3rd-party/usbliter8ra1n-patch/tools/usbliter8ctl}
+PYTHON=${PYTHON:-build/venv/bin/python}
 
 mode() { irecovery -q 2>/dev/null | sed -n 's/^MODE: //p'; }
 pwnd() { irecovery -q 2>/dev/null | sed -n 's/^PWND: //p'; }
@@ -76,7 +76,7 @@ if [ -z "$(pwnd)" ]; then
 fi
 
 echo "pwned DFU, booting $IBSS"
-timeout 90 python3 "$USBLITER8CTL" boot "$IBSS" >/dev/null 2>&1
+timeout 90 "$PYTHON" tools/dfuboot.py "$IBSS" >/dev/null 2>&1
 
 wait_mode Recovery 20 || {
 	echo "iBSS did not come up, mode is '$(mode)'"
