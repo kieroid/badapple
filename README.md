@@ -79,6 +79,9 @@ make initramfs  # download Hoolock's test initramfs
 make kernel KCONFIG_EXTRA="--disable CONFIG_ARM_APPLE_SOC_CPUFREQ"
 ```
 
+`make boot` rebuilds m1n1, the device tree and the kernel as needed, so those
+are only separate targets when you want one of them on its own.
+
 `make check` is the only target that works on a bare checkout. `make patch`
 re-applies `patches/` and is safe to run again: an applied patch is skipped, a
 real conflict stops the build.
@@ -88,74 +91,44 @@ boot stops there.
 
 ## First time setup
 
-Done once, from an unpacked IPSW. Everything lands in `build/iboot/`.
+Done once, from an unpacked IPSW. It patches iBSS so it will load a payload
+Apple never signed, and wraps the device tree and an empty trustcache for
+`bootx`.
 
 ```sh
-mkdir -p build/iboot
-
-# iBSS and the device tree out of the IPSW
-ipsw img4 im4p extract -o build/iboot/iBSS.raw \
-    <ipsw>/Firmware/dfu/iBSS.d331p.RELEASE.im4p
-ipsw img4 im4p extract -o build/iboot/DeviceTree.bin \
-    <ipsw>/Firmware/all_flash/DeviceTree.d331pap.im4p
-
-# stop iBSS checking what is inside an img4
-python3 tools/iboot-image4-patch.py \
-    build/iboot/iBSS.raw build/iboot/iBSS.patched.raw
-
-# a trustcache with no entries, which is all iBoot wants here
-printf '\x01\x00\x00\x00\x6e\x17\x68\x17\x88\x2d\x44\x40\x83\xb6\xf3\x22\x06\xbc\x4f\x17\x00\x00\x00\x00' \
-    > build/iboot/empty_trustcache.bin
-
-# wrap both for bootx. Any IM4M works once iBSS is patched
-IM4M=build/hoolock-docs/binaries/im4m/0x8015.im4m
-ipsw img4 create --input build/iboot/DeviceTree.bin --type rdtr \
-    --im4m $IM4M --output build/iboot/devicetree.img4
-ipsw img4 create --input build/iboot/empty_trustcache.bin --type rtsc \
-    --im4m $IM4M --output build/iboot/trustcache.img4
+make images IPSW=/path/to/unpacked/ipsw
 ```
+
+Everything lands in `build/iboot/`. Any manifest does once iBSS is patched, so
+the IM4M is Hoolock's `0x8015.im4m`. There is no `0x8020` template and there
+cannot be: from A11 on a manifest is tied to the device's own ECID.
 
 ## Run
-
-Pack m1n1, the device tree, the kernel and the initramfs into one fake restore
-kernelcache:
-
-```sh
-IM4M=build/hoolock-docs/binaries/im4m/0x8015.im4m
-{ cat build/m1n1/build/m1n1-idevice.macho
-  echo 'chosen.bootargs=earlycon console=tty0 ignore_loglevel'
-  cat build/t8020-d331p.dtb \
-      build/linux/arch/arm64/boot/Image.gz \
-      build/initramfs.gz
-} > build/iboot/m1n1-linux.macho
-
-ipsw img4 create --input build/iboot/m1n1-linux.macho --type rkrn \
-    --compress lzss --extra build/m1n1/build/monitor-stub.macho \
-    --im4m $IM4M --output build/iboot/kernelcache.img4
-```
 
 Put the phone in DFU on the jig. The exploit fires by itself in about a second.
 Move the cable to the PC, then:
 
 ```sh
-./tools/iboot-boot.sh
+make boot
 ```
+
+That packs m1n1, the device tree, the kernel and the initramfs into one fake
+restore kernelcache and hands the whole chain to the phone. `make kernelcache`
+builds it without booting anything.
 
 About twenty seconds later the phone is `05ac:4142`, hands the PC
 `172.16.42.2` over DHCP, and answers telnet on `172.16.42.1`.
 `tools/tsh.py "cmd"` runs one command there from a script.
 
-If the script says the phone is not pwned, check its USB serial for
-`PWND:[usbliter8]`. Without it the exploit has not run: unplug the jig from USB
-for a few seconds, a firmware reset is not enough, and put the phone back in
-DFU.
+If it says the phone is not pwned, check its USB serial for `PWND:[usbliter8]`.
+Without it the exploit has not run: unplug the jig from USB for a few seconds,
+a firmware reset is not enough, and put the phone back in DFU.
 
 ## Implementation status
 
 - [x] Boot chain, tethered, nothing read off the NAND
   - [x] Patched iBSS that takes an unsigned payload
   - [x] m1n1 as a fake restore kernelcache, with a real BootArgs
-  - [ ] Makefile targets for `build/iboot/`, packed by hand today
 - [x] Device tree for T8020, PMGR domains generated from the ADT
 - [x] Console
   - [x] Framebuffer, handed over by iBoot

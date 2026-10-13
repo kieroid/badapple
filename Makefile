@@ -7,9 +7,11 @@
 # m1n1       build the m1n1 chainload payload
 # kernel     build Image.gz with Hoolock's 16K config
 # initramfs  download Hoolock's test initramfs
-#
-# Packing those into a kernelcache and booting it is README.md's "Run", with
-# tools/iboot-boot.sh driving the phone.
+# images     one-time: patch iBSS and wrap the device tree and trustcache,
+#            needs IPSW=<unpacked ipsw dir>
+# kernelcache  pack m1n1, the device tree, the kernel and the initramfs as a
+#            fake restore kernelcache that bootx will take
+# boot       build that and hand the whole chain to a phone in pwned DFU
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -32,7 +34,29 @@ INITRAMFS ?= build/initramfs.gz
 
 KBUILD := LLVM=1 ARCH=arm64
 
-.PHONY: check deps patch pmgr m1n1 kernel initramfs clean FORCE
+IBOOT       := build/iboot
+MACHO       := $(IBOOT)/m1n1-linux.macho
+KERNELCACHE := $(IBOOT)/kernelcache.img4
+MONITOR     ?= $(M1N1_SRC)/build/monitor-stub.macho
+
+# Any manifest does once tools/iboot-image4-patch.py has stopped iBSS looking
+# inside one. There is no 0x8020 template and there cannot be: from A11 on a
+# manifest is tied to the device's own ECID.
+IM4M ?= build/hoolock-docs/binaries/im4m/0x8015.im4m
+
+# Where an unpacked IPSW is, for "make images" only. The file names carry a
+# build number, so match on the stem.
+IPSW     ?=
+IBSS_IM4P = $(firstword $(wildcard $(IPSW)/Firmware/dfu/iBSS.d331p*.im4p))
+ADT_IM4P  = $(firstword $(wildcard $(IPSW)/Firmware/all_flash/DeviceTree.d331pap*.im4p))
+
+# console=tty0 is the framebuffer m1n1 hands over, which is readable on the
+# phone itself. The shell arrives separately over the USB gadget. earlycon
+# picks up UART0 through stdout-path, for anyone with a serial cable.
+BOOTARGS ?= earlycon console=tty0 ignore_loglevel
+
+.PHONY: check deps patch pmgr m1n1 kernel initramfs images kernelcache \
+	boot clean FORCE
 FORCE:
 
 check: $(DTB)
@@ -119,5 +143,56 @@ $(INITRAMFS):
 	    'https://nightly.link/HoolockLinux/HoolockRD/workflows/build/master/initramfs.gz.zip'
 	cd build && unzip -o initramfs.gz.zip && rm initramfs.gz.zip
 
+# One time, from an unpacked IPSW. iBSS is patched so it will load a payload
+# Apple never signed; the trustcache is 24 bytes of header with no entries,
+# which is all iBoot wants here.
+images: $(IBOOT)/iBSS.patched.raw $(IBOOT)/devicetree.img4 $(IBOOT)/trustcache.img4
+
+$(IBOOT):
+	mkdir -p $@
+
+$(IBOOT)/iBSS.raw: | $(IBOOT)
+	@test -n "$(IBSS_IM4P)" || { echo "set IPSW=<unpacked ipsw dir>"; exit 1; }
+	ipsw img4 im4p extract -o $@ $(IBSS_IM4P)
+
+$(IBOOT)/DeviceTree.bin: | $(IBOOT)
+	@test -n "$(ADT_IM4P)" || { echo "set IPSW=<unpacked ipsw dir>"; exit 1; }
+	ipsw img4 im4p extract -o $@ $(ADT_IM4P)
+
+$(IBOOT)/iBSS.patched.raw: $(IBOOT)/iBSS.raw tools/iboot-image4-patch.py
+	python3 tools/iboot-image4-patch.py $< $@
+
+$(IBOOT)/empty_trustcache.bin: | $(IBOOT)
+	printf '\x01\x00\x00\x00\x6e\x17\x68\x17\x88\x2d\x44\x40\x83\xb6\xf3\x22\x06\xbc\x4f\x17\x00\x00\x00\x00' > $@
+
+$(IBOOT)/devicetree.img4: $(IBOOT)/DeviceTree.bin
+	ipsw img4 create --input $< --type rdtr --im4m $(IM4M) --output $@
+
+$(IBOOT)/trustcache.img4: $(IBOOT)/empty_trustcache.bin
+	ipsw img4 create --input $< --type rtsc --im4m $(IM4M) --output $@
+
+kernelcache: $(KERNELCACHE)
+
+# The payload has to be a Mach-O and has to be lzss compressed, which --extra
+# requires anyway for the monitor stub.
+$(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS) | $(IBOOT)
+	{ cat $(M1N1); \
+	  echo 'chosen.bootargs=$(BOOTARGS)'; \
+	  cat $(DTB) $(IMAGE) $(INITRAMFS); } > $(MACHO)
+	ipsw img4 create --input $(MACHO) --type rkrn --compress lzss \
+	    --extra $(MONITOR) --im4m $(IM4M) --output $@
+	@echo "built $@ ($$(stat -c%s $@) bytes)"
+
+# Phone in DFU on the jig, exploit fires by itself, move the cable here.
+#
+# The one-time images are checked for rather than depended on, so a tree that
+# already has them never goes looking for an IPSW it does not need.
+boot: $(KERNELCACHE)
+	@for f in $(IBOOT)/iBSS.patched.raw $(IBOOT)/devicetree.img4 \
+	          $(IBOOT)/trustcache.img4; do \
+	    test -f $$f || { echo "missing $$f, run: make images IPSW=<dir>"; exit 1; }; \
+	done
+	./tools/iboot-boot.sh $(KERNELCACHE)
+
 clean:
-	rm -f $(DTB) $(PP)
+	rm -f $(DTB) $(PP) $(MACHO) $(KERNELCACHE)

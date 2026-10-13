@@ -91,9 +91,10 @@ Linux (none) 7.3.0-rc1-g6831bc701a6c-dirty #12 SMP PREEMPT aarch64
 
 ## Boot chain
 
-`tools/dfuboot.py build/iboot/iBSS.patched.raw` goes over the pwned DFU
-protocol, which is three control requests, see below. The ROM
-exploit jumps to the uploaded image unconditionally, no signature and no
+`make boot` drives all of this, and `make images` builds the one-time pieces
+from an unpacked IPSW. Underneath, `tools/dfuboot.py` sends the patched iBSS
+over the pwned DFU protocol, which is three control requests, see below. The
+ROM exploit jumps to the uploaded image unconditionally, no signature and no
 patching needed for that step. The phone's USB device changes from `05ac:1227`
 (DFU) to `05ac:1281` (recovery) and `irecovery -q` answers for real
 (`PRODUCT: iPhone11,6`, `MODEL: d331pap`). iBSS is alive and DRAM is up.
