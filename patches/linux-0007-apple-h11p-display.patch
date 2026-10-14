@@ -36,10 +36,10 @@ index 48d30bf61..2fd47771f 100644
  obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
 diff --git a/drivers/gpu/drm/tiny/apple-h11p.c b/drivers/gpu/drm/tiny/apple-h11p.c
 new file mode 100644
-index 000000000..6ba87226c
+index 000000000..0ea71d5a0
 --- /dev/null
 +++ b/drivers/gpu/drm/tiny/apple-h11p.c
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,493 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple H11P display pipe, as found on T8020
@@ -57,16 +57,21 @@ index 000000000..6ba87226c
 + */
 +
 +#include <linux/aperture.h>
++#include <linux/dma-mapping.h>
 +#include <linux/io.h>
 +#include <linux/module.h>
 +#include <linux/of.h>
++#include <linux/of_address.h>
 +#include <linux/platform_device.h>
 +#include <linux/pm_domain.h>
 +#include <linux/pm_runtime.h>
 +
 +#include <drm/clients/drm_client_setup.h>
++#include <linux/bitfield.h>
++
 +#include <drm/drm_atomic_helper.h>
 +#include <drm/drm_drv.h>
++#include <drm/drm_print.h>
 +#include <drm/drm_fb_dma_helper.h>
 +#include <drm/drm_fbdev_dma.h>
 +#include <drm/drm_fourcc.h>
@@ -93,6 +98,19 @@ index 000000000..6ba87226c
 +#define GP_COMMIT_PLANE0	0x101
 +
 +/*
++ * Pipe level, outside GenPipe. The kext does not leave a plane commit to stand
++ * on its own: it writes the frame id, then the swap trigger, and the hardware
++ * picks the new configuration up on a frame boundary. Rewriting the scanout
++ * address without this takes the phone down, presumably because the fetch unit
++ * reads a half updated configuration mid frame.
++ */
++#define DISP_FRAME		0x8cd8
++#define DISP_FRAME_ID		GENMASK(3, 0)
++#define DISP_SWAP		0x4602c
++#define DISP_SWAP_ID		GENMASK(11, 8)
++#define DISP_SWAP_GO		BIT(12)
++
++/*
 + * The hardware masks both addresses to 64 bytes, and the stride has to be a
 + * multiple of the same, which is why iBoot uses 4992 for a 1242 pixel line
 + * rather than 4968.
@@ -108,6 +126,8 @@ index 000000000..6ba87226c
 +	void __iomem *read;
 +	void __iomem *write;
 +	u32 stride;
++	/* high bits of the physical address the pipe is fetching from */
++	u32 surface_hi;
 +};
 +
 +static struct apple_h11p *to_h11p(struct drm_device *drm)
@@ -137,7 +157,7 @@ index 000000000..6ba87226c
 +static void apple_h11p_flip(struct apple_h11p *h11p, struct drm_plane_state *state)
 +{
 +	dma_addr_t addr;
-+	u32 stride;
++	u32 stride, frame;
 +	u64 end;
 +
 +	if (!state || !state->fb)
@@ -146,10 +166,12 @@ index 000000000..6ba87226c
 +	addr = drm_fb_dma_get_gem_addr(state->fb, state, 0);
 +
 +	/*
-+	 * The hardware takes 32 bits here, which is an address on the far side
-+	 * of dart-disp0, so a buffer that did not come through the DART cannot
-+	 * be scanned out. iBoot's own framebuffer is flat mapped, which is why
-+	 * the address it leaves behind looks like a physical one.
++	 * Only 32 bits of address go in, and iBoot leaves its framebuffer at
++	 * physical 0x8f7cd4000 with 0xf7cd4000 in the register, so something
++	 * ahead of the fetch supplies bits 35:32, the same trick the USB
++	 * complex plays with its remap widget. So this is a physical address
++	 * with the top nibble dropped, not an IOMMU address: dart-disp0's own
++	 * TTBRs are invalid, which they could not be if the scanout used it.
 +	 */
 +	stride = state->fb->pitches[0];
 +	end = addr + (u64)stride * state->fb->height - 1;
@@ -159,6 +181,13 @@ index 000000000..6ba87226c
 +	       h11p->write + GP_SURFACE_END);
 +	writel(stride, h11p->write + GP_STRIDE);
 +	writel(GP_COMMIT_PLANE0, h11p->write + GP_COMMIT);
++
++	/* Then hand it to the hardware on a frame boundary. */
++	frame = FIELD_GET(DISP_FRAME_ID, readl(h11p->read + DISP_FRAME));
++	frame = (frame + 1) & 0xf;
++	writel(FIELD_PREP(DISP_FRAME_ID, frame), h11p->write + DISP_FRAME);
++	writel(DISP_SWAP_GO | FIELD_PREP(DISP_SWAP_ID, frame),
++	       h11p->write + DISP_SWAP);
 +}
 +
 +static void apple_h11p_pipe_enable(struct drm_simple_display_pipe *pipe,
@@ -201,7 +230,12 @@ index 000000000..6ba87226c
 +
 +	addr = drm_fb_dma_get_gem_addr(fb, plane_state, 0);
 +
-+	if (upper_32_bits(addr))
++	/*
++	 * Whatever supplies the high bits is set for the window iBoot's own
++	 * framebuffer lives in, so a buffer outside it would be fetched from
++	 * the wrong place entirely.
++	 */
++	if ((addr >> 32) != (h11p->surface_hi))
 +		return -EINVAL;
 +	if (!IS_ALIGNED(addr, GP_SURFACE_ALIGN))
 +		return -EINVAL;
@@ -213,16 +247,45 @@ index 000000000..6ba87226c
 +	return 0;
 +}
 +
++static int apple_h11p_pipe_prepare_fb(struct drm_simple_display_pipe *pipe,
++				      struct drm_plane_state *plane_state)
++{
++	return drm_gem_plane_helper_prepare_fb(&pipe->plane, plane_state);
++}
++
 +static const struct drm_simple_display_pipe_funcs apple_h11p_pipe_funcs = {
 +	.enable = apple_h11p_pipe_enable,
 +	.disable = apple_h11p_pipe_disable,
 +	.update = apple_h11p_pipe_update,
 +	.check = apple_h11p_pipe_check,
-+	DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
++	/*
++	 * Not the shadow plane helpers: those are for drivers that copy out of
++	 * a shmem buffer. The buffers here are contiguous and the hardware
++	 * scans them directly, so all this needs is the implicit fence.
++	 */
++	.prepare_fb = apple_h11p_pipe_prepare_fb,
 +};
 +
++/*
++ * The hardware is scanning out 30 bit pixels: the boot args report depth
++ * 0x2001e, whose low half is 30, and iBoot programs the format register for
++ * it. Writing 0x0000ff00 into the scanout from the m1n1 proxy showed blue,
++ * not the green it would be under XRGB8888, which is what those bits mean
++ * read as XRGB2101010.
++ *
++ * XRGB8888 is here anyway, and it is what fbdev will pick, because fbdev
++ * cannot ask for XRGB2101010: it chooses by colour mode, and mode 30 maps to
++ * 30 bits per pixel rather than the 32 that format actually uses, so the
++ * lookup fails and the console gets nothing at all.
++ *
++ * ponytail: so the console renders 8888 into a buffer the pipe reads as
++ * 2101010, which is readable with the colours wrong, white coming out cyan.
++ * Fixing it properly means programming the format register at 0x5001c, whose
++ * encoding is not worked out yet, see NOTES.md.
++ */
 +static const u32 apple_h11p_formats[] = {
 +	DRM_FORMAT_XRGB8888,
++	DRM_FORMAT_XRGB2101010,
 +};
 +
 +static const struct drm_mode_config_funcs apple_h11p_mode_config_funcs = {
@@ -285,6 +348,59 @@ index 000000000..6ba87226c
 +	drm_mode_set_name(&h11p->mode);
 +}
 +
++/*
++ * The surface register holds 32 bits and the pipe fetches from a 36 bit
++ * address, so the high bits come from somewhere this driver does not program.
++ * Rather than assume, take them from the framebuffer iBoot handed over, and
++ * check the low half against what the pipe is really fetching. If those two
++ * disagree then this reasoning is wrong and scanning out of our own buffer
++ * would put the display somewhere unpredictable, so refuse instead.
++ */
++static int apple_h11p_read_surface_hi(struct apple_h11p *h11p)
++{
++	struct device_node *fb;
++	struct resource res;
++	u32 live;
++	int ret;
++
++	/*
++	 * By compatible, not by path: the loader renames the node to
++	 * framebuffer@<address>, so "/chosen/framebuffer" does not match it.
++	 */
++	fb = of_find_compatible_node(NULL, NULL, "simple-framebuffer");
++	if (!fb)
++		return -ENODEV;
++
++	ret = of_address_to_resource(fb, 0, &res);
++	of_node_put(fb);
++	if (ret)
++		return ret;
++
++	/*
++	 * The two do not match exactly, and should not: the loader hands over
++	 * the framebuffer shifted down past the notch, so the node sits
++	 * stride * 132 further in than the pipe's own base. On D331p that is
++	 * 4992 * 132, which is 0xa0e00, and the numbers came out exactly that
++	 * far apart. All this needs is the high half, which the register
++	 * cannot hold.
++	 */
++	live = readl(h11p->read + GP_SURFACE);
++	if (lower_32_bits(res.start) < live) {
++		drm_err(&h11p->drm,
++			"framebuffer %pa is behind the scanout at 0x%08x\n",
++			&res.start, live);
++		return -ERANGE;
++	}
++
++	h11p->surface_hi = upper_32_bits(res.start);
++	drm_info(&h11p->drm,
++		 "scanout 0x%08x, framebuffer %pa, high bits 0x%x, trimmed %u bytes\n",
++		 live, &res.start, h11p->surface_hi,
++		 lower_32_bits(res.start) - live);
++
++	return 0;
++}
++
 +static int apple_h11p_probe(struct platform_device *pdev)
 +{
 +	struct apple_h11p *h11p;
@@ -324,6 +440,22 @@ index 000000000..6ba87226c
 +	if (!(status & GP_STATUS_ENABLED))
 +		return dev_err_probe(&pdev->dev, -ENODEV,
 +				     "pipe is not running, status 0x%08x\n", status);
++
++	/*
++	 * DRAM starts at 0x800000000 on this phone, so a 32 bit mask, which is
++	 * what a platform device gets by default, can allocate nothing at all
++	 * and every buffer comes back as -ENOMEM. 36 bits covers DRAM, and
++	 * since all of it is inside the 0x8 window, every allocation lands
++	 * where the pipe's spliced high bits point anyway.
++	 */
++	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(36));
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret, "no 36 bit DMA\n");
++
++	ret = apple_h11p_read_surface_hi(h11p);
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret,
++				     "cannot tell where the pipe is fetching from\n");
 +
 +	apple_h11p_read_mode(h11p);
 +	dev_info(&pdev->dev, "took over %dx%d, stride %d, surface 0x%08x\n",

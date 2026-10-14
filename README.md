@@ -115,10 +115,10 @@ a firmware reset is not enough, and put the phone back in DFU.
 - [x] Device tree for T8020, PMGR domains generated from the ADT
 - [x] Console
   - [x] Framebuffer, handed over by iBoot
-  - [ ] Display driver. Written, and the pipe takes a new scanout address,
-        but it needs dart-disp0 and Linux's DART driver destroys the mapping
-        iBoot's scanout runs on, see
+  - [ ] Display driver. Paints the console into its own buffer, then crashes:
+        the flip needs to land on a frame boundary, see
         [NOTES.md](NOTES.md#display-what-is-known-so-far)
+  - [ ] Display colours. The pipe is 30 bit and fbdev can only ask for 32
   - [ ] Brightness. It is a DSI command to the panel, so it needs the pipe
   - [x] Notch trimmed out of the framebuffer, 2688 down to 2556
 - [x] AIC interrupts, including fast IPIs

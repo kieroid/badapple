@@ -1183,65 +1183,81 @@ Two hypotheses died on the way, both worth not repeating:
 - **A second register bank.** The kext mirrors the plane 0x1000 up, so 0x51000
   looked like a writable shadow. It reads mostly zeros and drops writes too.
 
-### The driver exists, and the DART is what blocks it
+### The driver paints the console, then the phone crashes
 
-`patches/linux-0008` adds `drivers/gpu/drm/tiny/apple-h11p.c`, a small DRM
-driver on `drm_simple_display_pipe` plus the GEM DMA helpers. It takes the mode
-out of 0x50080 and the stride out of 0x50060, owns the plane, and flips by
-writing surface, end, stride and commit through the write aperture. The device
-tree node is `status = "disabled"` because of what follows.
+`patches/linux-0007` adds `drivers/gpu/drm/tiny/apple-h11p.c`, a DRM driver on
+`drm_simple_display_pipe` plus the GEM DMA helpers. It reads the mode out of
+0x50080 and the stride out of 0x50060, takes the screen off simpledrm, and
+flips by writing surface, end, stride and commit through the write aperture.
 
-It got as far as taking the screen off simpledrm, `card1-DSI-1` with no
-`card0`, before hitting the wall. Three bugs on the way, all mine, all worth
-not repeating:
+How far it gets: the console appears on the panel, painted into a CMA buffer of
+the driver's own, in light blue. Then the phone crashes and reboots. The device
+tree node is `status = "disabled"` for that reason.
 
-- **Overlapping reg entries.** The read view and the write view are the same
-  0x2f0000 block 0x200000 apart, so asking for 0x2f0000 twice fails with
-  `can't request region for resource [mem 0x230200000-0x2304effff]`, EBUSY.
-  The sizes have to stop short of each other.
-- **Power domains attached before anything that can fail.** The probe claimed
-  all eight disp0 domains, then failed on the overlap, and the devm unwind
-  detached them. Four had no other consumer, so they powered off under a panel
-  that was still scanning and the screen went solid red. Claim them after
-  every step that can fail.
-- **No `.fbdev_probe`.** This kernel needs `DRM_FBDEV_DMA_DRIVER_OPS` in the
-  driver struct. Without it `drm_client_setup` warns in
-  `__drm_fb_helper_initial_config_and_unlock` and fails with -22, so no
-  framebuffer is ever allocated and the console has nowhere to go.
+The light blue is not a bug, it is the format. See below.
 
-**The real blocker is `dart-disp0`.** Put it in the device tree and
-`apple-dart` binds, resets it and installs empty page tables, which throws away
-the mapping the live scanout is using. The screen goes to red flicker
-immediately and the phone falls over shortly after. There is no preserve path
-in that driver: the only thing it says about a DART it cannot have is "DART is
-locked down until reboot".
+**The DART is not involved, and that took three wrong turns to establish.**
+The ADT points disp0 at `dart-disp0`, so the obvious reading is that scanout
+addresses are IOVAs. They are not:
 
-Worse, the registers do not look like what the driver assumes. With iBoot's
-mapping live, at 0x230704000:
+- `dart-disp0`'s TTBRs are invalid by Apple's own test. `AppleT8020DART` checks
+  `if (-1 < (int)ttbr)` and complains "TTBR 0 (0x%08x) is not valid", so bit 31
+  has to be set, and it is not set in any stream. The address is
+  `(ttbr & 0xfffffff) * 0x1000`, which is exactly what Linux's `apple-dart`
+  assumes, so the format was never the problem.
+- The register layout matches too. `AppleT8020DART`'s state dump reads 16 TCRs
+  at byte 0x100 and four TTBRs per stream at 0x200, which is what the hardware
+  shows: sixteen `0x80` values at 0x100, and a 64 word block at 0x200.
+- **Scanout works from anywhere in DRAM.** From the m1n1 proxy, with no Linux
+  and no DART driver, pointing the pipe at a buffer in m1n1's own heap at
+  physical 0x81b58c000, nowhere near iBoot's framebuffer, displayed it
+  immediately and raised no exception.
 
-```text
-PARAMS1 0x00   0x2ed01010
-TCR0    0x100  0x00000080     translate enabled, not bypass
-TTBR0   0x200  0x0d100744
-```
+So the pipe fetches physical addresses, with bits 35:32 supplied by something
+this driver does not program, the same way the USB complex remap widget does
+it. Every DRAM address on this phone has those bits set to 8, so a 36 bit DMA
+mask is all the driver needs. Without it every allocation fails with -ENOMEM,
+because a platform device defaults to 32 bits and there is no DRAM down there.
 
-0x0d100744 does not decode to a page table anywhere in this phone's DRAM,
-which starts at 0x800000000: not raw, not shifted by 12, not relative to the
-DRAM base. m1n1's own DART code reads every stream as translate-enabled with
-`VALID=0` TTBRs, which cannot be what a working scanout is using either. The
-values are stable within a boot and differ between boots, which is just iBoot
-putting its page tables somewhere new each time.
+**The pixel format is 30 bit.** The boot args report `depth 0x2001e`, whose low
+half is 30, and the proxy settles it: writing 0x0000ff00 into the scanout, which
+is green under XRGB8888, put solid blue on the panel. Read as XRGB2101010 those
+bits are three quarters blue and a little green, which is what blue on screen
+means.
 
-**Next target.** `AppleDART`/`IODARTFamily` in the kernelcache, for the T8020
-display DART's actual register layout. Until that is known, the driver cannot
-be given a buffer of its own, because every address it could program has to go
-through that DART.
+fbdev cannot ask for that format. `drm_driver_color_mode_format()` maps colour
+mode 30 to 30 bits per pixel, while XRGB2101010 is 32 bits with a depth of 30,
+so the lookup fails with "unsupported color mode of 30" and the console gets
+nothing. The driver therefore advertises XRGB8888 as well, fbdev picks it, and
+the console is painted as 8888 into a buffer the pipe reads as 2101010. That is
+why the text is light blue: white becomes cyan. Fixing it means programming the
+format register at 0x5001c, whose encoding is not worked out yet. The kext
+builds that word from tables at `DAT_fffffff0073fb9d4`, which hold
+`{0x10, 0x10, 0, 0, 0x10}`, and `DAT_fffffff0073fb9f0`, which hold
+`{8, 0, 8, 3}`, indexed by a format class, but iBoot's live value of 0x03dc8000
+has all of those low bits clear, so something else is going on there.
 
-One thing worth remembering: m1n1 excludes the framebuffer from the usable RAM
-it hands Linux, so iBoot's buffer is already outside the kernel's memory and
-could be scanned out of without the DART at all. A driver that copies into it
-would work today, but that is what simpledrm already does, so it buys nothing
-except scaffolding.
+**What crashes.** Writing a new scanout address and the plane commit at
+0x50094 shows one good frame and then takes the phone down. The kext never
+leaves a plane commit standing on its own: `swap_flush_stream` writes the frame
+id at 0x8cd8 and the per layer registers at 0x8cdc and 0x8cec, then triggers
+the swap at 0x4602c with `(frame & 0xf) << 8 | 0x1000`. Adding a guessed
+version of that made it worse: the phone crashed before USB even came up.
+
+So the flip has to land on a real frame boundary, and that means the vblank
+interrupt. disp0 has nine of them in the ADT, 286 to 291 and 296 to 298, and
+which one is vblank is not known yet. That is the next piece of work, and it is
+the last thing between this driver and a working display.
+
+Three of my own bugs on the way, each one boot, all worth not repeating:
+
+- The read view and the write view are the same 0x2f0000 block 0x200000 apart,
+  so asking for 0x2f0000 twice fails with EBUSY.
+- Power domains must be claimed after everything that can fail. Claiming all
+  eight and then failing made the devm unwind power them off under a live
+  panel, and the screen went solid red.
+- This kernel needs `DRM_FBDEV_DMA_DRIVER_OPS` in the driver struct, or
+  `drm_client_setup` fails with -22 and no framebuffer is ever allocated.
 
 ### Reading disp0 without losing the proxy
 
@@ -1454,8 +1470,11 @@ Things this repo previously asserted that are wrong.
 3. **The first USB attach still fails, the gadget just retries until it does
    not.** See [the self replug](#the-self-replug). The link always comes up
    now, it can take 35s. Why the first attach fails is not known.
-4. **The display DART.** `apple-dart` wipes the mapping iBoot's scanout runs
-   on, and the T8020 display DART's TTBR does not decode the way that driver
-   assumes. The driver is written and its node is disabled until this is
-   answered. See
-   [display](#the-driver-exists-and-the-dart-is-what-blocks-it).
+4. **The display flip is not frame synchronised.** The driver paints the
+   console into its own buffer and then the phone crashes. It needs the vblank
+   interrupt, which is one of disp0's nine, and the swap sequence the kext
+   uses. See
+   [display](#the-driver-paints-the-console-then-the-phone-crashes).
+5. **Display colours are wrong.** The pipe scans out 30 bit pixels and fbdev
+   can only ask for 32, so the console comes out light blue. Needs the format
+   register at 0x5001c.

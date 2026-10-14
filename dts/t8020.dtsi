@@ -453,16 +453,14 @@
 		 * off as unused and the picture dies partway through boot.
 		 * That used to be the framebuffer node's job.
 		 *
-		 * Disabled, and no dart-disp0 node on purpose. The scanout
-		 * iBoot leaves running fetches through that DART, and Linux's
-		 * apple-dart resets it and installs empty page tables as soon
-		 * as it binds, so the picture turns into red flicker and the
-		 * phone then falls over. Its TTBR does not decode to any
-		 * address in this phone's DRAM either, so the register layout
-		 * is not the one that driver assumes.
-		 *
-		 * Enabling this needs the DART sorted out first. See
-		 * "Display" in NOTES.md.
+		 * No dart-disp0 node, and that is not an omission. The ADT
+		 * points disp0 at that DART, but its TTBRs are invalid by
+		 * Apple's own test, bit 31 clear, which they could not be if
+		 * the running scanout went through it. The surface register
+		 * holds 32 bits and the framebuffer is at 0x8f7cd4000, so
+		 * something ahead of the fetch supplies bits 35:32, the same
+		 * way the USB complex remap widget does. So the driver writes
+		 * physical addresses and no IOMMU is involved.
 		 */
 		disp0: display-pipe@230000000 {
 			compatible = "apple,t8020-display-pipe";
@@ -475,6 +473,14 @@
 					<&ps_disp0_hilo>, <&ps_mipi_dsi>;
 			power-domain-names = "busif", "fe", "be", "gp0",
 					     "gp1", "ppp", "hilo", "mipi";
+
+			/*
+			 * Disabled. The driver gets far enough to paint the
+			 * console into its own buffer, and then the phone
+			 * crashes, because the flip is not synchronised to a
+			 * frame the way the hardware wants. Read "Display" in
+			 * NOTES.md before enabling this again.
+			 */
 			status = "disabled";
 		};
 
