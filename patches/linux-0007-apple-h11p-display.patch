@@ -36,10 +36,10 @@ index 48d30bf61..2fd47771f 100644
  obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
 diff --git a/drivers/gpu/drm/tiny/apple-h11p.c b/drivers/gpu/drm/tiny/apple-h11p.c
 new file mode 100644
-index 000000000..0ea71d5a0
+index 000000000..447e3e458
 --- /dev/null
 +++ b/drivers/gpu/drm/tiny/apple-h11p.c
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,542 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple H11P display pipe, as found on T8020
@@ -401,6 +401,50 @@ index 000000000..0ea71d5a0
 +	return 0;
 +}
 +
++/*
++ * The same flip the m1n1 proxy does, which is known to work: allocate, fill,
++ * point the pipe at it, once. With apple_h11p.probe_only=1 the driver stops
++ * here, leaving simpledrm and the console alone, so whatever happens next is
++ * readable over USB instead of taking the screen with it.
++ */
++static bool apple_h11p_probe_only;
++module_param_named(probe_only, apple_h11p_probe_only, bool, 0444);
++
++static void apple_h11p_selftest(struct apple_h11p *h11p)
++{
++	u32 width = h11p->mode.hdisplay, height = h11p->mode.vdisplay;
++	size_t size = (size_t)h11p->stride * height;
++	dma_addr_t dma;
++	u32 *cpu;
++	int band;
++
++	cpu = dma_alloc_coherent(h11p->drm.dev, size, &dma, GFP_KERNEL);
++	if (!cpu) {
++		drm_err(&h11p->drm, "selftest: no %zu byte buffer\n", size);
++		return;
++	}
++
++	drm_info(&h11p->drm, "selftest: %zu bytes at %pad, cpu %p, %ux%u stride %u\n",
++		 size, &dma, cpu, width, height, h11p->stride);
++
++	for (band = 0; band < 8; band++) {
++		u32 level = (band + 1) * 0x7f;
++		u32 pixel = (level << 20) | (level << 10) | level;
++		u32 *line = cpu + (size_t)band * (height / 8) * (h11p->stride / 4);
++
++		memset32(line, pixel, (size_t)(height / 8) * (h11p->stride / 4));
++	}
++
++	writel(lower_32_bits(dma), h11p->write + GP_SURFACE);
++	writel(lower_32_bits(dma + size - 1) & ~(GP_SURFACE_ALIGN - 1),
++	       h11p->write + GP_SURFACE_END);
++	writel(h11p->stride, h11p->write + GP_STRIDE);
++	writel(GP_COMMIT_PLANE0, h11p->write + GP_COMMIT);
++
++	drm_info(&h11p->drm, "selftest: scanout now 0x%08x\n",
++		 readl(h11p->read + GP_SURFACE));
++}
++
 +static int apple_h11p_probe(struct platform_device *pdev)
 +{
 +	struct apple_h11p *h11p;
@@ -489,6 +533,11 @@ index 000000000..0ea71d5a0
 +		return ret;
 +
 +	drm_mode_config_reset(drm);
++
++	if (apple_h11p_probe_only) {
++		apple_h11p_selftest(h11p);
++		return 0;
++	}
 +
 +	/*
 +	 * simpledrm is on the same framebuffer, so it has to go before this

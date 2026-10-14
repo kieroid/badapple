@@ -1237,17 +1237,40 @@ builds that word from tables at `DAT_fffffff0073fb9d4`, which hold
 `{8, 0, 8, 3}`, indexed by a format class, but iBoot's live value of 0x03dc8000
 has all of those low bits clear, so something else is going on there.
 
-**What crashes.** Writing a new scanout address and the plane commit at
-0x50094 shows one good frame and then takes the phone down. The kext never
-leaves a plane commit standing on its own: `swap_flush_stream` writes the frame
-id at 0x8cd8 and the per layer registers at 0x8cdc and 0x8cec, then triggers
-the swap at 0x4602c with `(frame & 0xf) << 8 | 0x1000`. Adding a guessed
-version of that made it worse: the phone crashed before USB even came up.
+**What crashes, and what does not.** Every boot with the node enabled takes
+the phone down, and the register work is not the reason. From the m1n1 proxy,
+with no kernel running, all of this is fine:
 
-So the flip has to land on a real frame boundary, and that means the vblank
-interrupt. disp0 has nine of them in the ADT, 286 to 291 and 296 to 298, and
-which one is vblank is not known yet. That is the next piece of work, and it is
-the last thing between this driver and a working display.
+- Pointing the pipe at a buffer in m1n1's heap and committing: displays it.
+- Eight bands written into such a buffer, with the same end address arithmetic
+  the driver uses: all eight appear, in order, no wrapping, no exceptions.
+- Sixty flips in a row, alternating two addresses, 16ms apart: no exceptions,
+  phone still alive afterwards.
+
+The driver was then cut down to do exactly that and nothing else, one
+allocation and one flip, with `apple_h11p.probe_only=1` leaving simpledrm and
+the console alone. It still crashed. So the difference is not the flip, the
+geometry, the address, the format or the rate. It is something else Linux does
+around it, and the hard part is that every crash takes USB and the console with
+it, so there is no log.
+
+Two things ruled out along the way, both of which looked certain at the time:
+
+- **The end address.** iBoot leaves 0x50040 reading 0x00000000, so writing a
+  real address there is a change it never makes, which looked like the cause of
+  a picture that repeated five times down the screen. It is not: the eight band
+  test wrote the same computed end address and came out perfect.
+- **Flip rate and frame synchronisation.** The kext writes a frame id at 0x8cd8
+  and triggers a swap at 0x4602c, so an unsynchronised flip looked like the
+  obvious culprit. Sixty unsynchronised flips from the proxy say otherwise.
+  Adding a guessed swap sequence to the driver made things worse rather than
+  better, crashing before USB came up.
+
+**Next step is a log, not another theory.** Nothing more should be guessed
+until a crashing boot can be read back. Either ramoops in a reserved region, so
+the console survives into the next boot, or staged prints with the screen
+photographed, since with `probe_only=1` simpledrm still owns the console and
+the last line on the panel says how far probe got.
 
 Three of my own bugs on the way, each one boot, all worth not repeating:
 

@@ -475,11 +475,10 @@
 					     "gp1", "ppp", "hilo", "mipi";
 
 			/*
-			 * Disabled. The driver gets far enough to paint the
-			 * console into its own buffer, and then the phone
-			 * crashes, because the flip is not synchronised to a
-			 * frame the way the hardware wants. Read "Display" in
-			 * NOTES.md before enabling this again.
+			 * Disabled. Any boot with this enabled crashes the
+			 * phone, including one that does nothing but the
+			 * single flip the m1n1 proxy performs happily sixty
+			 * times in a row. Read "Display" in NOTES.md.
 			 */
 			status = "disabled";
 		};
