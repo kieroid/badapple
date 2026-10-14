@@ -983,8 +983,9 @@ for its own children. Upstream Apple device trees are shaped the same way.
 
 ## Display, what is known so far
 
-Not working. The framebuffer is still the one iBoot leaves behind. What follows
-is reconnaissance, so the next attempt does not repeat it.
+No driver yet, but the pipe is under control: the scanout address can be
+changed and the picture moves, which is the hard part. See [the write
+aperture](#writes-go-to-the-alias-at-0x230200000-not-to-0x230000000).
 
 **Every Linux piece except the pipe already exists.** The names in the ADT are
 the same ones the Touch Bar on M1 uses, which is the hardware the `adp` driver
@@ -1121,36 +1122,66 @@ commit with 0x50094 and 0x4602c.
 The surface register holds the low 32 bits of the physical framebuffer, so
 `dart-disp0` flat maps it the same way our USB DART does.
 
-### The plane registers do not take writes, a stream engine owns them
+### Writes go to the alias at 0x230200000, not to 0x230000000
 
-Reads are plain MMIO, `*(u32 *)(base + off)`, and every read above came back
-correct. Writes are a different story, measured by writing a value and reading
-it straight back:
+**This is the thing to know.** The disp0 window is mirrored every 0x200000.
+Reads work through either copy. Writes only land through the second one:
 
-| register | write |
+```text
+write 0x230250030 <- 0xf7cd5000
+read  0x230050030 -> 0xf7cd5000     the write landed
+write 0x230050030 <- anything       dropped, silently, no fault
+```
+
+So the plane is programmed at 0x230200000 + offset and read back at
+0x230000000 + offset. Every register that looked read-only takes writes
+through the alias.
+
+Proven by moving the picture. Writing the surface address and then the plane
+commit at 0x50094 shifts what is on screen immediately:
+
+| write | what the screen did |
 |---|---|
-| 0x8cd8 frame, 0x8cdc and 0x8cec layer | sticks, reads back changed |
-| 0x50030 surface, 0x50094 commit, 0x4602c swap | silently dropped, no fault |
+| surface + 4 bytes | image moves left one pixel |
+| surface + 400 bytes | image moves left 100 pixels |
+| surface + stride * n | image moves up n lines |
 
-That split is exactly the one in the kext. The registers that accept writes are
-the ones it writes with the direct helper `FUN_fffffff00904c6ec`. The ones that
-drop writes are the ones it routes through `FUN_fffffff00904c540`, which is
-`AppleRegisterStream`: it either calls a per-register callback list or hands
-the whole batch to `FUN_fffffff00903492c`.
+Increasing the address moves the image left and up, which is the normal way a
+scanout origin behaves, so there is no rotation to undo. One early reading
+looked like a shift to the right: that run still had a stale +0x1000 from an
+earlier probe, which is 1024 pixels of a 1242 pixel line, so it wrapped and
+looked like a small shift the other way. Reset the surface between
+experiments.
 
-So the plane is programmed by a stream engine, almost certainly a DMA'd command
-list replayed by the hardware, and poking the registers from the CPU does
-nothing. Writing the surface, then the plane commit, then the swap trigger, in
-that order, changed nothing on screen and left every register at its old value.
+Writing 0xf7cd4000 back to 0x230250030 puts the picture back exactly.
 
-**Next target**, for whoever picks this up: `FUN_fffffff00903492c`, how a
-register stream is built and submitted. Until that is understood there is no
-point writing any driver, because the whole programming model is unknown. The
-power domain angle is worth eliminating first and is cheap: `pm_genpd` lists
-`disp0_gp0`, `disp0_gp1`, `disp0_ppp`, `disp0_hilo`, `disp0_dsc`, `disp0_be`
-and `disp0_be_2x`, and `pmgr_adt_power_enable("/arm-io/disp0")` only turns on
-what that one ADT node lists. If GenPipe sits behind `disp0_gp0` and that is
-off, dropped writes would look exactly like this.
+**What a driver needs, then.** Allocate a buffer, map it through
+`dart-disp0`, write the IOVA to 0x230200000 + 0x50030, commit with 0x50094,
+and that is a page flip. Nothing else has to be programmed, because iBoot
+already set the format, the size, the stride and the panel.
+
+### What the write split in the kext actually was
+
+Before the alias was found, the measurements looked like two write paths in
+the hardware, because they line up with two helpers in the kext:
+`FUN_fffffff00904c6ec` writes directly, `FUN_fffffff00904c540` goes through
+`AppleRegisterStream`. The registers that took writes at 0x230000000, 0x8cd8
+and the two layer registers, are exactly the ones the kext writes directly.
+
+That was a coincidence of which registers live where, not two mechanisms.
+`FUN_fffffff00904c738`, the batch writer under the stream, is also plain MMIO
+stores. The stream is about batching and chunking large uploads, not about
+owning registers.
+
+Two hypotheses died on the way, both worth not repeating:
+
+- **Power domains.** All of `disp0_busif`, `disp0_fe`, `disp0_be`, `mipi_dsi`,
+  `disp0_gp0`, `disp0_gp1`, `disp0_ppp` and `disp0_hilo` already read target 15
+  actual 15 from iBoot. `disp0_be_2x` and `disp0_dsc` were off; turning them on
+  changed nothing about the dropped writes. Writing those two also appears to
+  be what killed the proxy that session, so leave them alone.
+- **A second register bank.** The kext mirrors the plane 0x1000 up, so 0x51000
+  looked like a writable shadow. It reads mostly zeros and drops writes too.
 
 ### Reading disp0 without losing the proxy
 
