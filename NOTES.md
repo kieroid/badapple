@@ -1045,6 +1045,113 @@ device appears as `/sys/class/backlight/23b200010.backlight` with
 the screen does not change. The node is not in the tree, because it does
 nothing.
 
+### The pipe register map, from the kext
+
+Read out of `AppleMobileDispH11P` with Ghidra. It has no symbols, so the method
+was: find a C++ signature in the strings, take the data xref to the function
+that logs it, and read the register helpers out of the decompilation.
+
+Three helpers do all register access, and finding them is the whole trick:
+
+| function | what it is |
+|---|---|
+| `FUN_fffffff00904c4d4(stream, off)` | read one word, `*(u32 *)(base + off)` |
+| `FUN_fffffff00904c50c(stream, off, val)` | write one word |
+| `FUN_fffffff00904c540(stream, off, buf, n, ..)` | write n words from a buffer |
+
+With those named, a literal search of the decompiled code for `0x8000 + 0x5`
+finds every GenPipe register in the kext, because each one is written as
+`instance * 0x8000 + offset`.
+
+**Blocks.** The plane fetch unit, which Apple calls GenPipe, starts at 0x50000
+with 0x8000 per instance. A second copy of several registers sits 0x1000 up
+(0x51004, 0x51008), used when a flag in the driver's own state is set.
+
+| offset | what the kext does with it |
+|---|---|
+| 0x50000 | written `-(enable & 1)`, so all ones or zero |
+| 0x50004 | bit 31 reads back as enabled, written 0 to disable |
+| 0x5000c, 0x50010, 0x50020 | written 0 or a small constant during setup |
+| 0x5001c | the big format and config word, built from the surface |
+| 0x50028 + plane*4 | per plane format bits |
+| 0x50030 + plane*4 | **surface address**, masked to 64 bytes |
+| 0x50040 + plane*4 | second address, masked to 64 bytes |
+| 0x50048, 0x50058 + plane*4 | two more addresses, masked to 128 bytes |
+| 0x50060 + plane*4 | per plane stride |
+| 0x50068, 0x50070 + plane*4 | per plane width and height pairs |
+| 0x50078 | source size, `w \| h << 16` |
+| 0x5007c, 0x50080 | destination size pairs, read back as `w = val >> 16` |
+| 0x50084 to 0x50090 | crop, four pairs of 10 bit fields |
+| 0x50094 | **commit**, written `(mask & 0xf) \| 0x100` |
+| 0x50098, 0x500a8 + n*4 | per plane compression words |
+| 0x500b8 to 0x500d8 + plane*4 | scaler ratios |
+| 0x500e0 | dirty flags, which sub-programs changed |
+| 0x500e4, 0x500f0, 0x50114, 0x50120, 0x50150 | colour matrices |
+| 0x5015c, 0x50160, 0x50184 | small flags and an acknowledge |
+| 0x50170 | bandwidth, one byte |
+| 0x52000 + n*0x808 | three gamma tables |
+| 0x53818, 0x53c98 | scaler coefficient tables |
+| 0x54118 + n*0xda0 | three more tables |
+
+Outside GenPipe, from `swap_flush_stream` and the layer setup it calls:
+
+| offset | what |
+|---|---|
+| 0x4602c | swap commit, `(frame & 0xf) << 8 \| 0x1000` |
+| 0x8cd8 | frame id, `frame & 0xf` |
+| 0x8cdc + layer*4 | per layer enable and format, four layers |
+| 0x8cec + layer*4 | per layer size pair |
+
+**What this means for a driver.** The surface address is 32 bits masked to 64
+bytes, so it is an IOVA through `dart-disp0` and not a physical address. A
+minimal driver does not have to program any of the format, scaler or gamma
+registers: iBoot already did, and the picture is on screen. It has to map a
+buffer through the DART, write the IOVA to 0x50030, the stride to 0x50060, and
+commit with 0x50094 and 0x4602c.
+
+**Verified on the phone.** The window base is 0x230000000 and the map is right:
+
+```text
++0x050004  0x80000001   bit 31, the pipe is enabled
++0x050080  0x04da0a80   1242 x 2688
++0x050030  0xf7cd4000   the framebuffer, boot args say 0x8f7cd4000
++0x050060  0x00001380   stride 4992
+```
+
+The surface register holds the low 32 bits of the physical framebuffer, so
+`dart-disp0` flat maps it the same way our USB DART does.
+
+### The plane registers do not take writes, a stream engine owns them
+
+Reads are plain MMIO, `*(u32 *)(base + off)`, and every read above came back
+correct. Writes are a different story, measured by writing a value and reading
+it straight back:
+
+| register | write |
+|---|---|
+| 0x8cd8 frame, 0x8cdc and 0x8cec layer | sticks, reads back changed |
+| 0x50030 surface, 0x50094 commit, 0x4602c swap | silently dropped, no fault |
+
+That split is exactly the one in the kext. The registers that accept writes are
+the ones it writes with the direct helper `FUN_fffffff00904c6ec`. The ones that
+drop writes are the ones it routes through `FUN_fffffff00904c540`, which is
+`AppleRegisterStream`: it either calls a per-register callback list or hands
+the whole batch to `FUN_fffffff00903492c`.
+
+So the plane is programmed by a stream engine, almost certainly a DMA'd command
+list replayed by the hardware, and poking the registers from the CPU does
+nothing. Writing the surface, then the plane commit, then the swap trigger, in
+that order, changed nothing on screen and left every register at its old value.
+
+**Next target**, for whoever picks this up: `FUN_fffffff00903492c`, how a
+register stream is built and submitted. Until that is understood there is no
+point writing any driver, because the whole programming model is unknown. The
+power domain angle is worth eliminating first and is cheap: `pm_genpd` lists
+`disp0_gp0`, `disp0_gp1`, `disp0_ppp`, `disp0_hilo`, `disp0_dsc`, `disp0_be`
+and `disp0_be_2x`, and `pmgr_adt_power_enable("/arm-io/disp0")` only turns on
+what that one ADT node lists. If GenPipe sits behind `disp0_gp0` and that is
+off, dropped writes would look exactly like this.
+
 ### Reading disp0 without losing the proxy
 
 A bus fault here wedges m1n1, which costs a DFU trip, so this is worth getting
