@@ -36,10 +36,10 @@ index 48d30bf61..2fd47771f 100644
  obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
 diff --git a/drivers/gpu/drm/tiny/apple-h11p.c b/drivers/gpu/drm/tiny/apple-h11p.c
 new file mode 100644
-index 000000000..db2f01301
+index 000000000..5ab2d2959
 --- /dev/null
 +++ b/drivers/gpu/drm/tiny/apple-h11p.c
-@@ -0,0 +1,523 @@
+@@ -0,0 +1,520 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple H11P display pipe, as found on T8020
@@ -86,7 +86,6 @@ index 000000000..db2f01301
 +/* The plane fetch unit, which Apple calls GenPipe. Instances are 0x8000 apart. */
 +#define GP_BASE			0x50000
 +#define GP_STATUS		(GP_BASE + 0x004)
-+#define GP_STATUS_ENABLED	BIT(31)
 +#define GP_SURFACE		(GP_BASE + 0x030)
 +#define GP_STRIDE		(GP_BASE + 0x060)
 +#define GP_DST_SIZE		(GP_BASE + 0x080)
@@ -261,8 +260,6 @@ index 000000000..db2f01301
 +	if (!IS_ALIGNED(addr, GP_SURFACE_ALIGN))
 +		return -EINVAL;
 +	if (!IS_ALIGNED(fb->pitches[0], GP_SURFACE_ALIGN))
-+		return -EINVAL;
-+	if (fb->pitches[0] < h11p->mode.hdisplay * 4)
 +		return -EINVAL;
 +
 +	return 0;

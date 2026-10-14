@@ -25,13 +25,13 @@ CPPFLAGS := -nostdinc -Iinclude -Idts -undef -D__DTS__ -x assembler-with-cpp
 
 KDIR      ?= build/linux
 M1N1_SRC  ?= build/m1n1
-CONFIG_16K ?= build/hoolock-docs/config_16k
+CONFIG_16K := build/hoolock-docs/config_16k
 
 # bootx wants a Mach-O, so this is the one m1n1 build that can be packed as a
 # kernelcache. m1n1.bin is raw and gets rejected without a word.
-M1N1      ?= $(M1N1_SRC)/build/m1n1-idevice.macho
-IMAGE     ?= $(KDIR)/arch/arm64/boot/Image.gz
-INITRAMFS ?= build/initramfs.gz
+M1N1      := $(M1N1_SRC)/build/m1n1-idevice.macho
+IMAGE     := $(KDIR)/arch/arm64/boot/Image.gz
+INITRAMFS := build/initramfs.gz
 
 KBUILD := LLVM=1 ARCH=arm64
 
@@ -43,7 +43,7 @@ MONITOR     := $(M1N1_SRC)/build/monitor-stub.macho
 # Any manifest does once tools/iboot-image4-patch.py has stopped iBSS looking
 # inside one. There is no 0x8020 template and there cannot be: from A11 on a
 # manifest is tied to the device's own ECID.
-IM4M ?= build/hoolock-docs/binaries/im4m/0x8015.im4m
+IM4M := build/hoolock-docs/binaries/im4m/0x8015.im4m
 
 # Where an unpacked IPSW is, for "make images" only. The file names carry a
 # build number, so match on the stem.
