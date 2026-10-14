@@ -475,10 +475,9 @@
 					     "gp1", "ppp", "hilo", "mipi";
 
 			/*
-			 * Disabled. Any boot with this enabled crashes the
-			 * phone, including one that does nothing but the
-			 * single flip the m1n1 proxy performs happily sixty
-			 * times in a row. Read "Display" in NOTES.md.
+			 * Disabled. The driver takes the screen and the phone
+			 * stays up, but the panel is black and boots are not
+			 * reliably repeatable. See "Display" in NOTES.md.
 			 */
 			status = "disabled";
 		};

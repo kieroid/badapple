@@ -1183,104 +1183,59 @@ Two hypotheses died on the way, both worth not repeating:
 - **A second register bank.** The kext mirrors the plane 0x1000 up, so 0x51000
   looked like a writable shadow. It reads mostly zeros and drops writes too.
 
-### The driver paints the console, then the phone crashes
+### The driver owns the display, the panel is black
 
 `patches/linux-0007` adds `drivers/gpu/drm/tiny/apple-h11p.c`, a DRM driver on
-`drm_simple_display_pipe` plus the GEM DMA helpers. It reads the mode out of
-0x50080 and the stride out of 0x50060, takes the screen off simpledrm, and
-flips by writing surface, end, stride and commit through the write aperture.
+`drm_simple_display_pipe` plus the GEM DMA helpers. It reads the mode from
+0x50080 and the stride from 0x50060, takes the screen off simpledrm, and
+programs surface and stride through the write aperture.
 
-How far it gets: the console appears on the panel, painted into a CMA buffer of
-the driver's own, in light blue. Then the phone crashes and reboots. The device
-tree node is `status = "disabled"` for that reason.
+Where it stands: the driver probes, simpledrm goes away, `fb0` is
+`apple-h11pdrmfb`, fbcon binds to it, the shell stays up and the phone does not
+crash. The panel is black. Writing to `/dev/tty0` changes nothing on screen.
 
-The light blue is not a bug, it is the format. See below.
+Two real bugs were found and fixed on the way, both worth knowing:
 
-**The DART is not involved, and that took three wrong turns to establish.**
-The ADT points disp0 at `dart-disp0`, so the obvious reading is that scanout
-addresses are IOVAs. They are not:
+- **No `.fops` in the `drm_driver`.** `DRM_GEM_DMA_DRIVER_OPS_*` does not
+  provide them, and `drm_fbdev_dma_fb_open()` goes straight through
+  `driver->fops->owner`. Opening the framebuffer oopsed, which is what fbcon
+  does when it binds, so every boot that took the console died exactly there.
+  The trace is unmistakable once it can be read:
+  `drm_fbdev_dma_fb_open+0x14` under `chrdev_open`.
+- **Reprogramming the plane on every damage.** fbdev renders into a shadow and
+  the damage path calls back into the driver at the console's update rate,
+  always with the same address. Programming a live scanout that often corrupts
+  the picture and eventually takes the phone down. The driver now compares
+  against what it last wrote and touches nothing when neither address nor
+  stride moved.
 
-- `dart-disp0`'s TTBRs are invalid by Apple's own test. `AppleT8020DART` checks
-  `if (-1 < (int)ttbr)` and complains "TTBR 0 (0x%08x) is not valid", so bit 31
-  has to be set, and it is not set in any stream. The address is
-  `(ttbr & 0xfffffff) * 0x1000`, which is exactly what Linux's `apple-dart`
-  assumes, so the format was never the problem.
-- The register layout matches too. `AppleT8020DART`'s state dump reads 16 TCRs
-  at byte 0x100 and four TTBRs per stream at 0x200, which is what the hardware
-  shows: sixteen `0x80` values at 0x100, and a 64 word block at 0x200.
-- **Scanout works from anywhere in DRAM.** From the m1n1 proxy, with no Linux
-  and no DART driver, pointing the pipe at a buffer in m1n1's own heap at
-  physical 0x81b58c000, nowhere near iBoot's framebuffer, displayed it
-  immediately and raised no exception.
+Three things that looked like the cause and were not, each disproved rather
+than argued about:
 
-So the pipe fetches physical addresses, with bits 35:32 supplied by something
-this driver does not program, the same way the USB complex remap widget does
-it. Every DRAM address on this phone has those bits set to 8, so a 36 bit DMA
-mask is all the driver needs. Without it every allocation fails with -ENOMEM,
-because a platform device defaults to 32 bits and there is no DRAM down there.
+- **Frame synchronisation.** Sixty flips from the m1n1 proxy, alternating two
+  addresses 16ms apart, raise no exceptions and leave the phone alive. A
+  guessed version of the kext's swap sequence only crashed earlier.
+- **Register write spacing.** `settle_us=0`, back to back writes, with the
+  driver cut down to a single allocation and a single flip: survives.
+- **The end address at 0x50040.** iBoot leaves it zero, and writing one looked
+  like the cause of a picture repeating down the screen. The eight band test
+  from the proxy wrote the same computed value and came out perfect. The
+  driver no longer writes it, because iBoot does not either.
+- **A pitch mismatch.** The repeating, sheared console looked like fbcon
+  drawing at one stride while the hardware scanned at another.
+  `/sys/class/graphics/fb0/stride` reads 4992, exactly what the hardware has.
 
-**The pixel format is 30 bit.** The boot args report `depth 0x2001e`, whose low
-half is 30, and the proxy settles it: writing 0x0000ff00 into the scanout, which
-is green under XRGB8888, put solid blue on the panel. Read as XRGB2101010 those
-bits are three quarters blue and a little green, which is what blue on screen
-means.
+**What is left.** The pipe is told to fetch our buffer and the readback agrees,
+`flip to 0x06400000 stride 4992, reads back 0x06400000`, and fbcon is bound and
+drawing, and the panel shows nothing. So either the damage blit never reaches
+the buffer the pipe is fetching, or something puts the plane back afterwards.
+A watcher that logged the live register once a second was the obvious next
+step and crashed the phone on its own, which says the margins here are thin.
 
-fbdev cannot ask for that format. `drm_driver_color_mode_format()` maps colour
-mode 30 to 30 bits per pixel, while XRGB2101010 is 32 bits with a depth of 30,
-so the lookup fails with "unsupported color mode of 30" and the console gets
-nothing. The driver therefore advertises XRGB8888 as well, fbdev picks it, and
-the console is painted as 8888 into a buffer the pipe reads as 2101010. That is
-why the text is light blue: white becomes cyan. Fixing it means programming the
-format register at 0x5001c, whose encoding is not worked out yet. The kext
-builds that word from tables at `DAT_fffffff0073fb9d4`, which hold
-`{0x10, 0x10, 0, 0, 0x10}`, and `DAT_fffffff0073fb9f0`, which hold
-`{8, 0, 8, 3}`, indexed by a format class, but iBoot's live value of 0x03dc8000
-has all of those low bits clear, so something else is going on there.
-
-**What crashes, and what does not.** Every boot with the node enabled takes
-the phone down, and the register work is not the reason. From the m1n1 proxy,
-with no kernel running, all of this is fine:
-
-- Pointing the pipe at a buffer in m1n1's heap and committing: displays it.
-- Eight bands written into such a buffer, with the same end address arithmetic
-  the driver uses: all eight appear, in order, no wrapping, no exceptions.
-- Sixty flips in a row, alternating two addresses, 16ms apart: no exceptions,
-  phone still alive afterwards.
-
-The driver was then cut down to do exactly that and nothing else, one
-allocation and one flip, with `apple_h11p.probe_only=1` leaving simpledrm and
-the console alone. It still crashed. So the difference is not the flip, the
-geometry, the address, the format or the rate. It is something else Linux does
-around it, and the hard part is that every crash takes USB and the console with
-it, so there is no log.
-
-Two things ruled out along the way, both of which looked certain at the time:
-
-- **The end address.** iBoot leaves 0x50040 reading 0x00000000, so writing a
-  real address there is a change it never makes, which looked like the cause of
-  a picture that repeated five times down the screen. It is not: the eight band
-  test wrote the same computed end address and came out perfect.
-- **Flip rate and frame synchronisation.** The kext writes a frame id at 0x8cd8
-  and triggers a swap at 0x4602c, so an unsynchronised flip looked like the
-  obvious culprit. Sixty unsynchronised flips from the proxy say otherwise.
-  Adding a guessed swap sequence to the driver made things worse rather than
-  better, crashing before USB came up.
-
-**Next step is a log, not another theory.** Nothing more should be guessed
-until a crashing boot can be read back. Either ramoops in a reserved region, so
-the console survives into the next boot, or staged prints with the screen
-photographed, since with `probe_only=1` simpledrm still owns the console and
-the last line on the panel says how far probe got.
-
-Three of my own bugs on the way, each one boot, all worth not repeating:
-
-- The read view and the write view are the same 0x2f0000 block 0x200000 apart,
-  so asking for 0x2f0000 twice fails with EBUSY.
-- Power domains must be claimed after everything that can fail. Claiming all
-  eight and then failing made the devm unwind power them off under a live
-  panel, and the screen went solid red.
-- This kernel needs `DRM_FBDEV_DMA_DRIVER_OPS` in the driver struct, or
-  `drm_client_setup` fails with -22 and no framebuffer is ever allocated.
+Boots are also not repeatable: the same image has produced a repeating
+console, a black console, and a hang, which is its own problem and probably
+needs solving first. **ramoops** would be the way, so a crashing boot can be
+read back instead of guessed at.
 
 ### Reading disp0 without losing the proxy
 
@@ -1493,11 +1448,9 @@ Things this repo previously asserted that are wrong.
 3. **The first USB attach still fails, the gadget just retries until it does
    not.** See [the self replug](#the-self-replug). The link always comes up
    now, it can take 35s. Why the first attach fails is not known.
-4. **The display flip is not frame synchronised.** The driver paints the
-   console into its own buffer and then the phone crashes. It needs the vblank
-   interrupt, which is one of disp0's nine, and the swap sequence the kext
-   uses. See
-   [display](#the-driver-paints-the-console-then-the-phone-crashes).
+4. **The display is black.** The driver owns the screen and the phone stays
+   up, but nothing fbcon draws reaches the panel. See
+   [display](#the-driver-owns-the-display-the-panel-is-black).
 5. **Display colours are wrong.** The pipe scans out 30 bit pixels and fbdev
    can only ask for 32, so the console comes out light blue. Needs the format
    register at 0x5001c.
