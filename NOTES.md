@@ -981,6 +981,88 @@ OF: Bad cell count for /soc/spmi@23d180700/pmic@f
 The PMIC takes a two cell address from the bus and declares one cell addresses
 for its own children. Upstream Apple device trees are shaped the same way.
 
+## Display, what is known so far
+
+Not working. The framebuffer is still the one iBoot leaves behind. What follows
+is reconnaissance, so the next attempt does not repeat it.
+
+**Every Linux piece except the pipe already exists.** The names in the ADT are
+the same ones the Touch Bar on M1 uses, which is the hardware the `adp` driver
+was written for:
+
+| ADT | address | Linux driver |
+|---|---|---|
+| `/arm-io/disp0`, `disp0,t8020` | 0x230000000, 0x2f0000 | nothing fits, see below |
+| `/arm-io/dart-disp0`, `dart,t8020` | 0x230704000 | `apple-dart` |
+| `/arm-io/mipi-dsim`, `mipi-dsim-1,synopsys` | 0x230400000 | `adp-mipi`, its own DSI host |
+| `/arm-io/mipi-dsim/lcd`, `lcd,summit` | | `panel-summit`, `apple,summit` |
+| `/arm-io/i2c3/display-pmu`, `display-pmu,acorn` | 0x23501c000, IRQ 411 | nothing |
+
+So the panel driver is already upstream and so is the DSI host. The missing
+piece is the pipe itself.
+
+**adp's register map does not describe this pipe.** `adp` wants a `be` and an
+`fe` window. T8103 has them 0x200000 apart, and T8020's single 0x2f0000 range
+is big enough for the same spacing, so that was the theory. It is wrong:
+
+```text
+0x230000000 +0x000  0x21508007    0x230200000 +0x000  0x21508007
+0x230000000 +0x00c  0x0293648c    0x230200000 +0x00c  0x0293658c
+0x230000000 +0x034  0x4008e032    0x230200000 +0x034  0x4008e712
+```
+
+Those two windows read the same at +0, and the other two offsets drift between
+reads, by 0x100 and 0x6e0 in one pass. They are counters in a pipe that is
+actively scanning out, not `ADP_SCREEN_SIZE` and `ADP_INT_STATUS`. The reads at
+adp's back end offsets return high entropy values with no framebuffer address
+and no stride in them.
+
+**The iOS side says why.** The kext is `AppleMobileDispH11P`, 1.8MB of the full
+IOMFB stack: `IOMFB::UPPipe_H11P`, `UPBlock_GenPipe_v2`, `UPBlock_Blend_v1`,
+`UPBlock_PCC_v1`. On M1 that same stack runs on the DCP coprocessor; on A12 it
+runs on the main CPU. `adp` is a much smaller, older pipe. Getting the plane
+registers means reversing this kext:
+
+```sh
+ipsw kernel kexts work/*/kernelcache.release.* | grep -iE 'clcd|disp|mipi'
+ipsw kernel extract work/*/kernelcache.release.* \
+    com.apple.driver.AppleMobileDispH11P -o .
+```
+
+`AppleSynopsysMIPIDSI` and `AppleAcornDisplayPMU` are the other two, 99KB and
+66KB. Acorn is the OLED rail controller, 8 bit registers over I2C
+(`AppleAcornDisplayPMU::writeReg(uint8_t *, uint8_t *)`), and has no brightness
+strings in it at all.
+
+**Brightness needs the pipe, there is no shortcut.** `panel-summit` sets it
+with `mipi_dsi_dcs_set_display_brightness`, a DSI command to the panel, which
+matches `DBVMax = 2047` and `override-boot-brightness = 740` on the ADT's
+`/backlight` node. The DWI block exists on this SoC, `/arm-io/dwi` at
+0x23b200000, and `apple,dwi-bl` binds to it, but its binding says plainly it is
+for LCD phones. Measured: the driver probes, the `dwi` power domain is on, the
+device appears as `/sys/class/backlight/23b200010.backlight` with
+`max_brightness` 2047, and writes do not stick. `actual_brightness` stays 0 and
+the screen does not change. The node is not in the tree, because it does
+nothing.
+
+### Reading disp0 without losing the proxy
+
+A bus fault here wedges m1n1, which costs a DFU trip, so this is worth getting
+right:
+
+- **Power the domains first.** `p.pmgr_adt_power_enable("/arm-io/disp0")` and
+  the same for `dart-disp0` and `mipi-dsim`. Without that, 0x230004030 raises
+  an SError. With it, the same read returns a value.
+- **`GUARD.SKIP` does not save you.** `p.set_exc_guard()` is set and the proxy
+  still stopped answering on the first fault. Treat one fault as the end of the
+  session.
+- **Do not scan.** 0x230100000 faults even with the domains up. Read a short
+  list of addresses chosen in advance, cheapest first, and `flush=True` every
+  line so the last line printed names what killed it.
+
+Boot args, for reference: framebuffer at 0x8f7cd4000, 1242x2688, stride 4992,
+which is 1248 pixels at 4 bytes and not 1242.
+
 ## Die temperature sensors
 
 Nine of them in the ADT, all `tempsensor,t8020`, in three blocks. Linux has no
