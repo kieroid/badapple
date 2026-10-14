@@ -1234,8 +1234,27 @@ step and crashed the phone on its own, which says the margins here are thin.
 
 Boots are also not repeatable: the same image has produced a repeating
 console, a black console, and a hang, which is its own problem and probably
-needs solving first. **ramoops** would be the way, so a crashing boot can be
-read back instead of guessed at.
+needs solving first.
+
+**ramoops does not work here, do not try it again.** The config has everything
+(`PSTORE_RAM`, `PSTORE_CONSOLE`) and a `ramoops@8e4000000` reserved region
+comes up correctly:
+
+```text
+ramoops: using 0x100000@0x8e4000000, ecc: 0
+printk: legacy console [ramoops-1] enabled
+pstore: Registered ramoops as persistent store backend
+```
+
+A marker was written to `/dev/kmsg`, the phone rebooted with `reboot -f`, and
+on the next boot `/sys/fs/pstore` was empty. Every boot in this chain goes back
+through iBSS, which brings DRAM up again, so nothing in DRAM survives to be
+read. The node is not in the tree.
+
+That leaves the panel itself as the only channel for a crashing boot, which
+means debugging the display driver with simpledrm still owning the console,
+the way `probe_only` did: the driver programs the pipe, simpledrm keeps
+printing, and a panic is readable.
 
 ### Reading disp0 without losing the proxy
 
