@@ -125,7 +125,8 @@ a firmware reset is not enough, and put the phone back in DFU.
 - [x] USB
   - [x] Gadget: telnet, DHCP, getty on `/dev/ttyGS0`
   - [x] DART, in m1n1 and through `apple-dart` in Linux
-  - [x] Enumerating reliably
+  - [x] Comes up on every boot, the gadget replugs itself until the host takes it
+  - [ ] Why the first attach fails at all. Worked around, not understood
 - [ ] cpufreq. Needs the PMP/CLPC coprocessor that completes transitions
 - [ ] Touch, wifi, cellular, GPU, audio
 - [ ] Anything upstream

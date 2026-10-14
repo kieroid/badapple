@@ -449,11 +449,14 @@ itself enough to stop enumeration, because a host will not wait that long for
 ep0. And m1n1's USB is polled from `uartproxy_run()`, so anything hogging the
 CPU in m1n1 looks like broken USB.
 
-### The gadget often never takes an address, open
+### The gadget often never takes an address, worked around
 
-The big one, and still unsolved. Roughly half of boots, and no change below has
-moved that rate. The phone reaches a shell every time, the gadget binds, the
-host resets the bus twice, and then the device is never addressed.
+The root cause is still unsolved, but the boot is no longer a coin flip: the
+gadget now replugs itself until the host accepts it, see
+[self replug](#the-self-replug) below. What follows is the failure itself.
+
+The phone reaches a shell every time, the gadget binds, the host resets the bus
+twice, and then the device is never addressed.
 
 Host side:
 
@@ -514,15 +517,53 @@ Tried and ruled out, so none of it is worth repeating:
   active on screen as "Not disabling unused clocks", fails the same way. That
   hypothesis predicted a deterministic fix, so it is properly dead.
 
-A retry workaround does work, sometimes: a delayed work that re-presents the
-gadget, pullup off, 300ms, pullup on, until `gadget.state` reaches
-`USB_STATE_CONFIGURED`. One boot converged on the tenth attempt at 46s, another
-failed all ten. It is not in the tree.
-
 **Method note, learned the expensive way.** At this failure rate a single boot
 proves nothing, and several "fixes" here looked right for exactly one boot
 before failing on the repeat. Anything claimed about this needs a run of boots
 per configuration, which is the real cost: every one is a DFU trip by hand.
+
+### The self replug
+
+Pulling the cable out and pushing it back in always fixes the boot, however
+many tries it takes. Soft disconnect is that replug from this side, so a
+delayed work does it on a timer, every 3s, up to 10 passes, with three states:
+
+| state | what the work does |
+|---|---|
+| `gadget.state` is `USB_STATE_CONFIGURED` | stop, the link is up |
+| `DCFG` device address is not zero | wait, the host is partway through |
+| no address | toggle `DCTL_SFTDISCON`, 20ms apart |
+
+The address is the wrong stop condition on its own: the host assigns one, fails
+the descriptor read anyway, and resets the port, which puts the address back to
+zero. An earlier version watched only the address and tore down sessions that
+were about to configure.
+
+Five boots in a row came up with nobody touching the cable, at 2, 10, 8 and 10
+passes, between 5s and 35s from power on. Before this, about half of boots
+needed several replugs by hand and some never came up at all.
+
+The log of a normal boot now reads:
+
+```text
+dwc2 239100000.usbdev: apple: no address, replug 1
+dwc2 239100000.usbdev: apple: no address, replug 2
+dwc2 239100000.usbdev: new address 2
+dwc2 239100000.usbdev: apple: configured after 2 retries
+```
+
+Sometimes `new address 2` lands in the same microsecond as a replug: the SETUP
+was already received and the driver had not written `DCFG` yet when the work
+read it. It costs that session and the next pass picks it up, so it is not
+worth another check.
+
+Four `dev_info` calls used to sit in `dwc2_hsotg_udc_start()` and were load
+bearing: with them the gadget enumerated, without them the host gave up with
+`device descriptor read/64, error -110`. The console is a 155x168 simpledrm
+framebuffer, so each line cost milliseconds, and simpledrm paints in bursts, so
+how much delay you got varied per boot. They are `mdelay(50)` now, which is the
+same delay without the superstition. `mdelay` and not `msleep`, because the
+caller holds `hsotg->lock` with interrupts off.
 
 ### Everything this driver printed was invisible
 
@@ -1072,10 +1113,9 @@ Things this repo previously asserted that are wrong.
    them per-core. Fine for bring-up.
 3. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
    framebuffer includes the notch area. Cosmetic.
-4. **The gadget is only addressed on about half of boots.** See
-   [USB](#the-gadget-often-never-takes-an-address-open). Reboot until it comes
-   up; the phone itself is fine either way, it is only the host link that
-   fails.
+4. **The first USB attach still fails, the gadget just retries until it does
+   not.** See [the self replug](#the-self-replug). The link always comes up
+   now, it can take 35s. Why the first attach fails is not known.
 5. **SoC temperature sensors.** `/arm-io/tempsensor0` to `tempsensor8`,
    `tempsensor,t8020`. No Linux driver exists. Battery temperature already
    works through the SMC.
