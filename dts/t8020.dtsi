@@ -493,6 +493,31 @@
 			};
 		};
 
+		/*
+		 * Die temperature sensors. The ADT has nine of them, all
+		 * tempsensor,t8020, in three blocks: /arm-io/tempsensor0 to 4
+		 * share one block in the power manager, 5 to 7 are the P
+		 * cluster, and 8 is the E cluster. One node per block, because
+		 * the sensors inside a block share a register range.
+		 *
+		 * The reg sizes cover the averaged reads as well, which sit
+		 * 0x20000 up for the PMGR block and 0x4000 up for the clusters.
+		 */
+		tempsensor_pmgr: tempsensor@23b288000 {
+			compatible = "apple,t8020-pmgr-tempsensor";
+			reg = <0x2 0x3b288000 0x0 0x34000>;
+		};
+
+		tempsensor_acc: tempsensor@211e30000 {
+			compatible = "apple,t8020-acc-tempsensor";
+			reg = <0x2 0x11e30000 0x0 0x8000>;
+		};
+
+		tempsensor_acce: tempsensor@210e30000 {
+			compatible = "apple,t8020-acce-tempsensor";
+			reg = <0x2 0x10e30000 0x0 0x8000>;
+		};
+
 		pmgr_mini: power-management@23d200000 {
 			compatible = "apple,t8020-pmgr", "apple,pmgr", "syscon", "simple-mfd";
 			#address-cells = <1>;

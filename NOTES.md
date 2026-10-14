@@ -70,6 +70,16 @@ CPU nodes, including its own, leaving Linux a tree with no CPUs.
 UART0 exists and `earlycon` uses it, but it needs a serial cable on the
 Lightning pins.
 
+The console used to paint behind the notch. `get_notchless_fb()` in m1n1 looks
+for `partially-occluded-display` on the ADT's `/product` node, which D331p does
+not have, and then falls back to a list of T8015 board ids. `patches/m1n1-0011`
+adds this board, 0x1a, with a notch of 132 pixels, which is the 44pt safe area
+inset at 3x. The phone reports `1242,2556` in
+`/sys/class/graphics/fb0/virtual_size` with it, down from 2688.
+
+The aspect ratio trick the generic path uses does not work here: it computes
+16:34 and trims 49 pixels, which is not the notch.
+
 `tools/tsh.py` runs one command on the telnet shell and prints the reply, so a
 boot can be checked without a terminal. `telnetlib` left the stdlib in 3.13 and
 all this needs is to refuse every option, so the negotiation is inline.
@@ -206,7 +216,7 @@ always-on domain usbctlreg is not on at boot    802b0
 always-on domain usb2dev is not on at boot      802c0
 ```
 
-`patches/m1n1-0010` adds `0x802c0` and power cycles all three from the T8020
+`patches/m1n1-0001` adds `0x802c0` and power cycles all three from the T8020
 case. With it the abort is gone, m1n1 reports `USB0: initialized`, and those
 three warnings disappear from the Linux log too, because the domains are
 already up by the time Linux looks.
@@ -343,7 +353,7 @@ here does not mean passthrough: the 32 bit address the controller emits never
 becomes an address in DRAM, which starts at `0x800000000`, so the fabric answers
 with an error.
 
-`m1n1-0012` initialises stream 0 and flat maps DRAM at the low 32 bits of each
+`m1n1-0001` initialises stream 0 and flat maps DRAM at the low 32 bits of each
 page's own address, which is what the driver writes into `DOEPDMA` and
 `DIEPDMA`. On the Linux side `dart_usb` is a node in `t8020.dtsi` with
 `iommus = <&dart_usb 0>` on `usbdev`, so `apple-dart` does the same job through
@@ -428,7 +438,7 @@ maintenance, and dwc2's own mapping (a second `ioremap()` behaved the same).
 
 ### The gadget prints are load bearing
 
-The six `dev_info` calls `linux-0002` adds to `dwc2_hsotg_udc_start()` and
+The `dev_info` calls `linux-0002` adds to `dwc2_hsotg_udc_start()` and
 `dwc2_hsotg_pullup()` look like leftover debugging. Removing them, nothing else
 changed, stops the gadget enumerating: `new device is high-speed` and then the
 `-110` timeout. They are delays wearing a print's clothing, each one costing
@@ -571,7 +581,7 @@ m1n1's `usb_error_printf` went to `uart_printf`, and the dwc2 poll runs inside
 an iodev callback, so `in_iodev` is set and `iodev_console_write()` sends it to
 `IODEV_UART` and `IODEV_DOCKCHANNEL_UART` only. Without a serial cable on the
 Lightning pins that is nowhere. The `BAD STATUS with COMPL` line above had been
-printing all along. `patches/m1n1-0011` sends errors to `fb_console_write()` as
+printing all along. `patches/m1n1-0010` sends errors to `fb_console_write()` as
 well, which is the only reason any of it was readable. Anything else that needs
 watching from inside that callback needs the same treatment.
 
@@ -912,8 +922,8 @@ arrives as `Apple SMC power/lid events` on input0.
 
 `macsmc-hwmon` does not probe, which is expected: it says "No valid sensors
 found of any supported type" because it looks for Mac sensor key sets. The
-SoC's own sensors are separate anyway: `/arm-io/tempsensor0` through
-`tempsensor8`, `tempsensor,t8020`, which Linux has no driver for at all.
+SoC's own sensors are separate, see [die temperature
+sensors](#die-temperature-sensors).
 
 ### Poweroff, and the PMU scratchpad
 
@@ -970,6 +980,56 @@ OF: Bad cell count for /soc/spmi@23d180700/pmic@f
 
 The PMIC takes a two cell address from the bus and declares one cell addresses
 for its own children. Upstream Apple device trees are shaped the same way.
+
+## Die temperature sensors
+
+Nine of them in the ADT, all `tempsensor,t8020`, in three blocks. Linux has no
+driver, so `patches/linux-0006` adds `drivers/hwmon/apple-soc-temp.c`, which is
+hwmon only: no thermal zones, because there is nothing to throttle with cpufreq
+off and no fan to turn.
+
+| ADT node | block | base | registers |
+|---|---|---|---|
+| tempsensor0 to 4 | PMGR die | 0x23b288000 | 32 bit, 0x4000 per sensor |
+| tempsensor5 to 7 | P cluster | 0x211e30000 | 64 bit, at 0x0, 0x40, 0x200 |
+| tempsensor8 | E cluster | 0x210e30000 | 64 bit, at 0x0 |
+
+Every offset comes from the ADT node itself, which names them:
+`sensor-offset-readSum` at 0x28, `sensor-offset-readCnt` at 0x30,
+`sensor-offset-readBK` at 0x20000 for the PMGR block and 0x4000 for the
+clusters, plus `CTL0-set`, `CTL0-clr`, `CTL1`, `CTL2`, `status` and four alarm
+registers. `reg-64-bit` is what says the cluster sensors need `readq`.
+
+Two things the ADT does not say, both measured:
+
+**The accumulators are empty.** `readSum` and `readCnt` are zero on every
+sensor, so iBoot does not leave the averaging running. `readCnt` is checked
+anyway and the single `readBK` read is the fallback, which is what actually
+gets used.
+
+**A read is two 16 bit fields.** `readBK` on sensor 0 was `0x8a4f0792`. Across
+the nine sensors the high half ran 0x8a4d to 0x8a5d and the low half 0x073a to
+0x079e, moving in opposite directions, so the high half is the raw diode code
+and the low half is the temperature. The low half divided by 64 gives 28.9 to
+30.5 degrees, against 29.4 from the SMC's battery sensor at the same moment.
+Divided by 16 it would be 121 degrees.
+
+Then six busy loops for 45 seconds, which moved it the right way and by a
+sensible amount:
+
+| sensor | idle | loaded |
+|---|---|---|
+| SOC die 0 | 31.5 | 33.7 |
+| ACCp0 | 30.8 | 34.6 |
+| ACCe | 29.3 | 33.1 |
+
+PMGR sensor 2 reads zero in both its status and its value while the other four
+read normally, so the driver skips whatever reads zero instead of publishing a
+channel stuck at 0 degrees. It says so once:
+
+```text
+apple-soc-temp 23b288000.tempsensor: SOC die 2: reads zero, skipped
+```
 
 ## cpufreq, the part that completes transitions is not running
 
@@ -1111,11 +1171,6 @@ Things this repo previously asserted that are wrong.
    [cpufreq](#cpufreq-the-part-that-completes-transitions-is-not-running).
 2. **Chicken bits.** Applied in m1n1 at startup; the kernel does not reapply
    them per-core. Fine for bring-up.
-3. **Notch.** m1n1 only trims it for T8015 board ids 0x6 and 0xe, so the
-   framebuffer includes the notch area. Cosmetic.
-4. **The first USB attach still fails, the gadget just retries until it does
+3. **The first USB attach still fails, the gadget just retries until it does
    not.** See [the self replug](#the-self-replug). The link always comes up
    now, it can take 35s. Why the first attach fails is not known.
-5. **SoC temperature sensors.** `/arm-io/tempsensor0` to `tempsensor8`,
-   `tempsensor,t8020`. No Linux driver exists. Battery temperature already
-   works through the SMC.

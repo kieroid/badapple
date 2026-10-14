@@ -53,7 +53,7 @@ make deps       # clone, venv, apply patches/
 make check      # compile the device tree on its own
 make m1n1       # build the m1n1 payload
 make initramfs  # download Hoolock's test initramfs
-make kernel KCONFIG_EXTRA="--disable CONFIG_ARM_APPLE_SOC_CPUFREQ"
+make kernel     # build Image.gz with Hoolock's 16K config
 ```
 
 `make boot` rebuilds m1n1, the device tree and the kernel as needed, so those
@@ -63,8 +63,9 @@ are only separate targets when you want one of them on its own.
 re-applies `patches/` and is safe to run again: an applied patch is skipped, a
 real conflict stops the build.
 
-cpufreq has to be off. Frequency requests are accepted and then never
-completed, because the coprocessor that arbitrates DVFS is not running, see
+cpufreq is disabled by the build, not by you. Frequency requests are accepted
+and then never completed, because the coprocessor that arbitrates DVFS is not
+running, see
 [NOTES.md](NOTES.md#cpufreq-the-part-that-completes-transitions-is-not-running).
 
 ## First time setup
@@ -94,9 +95,13 @@ That packs m1n1, the device tree, the kernel and the initramfs into one fake
 restore kernelcache and hands the whole chain to the phone. `make kernelcache`
 builds it without booting anything.
 
-About twenty seconds later the phone is `05ac:4142`, hands the PC
+Within about half a minute the phone is `05ac:4142`, hands the PC
 `172.16.42.2` over DHCP, and answers telnet on `172.16.42.1`.
 `tools/tsh.py "cmd"` runs one command there from a script.
+
+The first USB attach usually fails and the gadget retries by itself, so the
+link can take a few tries to appear. Nothing to do but wait, see
+[NOTES.md](NOTES.md#the-self-replug).
 
 If it says the phone is not pwned, check its USB serial for `PWND:[usbliter8]`.
 Without it the exploit has not run: unplug the jig from USB for a few seconds,
@@ -111,7 +116,7 @@ a firmware reset is not enough, and put the phone back in DFU.
 - [x] Console
   - [x] Framebuffer, handed over by iBoot
   - [ ] Display driver. The picture is frozen as iBoot left it
-  - [ ] Notch trimmed out of the framebuffer
+  - [x] Notch trimmed out of the framebuffer, 2688 down to 2556
 - [x] AIC interrupts, including fast IPIs
 - [x] SMP on all six cores
   - [ ] Chicken bits reapplied per core by the kernel, m1n1 does it once
@@ -121,7 +126,7 @@ a firmware reset is not enough, and put the phone back in DFU.
   - [x] Charger detection and the power button
   - [x] Poweroff, with the PMU scratchpad over SPMI so it stays off
   - [x] Reboot, through the watchdog, lands back in recovery
-  - [ ] SoC temperature sensors, no Linux driver for tempsensor,t8020
+- [x] Die temperature sensors, eight channels through hwmon
 - [x] USB
   - [x] Gadget: telnet, DHCP, getty on `/dev/ttyGS0`
   - [x] DART, in m1n1 and through `apple-dart` in Linux

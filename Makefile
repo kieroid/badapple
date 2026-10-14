@@ -136,7 +136,8 @@ kernel: $(IMAGE)
 $(IMAGE): FORCE
 	cp $(CONFIG_16K) $(KDIR)/.config
 	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD \
-	    --disable CONFIG_ARM_APPLE_SOC_CPUFREQ $(KCONFIG_EXTRA)
+	    --disable CONFIG_ARM_APPLE_SOC_CPUFREQ \
+	    --enable CONFIG_SENSORS_APPLE_SOC_TEMP $(KCONFIG_EXTRA)
 	$(MAKE) -C $(KDIR) $(KBUILD) olddefconfig
 	$(MAKE) -C $(KDIR) $(KBUILD) -j$$(nproc) Image.gz
 

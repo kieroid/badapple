@@ -1,0 +1,56 @@
+diff --git a/src/kboot.c b/src/kboot.c
+index 2840651..6970c62 100644
+--- a/src/kboot.c
++++ b/src/kboot.c
+@@ -82,8 +82,15 @@ void get_notchless_fb(u64 *fb_base, u64 *fb_height)
+ 
+     u32 val;
+ 
++    /*
++     * D331p, the iPhone XS Max, has a notch and no partially-occluded-display
++     * property in its ADT, same as the T8015 phones below. Its safe area
++     * starts 44pt down, which is 132 pixels at 3x.
++     */
++    bool notched_t8020 = chip_id == T8020 && board_id == 0x1a;
++
+     if ((ADT_GETPROP(adt, node, "partially-occluded-display", &val) < 0 || !val) &&
+-        (chip_id != T8015 || (board_id != 0x6 && board_id != 0xe))) {
++        (chip_id != T8015 || (board_id != 0x6 && board_id != 0xe)) && !notched_t8020) {
+         printf("FDT: No notch detected\n");
+         return;
+     }
+@@ -92,6 +99,8 @@ void get_notchless_fb(u64 *fb_base, u64 *fb_height)
+     u64 new_height = cur_boot_args.video.width * hfrac / 16;
+     if (chip_id == T8015 && (board_id == 0x6 || board_id == 0xe))
+         new_height = 2346;
++    if (notched_t8020)
++        new_height = cur_boot_args.video.height - 132;
+ 
+     if (new_height == cur_boot_args.video.height) {
+         printf("FDT: Notch detected, but display aspect is already 16:%lu?\n", hfrac);
+@@ -2892,10 +2901,21 @@ static int dt_setup_mtd_phram(void)
+             bail("FDT: failed to setup ADT MTD phram label\n");
+     }
+ 
+-    // init memory backed iodev for console log
+-    logbuf.buffer = (void *)top_of_memory_alloc(LOGBUF_SIZE);
+-    if (!logbuf.buffer)
+-        bail("FDT: failed to allocate m1n1 log buffer\n");
++    /*
++     * Bring-up: skip the memory backed console log on T8020.
++     *
++     * An SError lands shortly after this point, with L2C_ERR_ADR holding the
++     * end address of exactly this buffer. top_of_memory_alloc carves it out of
++     * real DRAM and shrinks cur_boot_args.mem_size to match, so the region is
++     * legitimate and the real cause is not understood. This buffer only exposes
++     * m1n1's log to Linux as an MTD phram device, which we are not using, so
++     * remove it as a variable rather than keep guessing. A NULL logbuf.buffer
++     * is already handled by the iodev.
++     *
++     * If the SError survives this, it was never the log buffer.
++     */
++    logbuf.buffer = NULL;
++    return 0;
+ 
+     snprintf(node_name, sizeof(node_name), "flash@%lx", (u64)logbuf.buffer);
+     node = dt_get_or_add_reserved_mem(node_name, "phram", false, (u64)logbuf.buffer, SZ_16K);
