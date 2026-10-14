@@ -54,7 +54,7 @@ ADT_IM4P  = $(firstword $(wildcard $(IPSW)/Firmware/all_flash/DeviceTree.d331pap
 # console=tty0 is the framebuffer m1n1 hands over, which is readable on the
 # phone itself. The shell arrives separately over the USB gadget. earlycon
 # picks up UART0 through stdout-path, for anyone with a serial cable.
-BOOTARGS ?= earlycon console=tty0 ignore_loglevel
+BOOTARGS ?= earlycon console=tty0 ignore_loglevel cma=64M
 
 .PHONY: check deps patch pmgr m1n1 kernel initramfs images kernelcache \
 	m1n1cache boot clean FORCE
@@ -137,7 +137,8 @@ $(IMAGE): FORCE
 	cp $(CONFIG_16K) $(KDIR)/.config
 	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD \
 	    --disable CONFIG_ARM_APPLE_SOC_CPUFREQ \
-	    --enable CONFIG_SENSORS_APPLE_SOC_TEMP $(KCONFIG_EXTRA)
+	    --enable CONFIG_SENSORS_APPLE_SOC_TEMP \
+	    --enable CONFIG_DRM_APPLE_H11P $(KCONFIG_EXTRA)
 	$(MAKE) -C $(KDIR) $(KBUILD) olddefconfig
 	$(MAKE) -C $(KDIR) $(KBUILD) -j$$(nproc) Image.gz
 

@@ -1183,6 +1183,66 @@ Two hypotheses died on the way, both worth not repeating:
 - **A second register bank.** The kext mirrors the plane 0x1000 up, so 0x51000
   looked like a writable shadow. It reads mostly zeros and drops writes too.
 
+### The driver exists, and the DART is what blocks it
+
+`patches/linux-0008` adds `drivers/gpu/drm/tiny/apple-h11p.c`, a small DRM
+driver on `drm_simple_display_pipe` plus the GEM DMA helpers. It takes the mode
+out of 0x50080 and the stride out of 0x50060, owns the plane, and flips by
+writing surface, end, stride and commit through the write aperture. The device
+tree node is `status = "disabled"` because of what follows.
+
+It got as far as taking the screen off simpledrm, `card1-DSI-1` with no
+`card0`, before hitting the wall. Three bugs on the way, all mine, all worth
+not repeating:
+
+- **Overlapping reg entries.** The read view and the write view are the same
+  0x2f0000 block 0x200000 apart, so asking for 0x2f0000 twice fails with
+  `can't request region for resource [mem 0x230200000-0x2304effff]`, EBUSY.
+  The sizes have to stop short of each other.
+- **Power domains attached before anything that can fail.** The probe claimed
+  all eight disp0 domains, then failed on the overlap, and the devm unwind
+  detached them. Four had no other consumer, so they powered off under a panel
+  that was still scanning and the screen went solid red. Claim them after
+  every step that can fail.
+- **No `.fbdev_probe`.** This kernel needs `DRM_FBDEV_DMA_DRIVER_OPS` in the
+  driver struct. Without it `drm_client_setup` warns in
+  `__drm_fb_helper_initial_config_and_unlock` and fails with -22, so no
+  framebuffer is ever allocated and the console has nowhere to go.
+
+**The real blocker is `dart-disp0`.** Put it in the device tree and
+`apple-dart` binds, resets it and installs empty page tables, which throws away
+the mapping the live scanout is using. The screen goes to red flicker
+immediately and the phone falls over shortly after. There is no preserve path
+in that driver: the only thing it says about a DART it cannot have is "DART is
+locked down until reboot".
+
+Worse, the registers do not look like what the driver assumes. With iBoot's
+mapping live, at 0x230704000:
+
+```text
+PARAMS1 0x00   0x2ed01010
+TCR0    0x100  0x00000080     translate enabled, not bypass
+TTBR0   0x200  0x0d100744
+```
+
+0x0d100744 does not decode to a page table anywhere in this phone's DRAM,
+which starts at 0x800000000: not raw, not shifted by 12, not relative to the
+DRAM base. m1n1's own DART code reads every stream as translate-enabled with
+`VALID=0` TTBRs, which cannot be what a working scanout is using either. The
+values are stable within a boot and differ between boots, which is just iBoot
+putting its page tables somewhere new each time.
+
+**Next target.** `AppleDART`/`IODARTFamily` in the kernelcache, for the T8020
+display DART's actual register layout. Until that is known, the driver cannot
+be given a buffer of its own, because every address it could program has to go
+through that DART.
+
+One thing worth remembering: m1n1 excludes the framebuffer from the usable RAM
+it hands Linux, so iBoot's buffer is already outside the kernel's memory and
+could be scanned out of without the DART at all. A driver that copies into it
+would work today, but that is what simpledrm already does, so it buys nothing
+except scaffolding.
+
 ### Reading disp0 without losing the proxy
 
 A bus fault here wedges m1n1, which costs a DFU trip, so this is worth getting
@@ -1394,3 +1454,8 @@ Things this repo previously asserted that are wrong.
 3. **The first USB attach still fails, the gadget just retries until it does
    not.** See [the self replug](#the-self-replug). The link always comes up
    now, it can take 35s. Why the first attach fails is not known.
+4. **The display DART.** `apple-dart` wipes the mapping iBoot's scanout runs
+   on, and the T8020 display DART's TTBR does not decode the way that driver
+   assumes. The driver is written and its node is disabled until this is
+   answered. See
+   [display](#the-driver-exists-and-the-dart-is-what-blocks-it).

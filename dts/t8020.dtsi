@@ -437,6 +437,48 @@
 		};
 
 		/*
+		 * The display pipe iBoot leaves running. Two reg entries for
+		 * one block: the window is mirrored every 0x200000 and only
+		 * the second copy takes writes, so the driver reads through
+		 * "read" and writes through "write". Reads work through
+		 * either, which is what made this confusing to find.
+		 *
+		 * The two entries have to stop short of each other or the
+		 * second request fails with EBUSY: the block is 0x2f0000 long
+		 * and the mirror starts 0x200000 in, so they would overlap.
+		 * Everything either view needs is in the first 0xf0000.
+		 *
+		 * Every disp0 power domain is already on, left that way by
+		 * iBoot, but something has to claim them or they get switched
+		 * off as unused and the picture dies partway through boot.
+		 * That used to be the framebuffer node's job.
+		 *
+		 * Disabled, and no dart-disp0 node on purpose. The scanout
+		 * iBoot leaves running fetches through that DART, and Linux's
+		 * apple-dart resets it and installs empty page tables as soon
+		 * as it binds, so the picture turns into red flicker and the
+		 * phone then falls over. Its TTBR does not decode to any
+		 * address in this phone's DRAM either, so the register layout
+		 * is not the one that driver assumes.
+		 *
+		 * Enabling this needs the DART sorted out first. See
+		 * "Display" in NOTES.md.
+		 */
+		disp0: display-pipe@230000000 {
+			compatible = "apple,t8020-display-pipe";
+			reg = <0x2 0x30000000 0x0 0x200000>,
+			      <0x2 0x30200000 0x0 0xf0000>;
+			reg-names = "read", "write";
+			power-domains = <&ps_disp0_busif>, <&ps_disp0_fe>,
+					<&ps_disp0_be>, <&ps_disp0_gp0>,
+					<&ps_disp0_gp1>, <&ps_disp0_ppp>,
+					<&ps_disp0_hilo>, <&ps_mipi_dsi>;
+			power-domain-names = "busif", "fe", "be", "gp0",
+					     "gp1", "ppp", "hilo", "mipi";
+			status = "disabled";
+		};
+
+		/*
 		 * The PMU side of the chip, reached over SPMI. The ADT node
 		 * /arm-io/spmi lists three register ranges and a wall of
 		 * interrupts; the driver only wants the first range.

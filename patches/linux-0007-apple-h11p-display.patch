@@ -1,0 +1,403 @@
+diff --git a/drivers/gpu/drm/tiny/Kconfig b/drivers/gpu/drm/tiny/Kconfig
+index f0e72d4b6..46c723e36 100644
+--- a/drivers/gpu/drm/tiny/Kconfig
++++ b/drivers/gpu/drm/tiny/Kconfig
+@@ -1,5 +1,20 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
++config DRM_APPLE_H11P
++	tristate "Apple H11P display pipe"
++	depends on DRM && OF
++	depends on ARCH_APPLE || COMPILE_TEST
++	select DRM_CLIENT_SELECTION
++	select DRM_GEM_DMA_HELPER
++	select DRM_KMS_HELPER
++	help
++	  Say Y here if you want support for the display pipe on Apple A12
++	  and similar iPhone SoCs, where the bootloader leaves a running
++	  scanout behind and this driver takes it over.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called apple-h11p.
++
+ config DRM_APPLETBDRM
+ 	tristate "DRM support for Apple Touch Bars"
+ 	depends on DRM && USB && MMU
+diff --git a/drivers/gpu/drm/tiny/Makefile b/drivers/gpu/drm/tiny/Makefile
+index 48d30bf61..2fd47771f 100644
+--- a/drivers/gpu/drm/tiny/Makefile
++++ b/drivers/gpu/drm/tiny/Makefile
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ 
++obj-$(CONFIG_DRM_APPLE_H11P)		+= apple-h11p.o
+ obj-$(CONFIG_DRM_APPLETBDRM)		+= appletbdrm.o
+ obj-$(CONFIG_DRM_ARCPGU)		+= arcpgu.o
+ obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
+diff --git a/drivers/gpu/drm/tiny/apple-h11p.c b/drivers/gpu/drm/tiny/apple-h11p.c
+new file mode 100644
+index 000000000..6ba87226c
+--- /dev/null
++++ b/drivers/gpu/drm/tiny/apple-h11p.c
+@@ -0,0 +1,361 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Apple H11P display pipe, as found on T8020
++ *
++ * Copyright (c) 2026 kiki <kieran@lavato.net>
++ *
++ * iBoot brings the panel and the pipe up and hands over a running scanout, so
++ * this driver takes that over rather than programming it: the mode, the stride
++ * and the pixel format are whatever iBoot chose, and all this does is point
++ * the plane at a buffer of its own and commit.
++ *
++ * The one thing worth knowing about the hardware is that the register window
++ * is mirrored every 0x200000 and only the second copy accepts writes. Reads
++ * work through either. See "Display" in the project NOTES.md.
++ */
++
++#include <linux/aperture.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/pm_runtime.h>
++
++#include <drm/clients/drm_client_setup.h>
++#include <drm/drm_atomic_helper.h>
++#include <drm/drm_drv.h>
++#include <drm/drm_fb_dma_helper.h>
++#include <drm/drm_fbdev_dma.h>
++#include <drm/drm_fourcc.h>
++#include <drm/drm_framebuffer.h>
++#include <drm/drm_gem_atomic_helper.h>
++#include <drm/drm_gem_dma_helper.h>
++#include <drm/drm_gem_framebuffer_helper.h>
++#include <drm/drm_managed.h>
++#include <drm/drm_modeset_helper_vtables.h>
++#include <drm/drm_probe_helper.h>
++#include <drm/drm_simple_kms_helper.h>
++
++/* The plane fetch unit, which Apple calls GenPipe. Instances are 0x8000 apart. */
++#define GP_BASE			0x50000
++#define GP_STATUS		(GP_BASE + 0x004)
++#define GP_STATUS_ENABLED	BIT(31)
++#define GP_SURFACE		(GP_BASE + 0x030)
++#define GP_SURFACE_END		(GP_BASE + 0x040)
++#define GP_STRIDE		(GP_BASE + 0x060)
++#define GP_DST_SIZE		(GP_BASE + 0x080)
++#define GP_COMMIT		(GP_BASE + 0x094)
++
++/* What the kext writes to commit a plane: which planes changed, plus bit 8. */
++#define GP_COMMIT_PLANE0	0x101
++
++/*
++ * The hardware masks both addresses to 64 bytes, and the stride has to be a
++ * multiple of the same, which is why iBoot uses 4992 for a 1242 pixel line
++ * rather than 4968.
++ */
++#define GP_SURFACE_ALIGN	64
++
++struct apple_h11p {
++	struct drm_device drm;
++	struct drm_simple_display_pipe pipe;
++	struct drm_connector connector;
++	struct drm_display_mode mode;
++	struct dev_pm_domain_list *pds;
++	void __iomem *read;
++	void __iomem *write;
++	u32 stride;
++};
++
++static struct apple_h11p *to_h11p(struct drm_device *drm)
++{
++	return container_of(drm, struct apple_h11p, drm);
++}
++
++static int apple_h11p_get_modes(struct drm_connector *connector)
++{
++	struct apple_h11p *h11p = to_h11p(connector->dev);
++
++	return drm_connector_helper_get_modes_fixed(connector, &h11p->mode);
++}
++
++static const struct drm_connector_helper_funcs apple_h11p_connector_helper_funcs = {
++	.get_modes = apple_h11p_get_modes,
++};
++
++static const struct drm_connector_funcs apple_h11p_connector_funcs = {
++	.reset = drm_atomic_helper_connector_reset,
++	.fill_modes = drm_helper_probe_single_connector_modes,
++	.destroy = drm_connector_cleanup,
++	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
++	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
++};
++
++static void apple_h11p_flip(struct apple_h11p *h11p, struct drm_plane_state *state)
++{
++	dma_addr_t addr;
++	u32 stride;
++	u64 end;
++
++	if (!state || !state->fb)
++		return;
++
++	addr = drm_fb_dma_get_gem_addr(state->fb, state, 0);
++
++	/*
++	 * The hardware takes 32 bits here, which is an address on the far side
++	 * of dart-disp0, so a buffer that did not come through the DART cannot
++	 * be scanned out. iBoot's own framebuffer is flat mapped, which is why
++	 * the address it leaves behind looks like a physical one.
++	 */
++	stride = state->fb->pitches[0];
++	end = addr + (u64)stride * state->fb->height - 1;
++
++	writel(lower_32_bits(addr), h11p->write + GP_SURFACE);
++	writel(lower_32_bits(end) & ~(GP_SURFACE_ALIGN - 1),
++	       h11p->write + GP_SURFACE_END);
++	writel(stride, h11p->write + GP_STRIDE);
++	writel(GP_COMMIT_PLANE0, h11p->write + GP_COMMIT);
++}
++
++static void apple_h11p_pipe_enable(struct drm_simple_display_pipe *pipe,
++				   struct drm_crtc_state *crtc_state,
++				   struct drm_plane_state *plane_state)
++{
++	struct apple_h11p *h11p = to_h11p(pipe->crtc.dev);
++
++	apple_h11p_flip(h11p, plane_state);
++}
++
++static void apple_h11p_pipe_disable(struct drm_simple_display_pipe *pipe)
++{
++	/*
++	 * Deliberately nothing. Blanking would need the run mode registers,
++	 * which are not mapped, and leaving the scanout running means the
++	 * console stays readable instead of the screen going dark on the first
++	 * modeset.
++	 */
++}
++
++static void apple_h11p_pipe_update(struct drm_simple_display_pipe *pipe,
++				   struct drm_plane_state *old_state)
++{
++	struct apple_h11p *h11p = to_h11p(pipe->crtc.dev);
++
++	apple_h11p_flip(h11p, pipe->plane.state);
++}
++
++static int apple_h11p_pipe_check(struct drm_simple_display_pipe *pipe,
++				 struct drm_plane_state *plane_state,
++				 struct drm_crtc_state *crtc_state)
++{
++	struct apple_h11p *h11p = to_h11p(pipe->crtc.dev);
++	struct drm_framebuffer *fb = plane_state->fb;
++	dma_addr_t addr;
++
++	if (!fb)
++		return 0;
++
++	addr = drm_fb_dma_get_gem_addr(fb, plane_state, 0);
++
++	if (upper_32_bits(addr))
++		return -EINVAL;
++	if (!IS_ALIGNED(addr, GP_SURFACE_ALIGN))
++		return -EINVAL;
++	if (!IS_ALIGNED(fb->pitches[0], GP_SURFACE_ALIGN))
++		return -EINVAL;
++	if (fb->pitches[0] < h11p->mode.hdisplay * 4)
++		return -EINVAL;
++
++	return 0;
++}
++
++static const struct drm_simple_display_pipe_funcs apple_h11p_pipe_funcs = {
++	.enable = apple_h11p_pipe_enable,
++	.disable = apple_h11p_pipe_disable,
++	.update = apple_h11p_pipe_update,
++	.check = apple_h11p_pipe_check,
++	DRM_GEM_SIMPLE_DISPLAY_PIPE_SHADOW_PLANE_FUNCS,
++};
++
++static const u32 apple_h11p_formats[] = {
++	DRM_FORMAT_XRGB8888,
++};
++
++static const struct drm_mode_config_funcs apple_h11p_mode_config_funcs = {
++	.fb_create = drm_gem_fb_create_with_dirty,
++	.atomic_check = drm_atomic_helper_check,
++	.atomic_commit = drm_atomic_helper_commit,
++};
++
++/*
++ * The default dumb buffer pitch is the line length with no rounding, and this
++ * hardware wants it aligned like the addresses are.
++ */
++static int apple_h11p_dumb_create(struct drm_file *file_priv,
++				  struct drm_device *drm,
++				  struct drm_mode_create_dumb *args)
++{
++	args->pitch = ALIGN(DIV_ROUND_UP(args->width * args->bpp, 8),
++			    GP_SURFACE_ALIGN);
++	args->size = args->pitch * args->height;
++
++	return drm_gem_dma_dumb_create_internal(file_priv, drm, args);
++}
++
++static const struct drm_driver apple_h11p_driver = {
++	.driver_features = DRIVER_GEM | DRIVER_MODESET | DRIVER_ATOMIC,
++	.name = "apple-h11p",
++	.desc = "Apple H11P display pipe",
++	.major = 0,
++	.minor = 1,
++	DRM_FBDEV_DMA_DRIVER_OPS,
++	DRM_GEM_DMA_DRIVER_OPS_VMAP_WITH_DUMB_CREATE(apple_h11p_dumb_create),
++};
++
++/*
++ * Take the mode from the registers iBoot programmed. Only the visible size is
++ * real: the blanking and the clock are made up, because nothing here ever
++ * programs the timing, and they exist so userspace has a mode to look at.
++ */
++static void apple_h11p_read_mode(struct apple_h11p *h11p)
++{
++	u32 size = readl(h11p->read + GP_DST_SIZE);
++	u32 width = size >> 16;
++	u32 height = size & 0xffff;
++
++	h11p->stride = readl(h11p->read + GP_STRIDE);
++
++	h11p->mode = (struct drm_display_mode) {
++		.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
++		.clock = width * height * 60 / 1000,
++		.hdisplay = width,
++		.hsync_start = width,
++		.hsync_end = width,
++		.htotal = width,
++		.vdisplay = height,
++		.vsync_start = height,
++		.vsync_end = height,
++		.vtotal = height,
++	};
++
++	drm_mode_set_name(&h11p->mode);
++}
++
++static int apple_h11p_probe(struct platform_device *pdev)
++{
++	struct apple_h11p *h11p;
++	struct drm_device *drm;
++	u32 status;
++	int ret;
++
++	h11p = devm_drm_dev_alloc(&pdev->dev, &apple_h11p_driver,
++				  struct apple_h11p, drm);
++	if (IS_ERR(h11p))
++		return PTR_ERR(h11p);
++
++	drm = &h11p->drm;
++	platform_set_drvdata(pdev, h11p);
++
++	/*
++	 * Claim the power domains last of all the things that can fail. Every
++	 * disp0 domain is already on, left that way by iBoot, and something
++	 * has to hold them or the power manager switches them off as unused
++	 * and the picture dies. But attaching and then failing is worse than
++	 * never attaching: the detach on the way out powers them down under a
++	 * panel that is still scanning, and the screen goes red.
++	 */
++	h11p->read = devm_platform_ioremap_resource_byname(pdev, "read");
++	if (IS_ERR(h11p->read))
++		return PTR_ERR(h11p->read);
++
++	h11p->write = devm_platform_ioremap_resource_byname(pdev, "write");
++	if (IS_ERR(h11p->write))
++		return PTR_ERR(h11p->write);
++
++	ret = devm_pm_domain_attach_list(&pdev->dev, NULL, &h11p->pds);
++	if (ret < 0)
++		return dev_err_probe(&pdev->dev, ret, "no power domains\n");
++
++	status = readl(h11p->read + GP_STATUS);
++	if (!(status & GP_STATUS_ENABLED))
++		return dev_err_probe(&pdev->dev, -ENODEV,
++				     "pipe is not running, status 0x%08x\n", status);
++
++	apple_h11p_read_mode(h11p);
++	dev_info(&pdev->dev, "took over %dx%d, stride %d, surface 0x%08x\n",
++		 h11p->mode.hdisplay, h11p->mode.vdisplay, h11p->stride,
++		 readl(h11p->read + GP_SURFACE));
++
++	ret = drmm_mode_config_init(drm);
++	if (ret)
++		return ret;
++
++	drm->mode_config.min_width = h11p->mode.hdisplay;
++	drm->mode_config.max_width = h11p->mode.hdisplay;
++	drm->mode_config.min_height = h11p->mode.vdisplay;
++	drm->mode_config.max_height = h11p->mode.vdisplay;
++	drm->mode_config.preferred_depth = 32;
++	drm->mode_config.funcs = &apple_h11p_mode_config_funcs;
++
++	drm_connector_helper_add(&h11p->connector,
++				 &apple_h11p_connector_helper_funcs);
++	ret = drm_connector_init(drm, &h11p->connector,
++				 &apple_h11p_connector_funcs,
++				 DRM_MODE_CONNECTOR_DSI);
++	if (ret)
++		return ret;
++
++	ret = drm_simple_display_pipe_init(drm, &h11p->pipe, &apple_h11p_pipe_funcs,
++					   apple_h11p_formats,
++					   ARRAY_SIZE(apple_h11p_formats), NULL,
++					   &h11p->connector);
++	if (ret)
++		return ret;
++
++	drm_mode_config_reset(drm);
++
++	/*
++	 * simpledrm is on the same framebuffer, so it has to go before this
++	 * driver registers or the two of them fight over the screen.
++	 */
++	ret = aperture_remove_all_conflicting_devices(apple_h11p_driver.name);
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret, "could not take the screen\n");
++
++	ret = drm_dev_register(drm, 0);
++	if (ret)
++		return ret;
++
++	drm_client_setup(drm, NULL);
++
++	return 0;
++}
++
++static void apple_h11p_remove(struct platform_device *pdev)
++{
++	struct apple_h11p *h11p = platform_get_drvdata(pdev);
++
++	drm_dev_unplug(&h11p->drm);
++	drm_atomic_helper_shutdown(&h11p->drm);
++}
++
++static const struct of_device_id apple_h11p_of_table[] = {
++	{ .compatible = "apple,t8020-display-pipe" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, apple_h11p_of_table);
++
++static struct platform_driver apple_h11p_platform_driver = {
++	.probe = apple_h11p_probe,
++	.remove = apple_h11p_remove,
++	.driver = {
++		.name = "apple-h11p",
++		.of_match_table = apple_h11p_of_table,
++	},
++};
++module_platform_driver(apple_h11p_platform_driver);
++
++MODULE_DESCRIPTION("Apple H11P display pipe");
++MODULE_LICENSE("GPL");

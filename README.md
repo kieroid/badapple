@@ -115,8 +115,9 @@ a firmware reset is not enough, and put the phone back in DFU.
 - [x] Device tree for T8020, PMGR domains generated from the ADT
 - [x] Console
   - [x] Framebuffer, handed over by iBoot
-  - [ ] Display driver. The picture is still the one iBoot left, but the
-        pipe takes a new scanout address and the image moves, see
+  - [ ] Display driver. Written, and the pipe takes a new scanout address,
+        but it needs dart-disp0 and Linux's DART driver destroys the mapping
+        iBoot's scanout runs on, see
         [NOTES.md](NOTES.md#display-what-is-known-so-far)
   - [ ] Brightness. It is a DSI command to the panel, so it needs the pipe
   - [x] Notch trimmed out of the framebuffer, 2688 down to 2556
