@@ -1396,8 +1396,8 @@ apple-soc-temp 23b288000.tempsensor: SOC die 2: reads zero, skipped
 
 ## Touch, what it needs
 
-This is what the ADT, the kexts and the firmware file say it takes, and how
-far the phone has got.
+The touchscreen works. This is what the ADT, the kexts and the firmware file
+say it takes, and how the phone got there.
 
 The controller is `/arm-io/spi1/multi-touch`, compatible `hid-transport,k1`,
 `hbpp-version` 261. That is not the Z2 protocol the Touch Bar uses, so
@@ -1553,7 +1553,63 @@ defaults go in, and the CM4 is reset once more with the image valid bit set.
 transfer, since the largest blob is 242 KB, and transfers split into pieces
 under one chip select, since the width of the count registers is unknown.
 
-Next is the HIDSPI transport the firmware speaks once it runs.
+### HIDSPI, and touches
+
+Once the firmware runs it speaks HIDSPI, from `AppleHIDTransportSPI`'s
+`AppleHIDTransportProtocolHIDSPI`. The packet is `applespi`'s and Asahi's
+`spi-hid-apple`'s, only bigger:
+
+```text
+u8   flags      0x20 from the device, 0x40 a request or its response, 0x80 empty
+u8   device     interface: 0 grape, the touchscreen; 1 luna, force; 0xd0 info
+le16 offset, remaining, length
+u8   data[502]
+le16 crc        CRC-16/ARC, Linux's crc16(), over everything before it
+```
+
+A transaction is 4 bytes of padding and the 512 byte packet each way, full
+duplex (`Padding Length` and `Transfer Length` in the firmware's
+`HIDSPI Config`). The host clocks out an empty packet when it has nothing to
+say. Chip select needs 200 us of setup (`CS Delay`, 200000 ns): without it
+some packets come back shifted by a byte. The kext has a status stage
+after real packets, a 32 bit word each way, 0xd56827ac for ACK and
+0x0e4fb139 for NAK, but this firmware answers it with the start of its next
+packet, so it is still there and still not understood.
+
+Inside the data is a message, Asahi's `spihid_msg_hdr`: type, request or
+report id, interface, id, response length and payload length, then the
+payload and a CRC-16 of the message. The firmware sends `a0 80 00 00` on
+interface 0xd0 when it is up. It answers device, interface and descriptor
+requests with an empty payload, which is fine: the HID descriptors are in
+the firmware's `Interface Config` anyway, and nothing has to be enabled for
+touches to come.
+
+**Touches** are messages of type 0x10, report 0x44, on interface 0. The
+payload is the Touch Bar's Z2 report: the finger count at 16 and a 30 byte
+record per finger from 24, which is `apple_z2`'s `struct apple_z2_finger`:
+id, state (3 started, 4 moved), position, deltas, tool and touch size,
+orientation, pressure. Positions are signed, in hundredths of a millimetre
+over the whole panel, notch rows included. Measured: x grows left to right,
+about 250 to 6550 at the edges, and y grows bottom to top, about 450 to
+13900. The device tree says 6890 by 14910, from 1242x2688 at 458 ppi, with
+y inverted.
+
+The driver polls the interrupt line, `aop-gpio` 19, which goes low when
+there is a packet, and also asks every 20 ms in case it only pulses. iOS
+programs it for a falling edge.
+
+Two things that cost a boot each:
+
+- **The SPI block cannot runtime suspend.** Suspended between transfers,
+  `spi1` fails to come back, `Failed to reach power state 0xf (now:
+  0xa4f)`, and every transfer after that times out. `spi-apple`'s legacy
+  mode does not use runtime PM.
+- **No chip select delay** gives packets shifted by one byte, with the CRC
+  wrong, at random.
+
+Left to do: the interrupt as a real interrupt through an AOP pinctrl node,
+power off on remove and suspend, the force sensor on `luna`, and a proper
+calibration rather than four corners.
 
 ### The SPI block is not M1's
 

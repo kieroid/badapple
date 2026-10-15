@@ -98,6 +98,14 @@
 		spi-max-frequency = <4000000>;
 		reset-gpios = <&pinctrl_ap 5 1>;
 		firmware-name = "apple/d331p-mtfw.bin";
+		/*
+		 * Positions come in hundredths of a millimetre over the whole
+		 * panel, notch rows included: 1242x2688 at 458 ppi. Measured on
+		 * the phone, x grows left to right and y bottom to top.
+		 */
+		touchscreen-size-x = <6890>;
+		touchscreen-size-y = <14910>;
+		touchscreen-inverted-y;
 		apple,pmu-bus = <&i2c3>;
 		apple,pmu-addr = <0x2a>;
 	};

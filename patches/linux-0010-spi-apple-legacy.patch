@@ -1,5 +1,5 @@
 diff --git a/drivers/spi/spi-apple.c b/drivers/spi/spi-apple.c
-index 61eefb08d..8c6d87069 100644
+index 61eefb08d..d03a6153c 100644
 --- a/drivers/spi/spi-apple.c
 +++ b/drivers/spi/spi-apple.c
 @@ -11,10 +11,12 @@
@@ -175,13 +175,13 @@ index 61eefb08d..8c6d87069 100644
 +		ctlr->set_cs = apple_spi_set_cs;
 +		ctlr->transfer_one = apple_spi_legacy_transfer_one;
 +		ctlr->use_gpio_descriptors = true;
-+		ctlr->auto_runtime_pm = true;
 +
-+		pm_runtime_set_active(&pdev->dev);
-+		ret = devm_pm_runtime_enable(&pdev->dev);
-+		if (ret < 0)
-+			return ret;
-+
++		/*
++		 * No runtime PM: suspended between transfers, the spi1 power
++		 * domain fails to come back ("Failed to reach power state
++		 * 0xf (now: 0xa4f)") and every transfer after that times
++		 * out. Without it the domain stays on while this is bound.
++		 */
 +		reg_write(spi, APPLE_SPI_CTRL, 0);
 +		reg_write(spi, APPLE_SPI_PIN, APPLE_SPI_PIN_CS);
 +

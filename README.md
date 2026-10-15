@@ -4,7 +4,7 @@ Mainline Linux on the Apple A12 (T8020), on an iPhone XS Max (iPhone11,6,
 D331pAP).
 
 The target is a console and a shell, the same finish line as the A10 and A11
-ports. No touch, wifi, cellular or GPU.
+ports. No wifi, cellular or GPU.
 
 The phone's NAND holds ext4, not iOS. The boot is tethered and reads nothing
 off the flash, so wiping it does not break anything.
@@ -139,7 +139,8 @@ a firmware reset is not enough, and put the phone back in DFU.
   - [x] Comes up on every boot, the gadget replugs itself until the host takes it
   - [ ] Why the first attach fails at all. Worked around, not understood
 - [ ] cpufreq. Needs the PMP/CLPC coprocessor that completes transitions
-- [ ] Touch. The controller boots its firmware, no touch events yet
+- [x] Touch, multitouch through `/dev/input/event1`
+  - [ ] A real interrupt instead of polling, power off, force sensing
 - [ ] Wifi, cellular, GPU, audio
 - [ ] Anything upstream
 
