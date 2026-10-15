@@ -137,7 +137,7 @@ a firmware reset is not enough, and put the phone back in DFU.
   - [x] Comes up on every boot, the gadget replugs itself until the host takes it
   - [ ] Why the first attach fails at all. Worked around, not understood
 - [ ] cpufreq. Needs the PMP/CLPC coprocessor that completes transitions
-- [ ] Touch. SPI bus works, the controller does not answer yet
+- [ ] Touch. The controller powers up and answers, firmware not loaded yet
 - [ ] Wifi, cellular, GPU, audio
 - [ ] Anything upstream
 

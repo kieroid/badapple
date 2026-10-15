@@ -1484,32 +1484,46 @@ while the reply comes back.
 
 ### Touch on the phone so far
 
-`patches/linux-0009` is a bring-up probe, and the touchscreen node is
-disabled. What it showed:
+`patches/linux-0009` is a bring-up probe. It powers the controller, reads
+one word from its bootloader, and powers it down again. On every boot:
 
-- **iBoot's state.** Reset pin 5 is a GPIO output driven low, chip select
-  pin 67 an output driven high, the touch clock `800002ee` (off), Acorn
-  register 0x05 is 0x40. Acorn answers at 0x2a, so that is a 7 bit address.
-- **The SPI pins are muxed.** 64, 65 and 66 are in peripheral function 1, next
-  to chip select. 66 is an input with a pull-down, so that is MISO.
-- **The clock enables** once the register is mapped non-posted:
-  `00080001`. A posted write to PMGR is dropped without an error.
-- **The SPI block is the older one.** See below.
-- **The chip never answers.** With the rails on (0x46), the clock running
-  and reset released at either polarity, MISO stays at its pull-down and the
-  interrupt line, `aop-gpio` 19 with a pull-up, stays high. Nothing on the
-  chip side moves at all.
+```text
+apple-mt-spi spi0.0: controller answered, error word 00000000
+```
 
-So the chip is not running, rather than the protocol being wrong. Left to
-check: whether bit 0x40 has to be cleared, whether there is a digital supply
-outside the ADT's power sequence (the firmware config says `Always Powered`,
-which may mean the AOP keeps it up on iOS), and whether the clock reaches the
-chip.
+That is the bootloader's `ReadOnError` word reading zero, with a good
+checksum. Getting there took six things, and missing any one leaves the chip
+completely silent: MISO at its pull-down and the interrupt line high.
 
-The first version of the probe tried four power-ons back to back, with the
-pulldown bit set and cleared, and the phone crashed with the screen flashing.
-Every later boot left 0x40 alone and was fine, so clearing 0x40 is the main
-suspect. Not confirmed.
+1. **Acorn's own start.** `AppleAcornDisplayPMU` writes 0x80 to register 4,
+   which clears a latched UVLO flag, then copies the ADT's display-pmu
+   properties into registers: `seq_cfg` to 0x20 through `vh_seq` to 0x27,
+   `bst_cfg` 0x2c, `cp23_cfg` 0x2d, `cp1_cfg` 0x2e, and `enable` to 0x05.
+   This ADT only has `seq_trg` = 4 and `enable` = 9. iBoot leaves 0x05 at
+   0x40, and touch does not answer until bits 0 and 3 are set.
+2. **The power sequence, read correctly.** Each entry is a function name and
+   four bytes: assert ms, deassert ms, the value on power on, the value on
+   power off. `power_pulldown` is 0,0,0,1, so the 0x40 pulldown is cleared at
+   power on and set at power off, which is the state iBoot leaves.
+   `power_ana` is 0,0,1,0. Register 0x05 ends at 0x0f.
+3. **The clock,** 10 ms after the rails: PMGR 0x23b078000, mapped
+   non-posted, or the write is dropped without an error.
+4. **Reset is active low.** iBoot leaves pin 5 low with the chip unpowered.
+   Released, the chip pulls its interrupt line, `aop-gpio` 19, low within a
+   millisecond.
+5. **The SPI block in master mode and MSB first,** see below.
+6. **Chip select dropped between command and reply,** as the kext does it.
+   Held, the reply comes two bytes late.
+
+The interrupt pin is useless for watching this as iBoot leaves it: mode 0,
+where the data bit does not follow the pin. Mode 7, input with the interrupt
+off, does.
+
+An early version of the probe crashed the phone with the screen flashing.
+Clearing 0x40 on its own was ruled out later, so the cause is still unknown.
+Every boot since has been clean.
+
+Next is replaying the firmware's boot script.
 
 ### The SPI block is not M1's
 
@@ -1525,7 +1539,7 @@ nothing from 0x10c up. From `AppleSamsungSPI`:
 | clear flags | write 0x40000f to `STATUS` |
 | master mode | `CFG` bits 4:3, both set |
 | always set | `CFG` bit 14 |
-| set by default, taken to be MSB first | `CFG` bit 13 |
+| LSB first, as on M1 | `CFG` bit 13 |
 | start | `CTRL` = 0xd, run and both FIFO resets |
 
 `spi-apple` waits on 0x134 and never sets master mode, so on this block it
@@ -1533,6 +1547,10 @@ fills the FIFO and times out. `patches/linux-0010` adds a polled mode for it,
 selected by `apple,t8020-spi`, and transfers complete. Version 0 is the same
 with 4 bit levels at bits 7:4 and 11:8 and a depth of 8, which is the layout
 openiBoot used.
+
+Bit 13 cost a boot: `AppleSamsungSPI` sets it by default, which looked like
+it had to mean MSB first. It does not. With it set, the chip answered
+`f2 81`, which is `4f 81`, a valid HBPP status, with every byte bit reversed.
 
 What is left to reverse: the `grape` touch report format.
 

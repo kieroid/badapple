@@ -84,12 +84,10 @@
 };
 
 /*
- * Bring-up only: the driver powers the controller, boots nothing, and checks
- * that it answers. Reset is pin 5 and the power comes from the Acorn display
- * PMU at 0x2a on i2c3, both from /arm-io/spi1/multi-touch in the ADT.
- *
- * Disabled: the controller does not answer yet, and the probe adds about 15
- * seconds to every boot. See "Touch" in NOTES.md.
+ * Bring-up only: the driver powers the controller, reads one word from its
+ * bootloader, and powers it down again. Reset is pin 5, active low, and the
+ * power comes from the Acorn display PMU at 0x2a on i2c3, all from
+ * /arm-io/spi1/multi-touch in the ADT. See "Touch" in NOTES.md.
  */
 &spi1 {
 	status = "okay";
@@ -98,10 +96,9 @@
 		compatible = "apple,t8020-multitouch";
 		reg = <0>;
 		spi-max-frequency = <1000000>;
-		reset-gpios = <&pinctrl_ap 5 0>;
+		reset-gpios = <&pinctrl_ap 5 1>;
 		apple,pmu-bus = <&i2c3>;
 		apple,pmu-addr = <0x2a>;
-		status = "disabled";
 	};
 };
 
