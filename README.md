@@ -78,7 +78,9 @@ Apple never signed, and wraps the device tree and an empty trustcache for
 make images IPSW=/path/to/unpacked/ipsw
 ```
 
-Everything lands in `build/iboot/`. Any manifest does once iBSS is patched, so
+Everything lands in `build/iboot/`, along with the touch controller firmware,
+which `make boot` adds to the initramfs. That firmware is Apple's and never
+leaves `build/`. Any manifest does once iBSS is patched, so
 the IM4M is Hoolock's `0x8015.im4m`. There is no `0x8020` template and there
 cannot be: from A11 on a manifest is tied to the device's own ECID.
 
@@ -137,7 +139,7 @@ a firmware reset is not enough, and put the phone back in DFU.
   - [x] Comes up on every boot, the gadget replugs itself until the host takes it
   - [ ] Why the first attach fails at all. Worked around, not understood
 - [ ] cpufreq. Needs the PMP/CLPC coprocessor that completes transitions
-- [ ] Touch. The controller powers up and answers, firmware not loaded yet
+- [ ] Touch. The controller boots its firmware, no touch events yet
 - [ ] Wifi, cellular, GPU, audio
 - [ ] Anything upstream
 

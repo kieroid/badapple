@@ -33,10 +33,10 @@ index bfd9de833..de76bf1fc 100644
  obj-$(CONFIG_TOUCHSCREEN_ATMEL_MXT)	+= atmel_mxt_ts.o
 diff --git a/drivers/input/touchscreen/apple-mt-spi.c b/drivers/input/touchscreen/apple-mt-spi.c
 new file mode 100644
-index 000000000..dd2031141
+index 000000000..f3a357894
 --- /dev/null
 +++ b/drivers/input/touchscreen/apple-mt-spi.c
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,615 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple multitouch over SPI, as found on T8020
@@ -44,21 +44,29 @@ index 000000000..dd2031141
 + * Copyright (c) 2026 kiki <kieran@lavato.net>
 + *
 + * Bring-up only, not a touchscreen driver yet. This powers the controller the
-+ * way iOS does, takes it out of reset, reads one word from its bootloader over
-+ * HBPP, logs the answer, and powers it down again, leaving the PMU, the clock
-+ * and the reset pin as iBoot left them. The firmware boot script comes next.
++ * way iOS does, takes it out of reset, checks its bootloader answers over
++ * HBPP, then replays the firmware's boot script. On success it leaves the
++ * controller running; on any failure it puts the PMU, the clock and the reset
++ * pin back as iBoot left them.
++ *
++ * The firmware is Apple's, so it is not here. tools/mtfw.py turns the one in
++ * the IPSW into the op list this reads.
 + *
 + * Where every number here comes from is in "Touch" in the project NOTES.md.
 + */
 +
 +#include <linux/delay.h>
++#include <linux/firmware.h>
 +#include <linux/gpio/consumer.h>
 +#include <linux/i2c.h>
 +#include <linux/io.h>
 +#include <linux/iopoll.h>
 +#include <linux/module.h>
 +#include <linux/of.h>
++#include <linux/property.h>
++#include <linux/slab.h>
 +#include <linux/spi/spi.h>
++#include <linux/unaligned.h>
 +
 +/* Acorn display PMU registers, from AppleAcornDisplayPMU. */
 +#define ACORN_STATUS		0x04
@@ -91,6 +99,25 @@ index 000000000..dd2031141
 +
 +#define HBPP_LEN		8
 +
++/* Acknowledges, AHTProtocol for hbpp-version 0x105, +0x58 and +0x60. */
++#define HBPP_ACK_WRITE		0x4bc1
++#define HBPP_ACK_RMW		0x4ad1
++
++/* tools/mtfw.py */
++#define MTFW_MAGIC		0x5746544d	/* "MTFW" */
++#define MTFW_OP_WRITE		1
++#define MTFW_OP_RMW		2
++#define MTFW_OP_POLL		3
++#define MTFW_RMW_SKIP_CHECK	BIT(0)
++
++struct mtfw_op {
++	__le16 type;
++	__le16 flags;
++	__le32 len;
++	__le32 addr;
++	__le32 arg[];
++};
++
 +struct apple_mt {
 +	struct device *dev;
 +	struct spi_device *spi;
@@ -100,6 +127,7 @@ index 000000000..dd2031141
 +	void __iomem *clk;
 +	u8 *tx;
 +	u8 *rx;
++	u8 *pkt;
 +};
 +
 +static int acorn_read(struct apple_mt *mt, u8 reg)
@@ -286,6 +314,201 @@ index 000000000..dd2031141
 +	return 0;
 +}
 +
++/* The 1a a1 acknowledge, in a transfer of its own. */
++static int hbpp_ack(struct apple_mt *mt, u16 *ack)
++{
++	struct spi_transfer xfer = {
++		.tx_buf = mt->tx,
++		.rx_buf = mt->rx,
++		.len = 2,
++	};
++	int ret;
++
++	usleep_range(250, 300);
++	mt->tx[0] = 0x1a;
++	mt->tx[1] = 0xa1;
++	ret = spi_sync_transfer(mt->spi, &xfer, 1);
++	*ack = mt->rx[0] << 8 | mt->rx[1];
++
++	return ret;
++}
++
++/*
++ * A blob: 30 01, the length in words less one, the address, a sum of those,
++ * then the payload in the same swapped halves and a 32 bit sum of its bytes.
++ * The same layout apple_z2 uses, except for the length.
++ */
++static int hbpp_write(struct apple_mt *mt, u32 addr, const u8 *data, u32 len)
++{
++	u8 *p = mt->pkt;
++	u32 sum = 0, i;
++	u16 hsum, ack;
++	int ret;
++
++	if (!len || len % 4)
++		return -EINVAL;
++
++	p[0] = 0x30;
++	p[1] = 0x01;
++	p[2] = (len / 4 - 1) >> 8;
++	p[3] = len / 4 - 1;
++	hbpp_put32(p + 4, addr);
++	hsum = hbpp_sum(p + 2, 6);
++	p[8] = hsum >> 8;
++	p[9] = hsum;
++
++	for (i = 0; i < len; i += 4) {
++		p[10 + i] = data[i + 1];
++		p[11 + i] = data[i];
++		p[12 + i] = data[i + 3];
++		p[13 + i] = data[i + 2];
++		sum += data[i] + data[i + 1] + data[i + 2] + data[i + 3];
++	}
++	hbpp_put32(p + 10 + len, sum);
++
++	ret = spi_write(mt->spi, p, 14 + len);
++	if (ret)
++		return ret;
++
++	ret = hbpp_ack(mt, &ack);
++	if (ret)
++		return ret;
++	if (ack != HBPP_ACK_WRITE) {
++		dev_err(mt->dev, "write %08x, %u bytes: ack %04x\n", addr, len, ack);
++		return -EIO;
++	}
++
++	return 0;
++}
++
++/* 1e 33, the address, the mask, the value, and a sum of all three. */
++static int hbpp_rmw(struct apple_mt *mt, u32 addr, u32 mask, u32 value,
++		    bool check)
++{
++	u16 sum, ack;
++	int ret;
++
++	mt->tx[0] = 0x1e;
++	mt->tx[1] = 0x33;
++	hbpp_put32(mt->tx + 2, addr);
++	hbpp_put32(mt->tx + 6, mask);
++	hbpp_put32(mt->tx + 10, value);
++	sum = hbpp_sum(mt->tx + 2, 12);
++	mt->tx[14] = sum >> 8;
++	mt->tx[15] = sum;
++
++	ret = spi_write(mt->spi, mt->tx, 16);
++	if (ret)
++		return ret;
++
++	/* The acknowledge is clocked out either way, only the check is skipped. */
++	ret = hbpp_ack(mt, &ack);
++	if (ret)
++		return ret;
++	if (check && ack != HBPP_ACK_RMW) {
++		dev_err(mt->dev, "rmw %08x: ack %04x\n", addr, ack);
++		return -EIO;
++	}
++
++	return 0;
++}
++
++static int hbpp_poll(struct apple_mt *mt, u32 addr, u32 mask, u32 value,
++		     u32 timeout_ms, u32 read_on_error)
++{
++	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_ms);
++	u32 v;
++	int ret;
++
++	for (;;) {
++		ret = hbpp_read_word(mt, addr, &v);
++		if (ret)
++			return ret;
++		if ((v & mask) == value)
++			return 0;
++		if (time_after(jiffies, deadline))
++			break;
++		usleep_range(1000, 2000);
++	}
++
++	dev_err(mt->dev, "poll %08x & %08x == %08x timed out, last %08x\n",
++		addr, mask, value, v);
++	if (read_on_error != ~0U && !hbpp_read_word(mt, read_on_error, &v))
++		dev_err(mt->dev, "error word %08x = %08x\n", read_on_error, v);
++
++	return -ETIMEDOUT;
++}
++
++/* Replay tools/mtfw.py's op list, the firmware's boot script. */
++static int apple_mt_boot(struct apple_mt *mt, const struct firmware *fw)
++{
++	const u8 *pos = fw->data + 12, *end = fw->data + fw->size;
++	const struct mtfw_op *op;
++	u32 count, len, biggest = 0, i;
++	int ret = 0;
++
++	if (fw->size < 12 || get_unaligned_le32(fw->data) != MTFW_MAGIC ||
++	    get_unaligned_le32(fw->data + 4) != 1)
++		return -EINVAL;
++	count = get_unaligned_le32(fw->data + 8);
++
++	/* Check the whole list first, and size the packet buffer. */
++	for (i = 0; i < count; i++) {
++		if (end - pos < sizeof(*op))
++			return -EINVAL;
++		op = (const void *)pos;
++		len = le32_to_cpu(op->len);
++		if (len < 4 || len % 4 || end - pos - 8 < len)
++			return -EINVAL;
++		if (le16_to_cpu(op->type) == MTFW_OP_WRITE)
++			biggest = max(biggest, len - 4);
++		pos += 8 + len;
++	}
++	if (pos != end)
++		return -EINVAL;
++
++	mt->pkt = kmalloc(biggest + 14, GFP_KERNEL);
++	if (!mt->pkt)
++		return -ENOMEM;
++
++	pos = fw->data + 12;
++	for (i = 0; i < count && !ret; i++) {
++		op = (const void *)pos;
++		len = le32_to_cpu(op->len);
++
++		switch (le16_to_cpu(op->type)) {
++		case MTFW_OP_WRITE:
++			ret = hbpp_write(mt, le32_to_cpu(op->addr),
++					 (const u8 *)op->arg, len - 4);
++			break;
++		case MTFW_OP_RMW:
++			ret = len < 12 ? -EINVAL :
++			      hbpp_rmw(mt, le32_to_cpu(op->addr),
++				       le32_to_cpu(op->arg[0]), le32_to_cpu(op->arg[1]),
++				       !(le16_to_cpu(op->flags) & MTFW_RMW_SKIP_CHECK));
++			break;
++		case MTFW_OP_POLL:
++			ret = len < 20 ? -EINVAL :
++			      hbpp_poll(mt, le32_to_cpu(op->addr),
++					le32_to_cpu(op->arg[0]), le32_to_cpu(op->arg[1]),
++					le32_to_cpu(op->arg[2]), le32_to_cpu(op->arg[3]));
++			break;
++		default:
++			ret = -EINVAL;
++		}
++
++		if (ret)
++			dev_err(mt->dev, "boot script stopped at op %u of %u: %d\n",
++				i + 1, count, ret);
++		pos += 8 + len;
++	}
++
++	kfree(mt->pkt);
++	mt->pkt = NULL;
++
++	return ret;
++}
++
 +static void apple_mt_unmap(void *addr)
 +{
 +	iounmap(addr);
@@ -296,6 +519,8 @@ index 000000000..dd2031141
 +	struct device *dev = &spi->dev;
 +	struct device_node *np;
 +	struct apple_mt *mt;
++	const struct firmware *fw = NULL;
++	const char *fw_name;
 +	int ldo_orig, seq_orig, ret;
 +	u32 clk_orig, addr, val;
 +
@@ -337,6 +562,10 @@ index 000000000..dd2031141
 +		return ret;
 +	mt->pmu_addr = addr;
 +
++	ret = device_property_read_string(dev, "firmware-name", &fw_name);
++	if (ret)
++		return ret;
++
 +	np = of_parse_phandle(dev->of_node, "apple,pmu-bus", 0);
 +	if (!np)
 +		return -ENODEV;
@@ -369,10 +598,23 @@ index 000000000..dd2031141
 +		ret = hbpp_read_word(mt, HBPP_PROBE_ADDR, &val);
 +	}
 +
-+	if (ret)
++	if (ret) {
 +		dev_err(dev, "controller did not answer: %d\n", ret);
-+	else
++	} else {
 +		dev_info(dev, "controller answered, error word %08x\n", val);
++
++		ret = request_firmware(&fw, fw_name, dev);
++		if (ret)
++			dev_err(dev, "no %s: %d\n", fw_name, ret);
++		else
++			ret = apple_mt_boot(mt, fw);
++		release_firmware(fw);
++
++		if (!ret) {
++			dev_info(dev, "boot script done, controller running\n");
++			goto put_pmu;
++		}
++	}
 +
 +	/* Back as iBoot left it. */
 +	apple_mt_power_off(mt);

@@ -1473,14 +1473,20 @@ fields go as two 16 bit halves, low half first, each high byte first, so
 0x400b0fd4 is sent `0f d4 40 0b`. Checksums are byte sums sent high byte
 first. `apple_z2` already writes blobs the same way, command 0x3001.
 
+`hbpp-version` picks the protocol class, 0x103, 0x104 or 0x105, and this
+phone is 0x105. Every command is followed by `1a a1` in a transfer of its own,
+chip select dropped in between, and the reply comes back on that.
+
 | command | sent | reply |
 |---|---|---|
+| write | `30 01`, length in words less one, address, sum of bytes 2 to 7, payload, 32 bit sum of the payload bytes | `4b c1` |
+| read-modify-write | `1e 33`, address, mask, value, sum of bytes 2 to 13 | `4a d1` |
 | read word | `1c 73`, address, sum of the address bytes | `4c 39`, value, sum of the value bytes |
-| read-modify-write | `1e 33`, address, mask, value, sum of bytes 2 to 13 | |
-| status | `1a a1`, then `18 e1` filler | `4b c1`, `4a d1`, `49 69`, `48 79` or `1f 01` |
 
-A read is two transfers: the 8 byte command, then `1a a1 18 e1 18 e1 18 e1`
-while the reply comes back.
+A read clocks out `1a a1 18 e1 18 e1 18 e1` to collect its 8 byte reply. The
+write payload goes in the same swapped halves as the address, and one packet
+carries up to 0x40000 bytes. It is `apple_z2`'s layout except for the length,
+which `AppleHIDTransportSPI` takes one off for this version.
 
 ### Touch on the phone so far
 
@@ -1523,7 +1529,31 @@ An early version of the probe crashed the phone with the screen flashing.
 Clearing 0x40 on its own was ruled out later, so the cause is still unknown.
 Every boot since has been clean.
 
-Next is replaying the firmware's boot script.
+### The boot script runs
+
+`tools/mtfw.py` turns the plist into a list of 40 ops, 393 KB, and
+`make images` packs it into the initramfs as
+`/lib/firmware/apple/d331p-mtfw.bin`. m1n1 only keeps the last initramfs it
+finds, so it is appended to Hoolock's inside one gzip stream, which Linux
+reads as two archives back to back. The driver replays it in about 2.6
+seconds at 4 MHz:
+
+```text
+apple-mt-spi spi0.0: controller answered, error word 00000000
+apple-mt-spi spi0.0: boot script done, controller running
+```
+
+What the script does: the boot config, vectors and bootloader go in, the
+Cortex-M4 is pulsed out of reset, four FIFO blocks at 0x140000 are cleared,
+the DCS images and calibration stream through them a block at a time with a
+ready bit set and a done bit polled, `luna_d33.bin` and the calibration
+defaults go in, and the CM4 is reset once more with the image valid bit set.
+
+`spi-apple` needed two more things for it: a timeout that grows with the
+transfer, since the largest blob is 242 KB, and transfers split into pieces
+under one chip select, since the width of the count registers is unknown.
+
+Next is the HIDSPI transport the firmware speaks once it runs.
 
 ### The SPI block is not M1's
 

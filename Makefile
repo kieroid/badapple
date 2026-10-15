@@ -50,6 +50,7 @@ IM4M := build/hoolock-docs/binaries/im4m/0x8015.im4m
 IPSW     ?=
 IBSS_IM4P = $(firstword $(wildcard $(IPSW)/Firmware/dfu/iBSS.d331p*.im4p))
 ADT_IM4P  = $(firstword $(wildcard $(IPSW)/Firmware/all_flash/DeviceTree.d331pap*.im4p))
+MTFW_IM4P = $(firstword $(wildcard $(IPSW)/Firmware/D331p_Multitouch.im4p))
 
 # console=tty0 is the framebuffer m1n1 hands over, which is readable on the
 # phone itself. The shell arrives separately over the USB gadget. earlycon
@@ -155,7 +156,8 @@ $(INITRAMFS):
 # One time, from an unpacked IPSW. iBSS is patched so it will load a payload
 # Apple never signed; the trustcache is 24 bytes of header with no entries,
 # which is all iBoot wants here.
-images: $(IBOOT)/iBSS.patched.raw $(IBOOT)/devicetree.img4 $(IBOOT)/trustcache.img4
+images: $(IBOOT)/iBSS.patched.raw $(IBOOT)/devicetree.img4 $(IBOOT)/trustcache.img4 \
+	$(IBOOT)/mtfw.cpio
 
 $(IBOOT):
 	mkdir -p $@
@@ -170,6 +172,17 @@ $(IBOOT)/DeviceTree.bin: | $(IBOOT)
 
 $(IBOOT)/iBSS.patched.raw: $(IBOOT)/iBSS.raw tools/iboot-image4-patch.py
 	python3 tools/iboot-image4-patch.py $< $@
+
+# The touch controller's firmware, as the op list apple-mt-spi replays, in a
+# cpio that gets added to the initramfs. Apple's, so it never leaves build/.
+$(IBOOT)/mtfw.cpio: tools/mtfw.py | $(IBOOT)
+	@test -n "$(MTFW_IM4P)" || { echo "set IPSW=<unpacked ipsw dir>"; exit 1; }
+	ipsw img4 im4p extract -o $(IBOOT)/mtfw.plist $(MTFW_IM4P)
+	rm -rf $(IBOOT)/mtfw-root
+	mkdir -p $(IBOOT)/mtfw-root/lib/firmware/apple
+	python3 tools/mtfw.py $(IBOOT)/mtfw.plist \
+	    $(IBOOT)/mtfw-root/lib/firmware/apple/d331p-mtfw.bin
+	cd $(IBOOT)/mtfw-root && find . | cpio -o -H newc > ../mtfw.cpio
 
 $(IBOOT)/empty_trustcache.bin: | $(IBOOT)
 	printf '\x01\x00\x00\x00\x6e\x17\x68\x17\x88\x2d\x44\x40\x83\xb6\xf3\x22\x06\xbc\x4f\x17\x00\x00\x00\x00' > $@
@@ -195,10 +208,18 @@ $(IBOOT)/kernelcache-m1n1.img4: $(M1N1) FORCE | $(IBOOT)
 # FORCE because BOOTARGS is not a file: without it an override on the command
 # line, say to add initcall_debug for one boot, is silently ignored whenever
 # the kernel itself has not changed. Packing costs a couple of seconds.
-$(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(INITRAMFS) FORCE | $(IBOOT)
+# m1n1 keeps only the last initramfs it finds, so the touch firmware cannot be
+# a second payload. Linux reads cpio archives back to back in one stream,
+# though, so it goes on the end of Hoolock's, inside the same gzip.
+BOOT_INITRAMFS = $(if $(wildcard $(IBOOT)/mtfw.cpio),$(IBOOT)/initramfs-mtfw.gz,$(INITRAMFS))
+
+$(IBOOT)/initramfs-mtfw.gz: $(INITRAMFS) $(IBOOT)/mtfw.cpio
+	{ gzip -dc $(INITRAMFS); cat $(IBOOT)/mtfw.cpio; } | gzip -9 > $@
+
+$(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(BOOT_INITRAMFS) FORCE | $(IBOOT)
 	{ cat $(M1N1); \
 	  echo 'chosen.bootargs=$(BOOTARGS)'; \
-	  cat $(DTB) $(IMAGE) $(INITRAMFS); } > $(MACHO)
+	  cat $(DTB) $(IMAGE) $(BOOT_INITRAMFS); } > $(MACHO)
 	ipsw img4 create --input $(MACHO) --type rkrn --compress lzss \
 	    --extra $(MONITOR) --im4m $(IM4M) --output $@
 	@echo "built $@ ($$(stat -c%s $@) bytes)"
