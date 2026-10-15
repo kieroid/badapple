@@ -60,7 +60,7 @@ cmd() {
 
 for f in "$IBSS" "$RDTR" "$RTSC" "$KRNL"; do
 	[ -f "$f" ] || {
-		echo "missing $f, see NOTES.md for how these are built"
+		echo "missing $f, see README.md"
 		exit 1
 	}
 done
