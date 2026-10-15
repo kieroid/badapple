@@ -983,8 +983,7 @@ for its own children. Upstream Apple device trees are shaped the same way.
 
 ## Display, what is known so far
 
-A driver takes the screen from simpledrm and the console shows on the panel,
-in the wrong colours. See [the driver](#the-driver-works-and-why-the-panel-was-black)
+A driver takes the screen from simpledrm and the console shows on the panel. See [the driver](#the-driver-works-and-why-the-panel-was-black)
 and [the write aperture](#writes-go-to-the-alias-at-0x230200000-not-to-0x230000000).
 
 **Every Linux piece except the pipe already exists.** The names in the ADT are
@@ -1192,8 +1191,8 @@ Two hypotheses died on the way, both worth not repeating:
 `drm_simple_display_pipe` plus the GEM DMA helpers. It reads the mode from
 0x50080 and the stride from 0x50060, takes the screen off simpledrm, and
 programs surface and stride through the write aperture. fbcon binds to it and
-the console shows on the panel, cyan because of the
-[pixel format](#the-pixel-format).
+the console shows on the panel. See [the pixel format](#the-pixel-format) for
+how it got its colours right.
 
 **The black panel was the power domains.** The driver attached all eight
 disp0 domains with `devm_pm_domain_attach_list(dev, NULL, ...)`. With no flags
@@ -1259,12 +1258,20 @@ Not yet shown over several boots.
 ### The pixel format
 
 The pipe scans XRGB2101010. The boot args report depth 0x2001e, low half 30,
-and 0x0000ff00 written into the scanout shows blue, not green. fbdev picks its
-format from a colour mode, and mode 30 maps to 30 bits per pixel rather than
-the 32 that XRGB2101010 uses, so it can never ask for it. The driver offers
-XRGB8888 as well, fbcon takes that, and the pipe reads 8888 pixels as 2101010:
-white comes out cyan. The fix is the format word at 0x5001c, whose encoding
-is not worked out yet.
+and 0x0000ff00 written into the scanout shows blue, not green.
+
+fbdev picks its format from a single colour mode number, and before
+`patches/linux-0008` it could not ask for this one: mode 30 mapped to 30 bits
+per pixel instead of 32, so the lookup failed, and the fbdev colour fields had
+no case for depth 30, so the text would have been black. Passing a fourcc to
+`drm_client_setup()` does not help either, because it turns the format back
+into a colour mode from the bpp alone, and 32 always means XRGB8888.
+
+The patch adds both cases, and the driver sets `preferred_depth` to 30. The
+console is white. Before that fbcon drew XRGB8888 into a 2101010 pipe and white
+came out cyan, which is still what userspace gets if it picks XRGB8888.
+Fixing that means the format word at 0x5001c, whose encoding is not worked out
+yet.
 
 **ramoops does not work here, do not try it again.** The config has everything
 (`PSTORE_RAM`, `PSTORE_CONSOLE`) and a `ramoops@8e4000000` reserved region

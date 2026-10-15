@@ -117,7 +117,7 @@ a firmware reset is not enough, and put the phone back in DFU.
   - [x] Framebuffer, handed over by iBoot
   - [x] Display driver, see
         [NOTES.md](NOTES.md#the-driver-works-and-why-the-panel-was-black)
-  - [ ] Display colours. White shows as cyan
+  - [x] Display colours on the console
   - [ ] Brightness, a DSI command to the panel
   - [x] Notch trimmed out of the framebuffer, 2688 down to 2556
 - [x] AIC interrupts, including fast IPIs

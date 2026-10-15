@@ -36,10 +36,10 @@ index 48d30bf61..2fd47771f 100644
  obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
 diff --git a/drivers/gpu/drm/tiny/apple-h11p.c b/drivers/gpu/drm/tiny/apple-h11p.c
 new file mode 100644
-index 000000000..eb7ce88b5
+index 000000000..b41231b98
 --- /dev/null
 +++ b/drivers/gpu/drm/tiny/apple-h11p.c
-@@ -0,0 +1,527 @@
+@@ -0,0 +1,526 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple H11P display pipe, as found on T8020
@@ -291,15 +291,14 @@ index 000000000..eb7ce88b5
 + * not the green it would be under XRGB8888, which is what those bits mean
 + * read as XRGB2101010.
 + *
-+ * XRGB8888 is here anyway, and it is what fbdev will pick, because fbdev
-+ * cannot ask for XRGB2101010: it chooses by colour mode, and mode 30 maps to
-+ * 30 bits per pixel rather than the 32 that format actually uses, so the
-+ * lookup fails and the console gets nothing at all.
++ * fbdev gets XRGB2101010 through preferred_depth 30, which needs two small
++ * fixes in the DRM core: colour mode 30 used to map to 30 bits per pixel, and
++ * the fbdev colour fields had no case for depth 30.
 + *
-+ * ponytail: so the console renders 8888 into a buffer the pipe reads as
-+ * 2101010, which is readable with the colours wrong, white coming out cyan.
-+ * Fixing it properly means programming the format register at 0x5001c, whose
-+ * encoding is not worked out yet, see NOTES.md.
++ * XRGB8888 stays for userspace that only knows that format. Its pixels are
++ * read as 2101010 too, so its colours come out wrong, white as cyan. Fixing
++ * that means programming the format word at 0x5001c, whose encoding is not
++ * worked out yet, see NOTES.md.
 + */
 +static const u32 apple_h11p_formats[] = {
 +	DRM_FORMAT_XRGB8888,
@@ -504,7 +503,7 @@ index 000000000..eb7ce88b5
 +	drm->mode_config.max_width = h11p->mode.hdisplay;
 +	drm->mode_config.min_height = h11p->mode.vdisplay;
 +	drm->mode_config.max_height = h11p->mode.vdisplay;
-+	drm->mode_config.preferred_depth = 32;
++	drm->mode_config.preferred_depth = 30;
 +	drm->mode_config.funcs = &apple_h11p_mode_config_funcs;
 +
 +	drm_connector_helper_add(&h11p->connector,
