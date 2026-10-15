@@ -4,7 +4,7 @@ Mainline Linux on the Apple A12 (T8020), on an iPhone XS Max (iPhone11,6,
 D331pAP).
 
 The target is a console and a shell, the same finish line as the A10 and A11
-ports. No display driver, touch, wifi, cellular or GPU.
+ports. No touch, wifi, cellular or GPU.
 
 The phone's NAND holds ext4, not iOS. The boot is tethered and reads nothing
 off the flash, so wiping it does not break anything.
@@ -115,10 +115,10 @@ a firmware reset is not enough, and put the phone back in DFU.
 - [x] Device tree for T8020, PMGR domains generated from the ADT
 - [x] Console
   - [x] Framebuffer, handed over by iBoot
-  - [ ] Display driver. Owns the screen without crashing, panel still black,
-        see [NOTES.md](NOTES.md#display-what-is-known-so-far)
-  - [ ] Display colours. The pipe is 30 bit and fbdev can only ask for 32
-  - [ ] Brightness. It is a DSI command to the panel, so it needs the pipe
+  - [x] Display driver, see
+        [NOTES.md](NOTES.md#the-driver-works-and-why-the-panel-was-black)
+  - [ ] Display colours. White shows as cyan
+  - [ ] Brightness, a DSI command to the panel
   - [x] Notch trimmed out of the framebuffer, 2688 down to 2556
 - [x] AIC interrupts, including fast IPIs
 - [x] SMP on all six cores

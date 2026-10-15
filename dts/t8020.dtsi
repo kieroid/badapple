@@ -448,10 +448,10 @@
 		 * and the mirror starts 0x200000 in, so they would overlap.
 		 * Everything either view needs is in the first 0xf0000.
 		 *
-		 * Every disp0 power domain is already on, left that way by
-		 * iBoot, but something has to claim them or they get switched
-		 * off as unused and the picture dies partway through boot.
-		 * That used to be the framebuffer node's job.
+		 * iBoot leaves every disp0 domain on and the framebuffer node
+		 * holds them while simpledrm runs. The driver evicts simpledrm,
+		 * so it has to hold them itself first, and with links that are
+		 * active, or they go off the moment simpledrm lets go.
 		 *
 		 * No dart-disp0 node, and that is not an omission. The ADT
 		 * points disp0 at that DART, but its TTBRs are invalid by
@@ -473,13 +473,6 @@
 					<&ps_disp0_hilo>, <&ps_mipi_dsi>;
 			power-domain-names = "busif", "fe", "be", "gp0",
 					     "gp1", "ppp", "hilo", "mipi";
-
-			/*
-			 * Disabled. The driver takes the screen and the phone
-			 * stays up, but the panel is black and boots are not
-			 * reliably repeatable. See "Display" in NOTES.md.
-			 */
-			status = "disabled";
 		};
 
 		/*

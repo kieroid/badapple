@@ -983,9 +983,9 @@ for its own children. Upstream Apple device trees are shaped the same way.
 
 ## Display, what is known so far
 
-No driver yet, but the pipe is under control: the scanout address can be
-changed and the picture moves, which is the hard part. See [the write
-aperture](#writes-go-to-the-alias-at-0x230200000-not-to-0x230000000).
+A driver takes the screen from simpledrm and the console shows on the panel,
+in the wrong colours. See [the driver](#the-driver-works-and-why-the-panel-was-black)
+and [the write aperture](#writes-go-to-the-alias-at-0x230200000-not-to-0x230000000).
 
 **Every Linux piece except the pipe already exists.** The names in the ADT are
 the same ones the Touch Bar on M1 uses, which is the hardware the `adp` driver
@@ -1103,12 +1103,10 @@ Outside GenPipe, from `swap_flush_stream` and the layer setup it calls:
 | 0x8cdc + layer*4 | per layer enable and format, four layers |
 | 0x8cec + layer*4 | per layer size pair |
 
-**What this means for a driver.** The surface address is 32 bits masked to 64
-bytes, so it is an IOVA through `dart-disp0` and not a physical address. A
-minimal driver does not have to program any of the format, scaler or gamma
-registers: iBoot already did, and the picture is on screen. It has to map a
-buffer through the DART, write the IOVA to 0x50030, the stride to 0x50060, and
-commit with 0x50094 and 0x4602c.
+**What this means for a driver.** A minimal driver does not have to program
+any of the format, scaler or gamma registers: iBoot already did, and the
+picture is on screen. It writes the surface to 0x50030 and commits with
+0x50094. 0x4602c turned out not to be needed.
 
 **Verified on the phone.** The window base is 0x230000000 and the map is right:
 
@@ -1119,8 +1117,13 @@ commit with 0x50094 and 0x4602c.
 +0x050060  0x00001380   stride 4992
 ```
 
-The surface register holds the low 32 bits of the physical framebuffer, so
-`dart-disp0` flat maps it the same way our USB DART does.
+The surface register holds the low 32 bits of the physical framebuffer.
+Bits 35:32 come from somewhere ahead of the fetch, the way the USB complex
+remap widget supplies them. `dart-disp0` is not in the path: its TTBRs are
+invalid by Apple's own test, bit 31 clear, which they could not be if the
+running scanout used it. So a driver hands the pipe physical addresses, and
+its buffers have to be contiguous and inside iBoot's 0x8 window, which on this
+phone is all of DRAM.
 
 ### Writes go to the alias at 0x230200000, not to 0x230000000
 
@@ -1155,10 +1158,10 @@ experiments.
 
 Writing 0xf7cd4000 back to 0x230250030 puts the picture back exactly.
 
-**What a driver needs, then.** Allocate a buffer, map it through
-`dart-disp0`, write the IOVA to 0x230200000 + 0x50030, commit with 0x50094,
-and that is a page flip. Nothing else has to be programmed, because iBoot
-already set the format, the size, the stride and the panel.
+**What a driver needs, then.** Allocate a contiguous buffer, write its low 32
+bits to 0x230200000 + 0x50030, commit with 0x50094, and that is a page flip.
+Nothing else has to be programmed, because iBoot already set the format, the
+size, the stride and the panel.
 
 ### What the write split in the kext actually was
 
@@ -1183,16 +1186,45 @@ Two hypotheses died on the way, both worth not repeating:
 - **A second register bank.** The kext mirrors the plane 0x1000 up, so 0x51000
   looked like a writable shadow. It reads mostly zeros and drops writes too.
 
-### The driver owns the display, the panel is black
+### The driver works, and why the panel was black
 
 `patches/linux-0007` adds `drivers/gpu/drm/tiny/apple-h11p.c`, a DRM driver on
 `drm_simple_display_pipe` plus the GEM DMA helpers. It reads the mode from
 0x50080 and the stride from 0x50060, takes the screen off simpledrm, and
-programs surface and stride through the write aperture.
+programs surface and stride through the write aperture. fbcon binds to it and
+the console shows on the panel, cyan because of the
+[pixel format](#the-pixel-format).
 
-Where it stands: the driver probes, simpledrm goes away, `fb0` is
-`apple-h11pdrmfb`, fbcon binds to it, the shell stays up and the phone does not
-crash. The panel is black. Writing to `/dev/tty0` changes nothing on screen.
+**The black panel was the power domains.** The driver attached all eight
+disp0 domains with `devm_pm_domain_attach_list(dev, NULL, ...)`. With no flags
+that makes the device links `DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME` and
+nothing more, so they start inactive, and since this device never uses runtime
+PM nothing ever makes them active. Attached is not held. Until then the only
+thing holding the domains was simpledrm, whose framebuffer node lists four of
+them and which adds its links with `DL_FLAG_RPM_ACTIVE` itself. The driver
+evicts simpledrm, simpledrm lets go, and the domains switch off under a panel
+that is still scanning. No error anywhere.
+
+The fix is one flag, `PD_FLAG_DEV_LINK_ON`, which makes the links active from
+the start. After that `pm_genpd_summary` shows every disp0 domain on past
+`genpd: Disabling unused power domains`, and the console is on the panel.
+
+The domains form one chain, which is why holding the leaves was ever enough:
+
+```text
+disp0_busif -> disp0_fe -> disp0_be -> mipi_dsi
+                                    -> disp0_gp0 -> disp0_gp1 -> disp0_ppp -> disp0_hilo
+```
+
+**How it was found.** The driver was cut down to a probe that did nothing but
+point the pipe at its own buffer of colour bars for five seconds and then put
+iBoot's address back. No power domains, no DRM, simpledrm kept the console.
+The bars showed and the console came back, which cleared the pipe, the write
+aperture, the address window and the stride in one boot, and left only what
+the DRM driver did around the flip. Reading the kernel's
+`dev_pm_domain_attach_list()` next to simpledrm's own attach code showed the
+difference. Keeping simpledrm alive while testing is what made this work: a
+crash stays on the panel.
 
 Two real bugs were found and fixed on the way, both worth knowing:
 
@@ -1209,32 +1241,30 @@ Two real bugs were found and fixed on the way, both worth knowing:
   against what it last wrote and touches nothing when neither address nor
   stride moved.
 
-Three things that looked like the cause and were not, each disproved rather
-than argued about:
+Things that looked like the cause and were not, each disproved rather than
+argued about:
 
 - **Frame synchronisation.** Sixty flips from the m1n1 proxy, alternating two
-  addresses 16ms apart, raise no exceptions and leave the phone alive. A
-  guessed version of the kext's swap sequence only crashed earlier.
-- **Register write spacing.** `settle_us=0`, back to back writes, with the
-  driver cut down to a single allocation and a single flip: survives.
-- **The end address at 0x50040.** iBoot leaves it zero, and writing one looked
-  like the cause of a picture repeating down the screen. The eight band test
-  from the proxy wrote the same computed value and came out perfect. The
-  driver no longer writes it, because iBoot does not either.
-- **A pitch mismatch.** The repeating, sheared console looked like fbcon
-  drawing at one stride while the hardware scanned at another.
-  `/sys/class/graphics/fb0/stride` reads 4992, exactly what the hardware has.
+  addresses 16ms apart, raise no exceptions and leave the phone alive.
+- **Register write spacing.** Back to back writes survive.
+- **The end address at 0x50040.** iBoot leaves it zero and so does the driver.
+- **A pitch mismatch.** `/sys/class/graphics/fb0/stride` reads 4992, exactly
+  what the hardware has.
 
-**What is left.** The pipe is told to fetch our buffer and the readback agrees,
-`flip to 0x06400000 stride 4992, reads back 0x06400000`, and fbcon is bound and
-drawing, and the panel shows nothing. So either the damage blit never reaches
-the buffer the pipe is fetching, or something puts the plane back afterwards.
-A watcher that logged the live register once a second was the obvious next
-step and crashed the phone on its own, which says the margins here are thin.
+The boots that were not repeatable, a repeating console on one, black on the
+next, a hang on a third, all predate the fix. A domain switching off is timed
+by the power-off work, not by anything the driver does, which would fit.
+Not yet shown over several boots.
 
-Boots are also not repeatable: the same image has produced a repeating
-console, a black console, and a hang, which is its own problem and probably
-needs solving first.
+### The pixel format
+
+The pipe scans XRGB2101010. The boot args report depth 0x2001e, low half 30,
+and 0x0000ff00 written into the scanout shows blue, not green. fbdev picks its
+format from a colour mode, and mode 30 maps to 30 bits per pixel rather than
+the 32 that XRGB2101010 uses, so it can never ask for it. The driver offers
+XRGB8888 as well, fbcon takes that, and the pipe reads 8888 pixels as 2101010:
+white comes out cyan. The fix is the format word at 0x5001c, whose encoding
+is not worked out yet.
 
 **ramoops does not work here, do not try it again.** The config has everything
 (`PSTORE_RAM`, `PSTORE_CONSOLE`) and a `ramoops@8e4000000` reserved region
@@ -1251,10 +1281,8 @@ on the next boot `/sys/fs/pstore` was empty. Every boot in this chain goes back
 through iBSS, which brings DRAM up again, so nothing in DRAM survives to be
 read. The node is not in the tree.
 
-That leaves the panel itself as the only channel for a crashing boot, which
-means debugging the display driver with simpledrm still owning the console,
-the way `probe_only` did: the driver programs the pipe, simpledrm keeps
-printing, and a panic is readable.
+That leaves the panel as the only channel for a crashing boot, which is why
+display experiments keep simpledrm on the console until the last step.
 
 ### Reading disp0 without losing the proxy
 

@@ -36,10 +36,10 @@ index 48d30bf61..2fd47771f 100644
  obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
 diff --git a/drivers/gpu/drm/tiny/apple-h11p.c b/drivers/gpu/drm/tiny/apple-h11p.c
 new file mode 100644
-index 000000000..5ab2d2959
+index 000000000..eb7ce88b5
 --- /dev/null
 +++ b/drivers/gpu/drm/tiny/apple-h11p.c
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,527 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple H11P display pipe, as found on T8020
@@ -434,6 +434,10 @@ index 000000000..5ab2d2959
 +	return 0;
 +}
 +
++static const struct dev_pm_domain_attach_data apple_h11p_pd_data = {
++	.pd_flags = PD_FLAG_DEV_LINK_ON,
++};
++
 +static int apple_h11p_probe(struct platform_device *pdev)
 +{
 +	struct apple_h11p *h11p;
@@ -448,14 +452,6 @@ index 000000000..5ab2d2959
 +	drm = &h11p->drm;
 +	platform_set_drvdata(pdev, h11p);
 +
-+	/*
-+	 * Claim the power domains last of all the things that can fail. Every
-+	 * disp0 domain is already on, left that way by iBoot, and something
-+	 * has to hold them or the power manager switches them off as unused
-+	 * and the picture dies. But attaching and then failing is worse than
-+	 * never attaching: the detach on the way out powers them down under a
-+	 * panel that is still scanning, and the screen goes red.
-+	 */
 +	h11p->read = devm_platform_ioremap_resource_byname(pdev, "read");
 +	if (IS_ERR(h11p->read))
 +		return PTR_ERR(h11p->read);
@@ -464,7 +460,18 @@ index 000000000..5ab2d2959
 +	if (IS_ERR(h11p->write))
 +		return PTR_ERR(h11p->write);
 +
-+	ret = devm_pm_domain_attach_list(&pdev->dev, NULL, &h11p->pds);
++	/*
++	 * Every disp0 domain is already on, left that way by iBoot, and until
++	 * now simpledrm was what kept them there. It goes away further down,
++	 * so this has to hold them before that happens, and attaching is not
++	 * holding: without PD_FLAG_DEV_LINK_ON the links are made inactive,
++	 * nothing ever resumes them because this device never uses runtime
++	 * PM, and the domains go off the moment simpledrm lets go. That was
++	 * the black panel. simpledrm gets the same effect by adding its links
++	 * with DL_FLAG_RPM_ACTIVE itself.
++	 */
++	ret = devm_pm_domain_attach_list(&pdev->dev, &apple_h11p_pd_data,
++					 &h11p->pds);
 +	if (ret < 0)
 +		return dev_err_probe(&pdev->dev, ret, "no power domains\n");
 +
