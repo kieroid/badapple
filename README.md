@@ -118,7 +118,7 @@ a firmware reset is not enough, and put the phone back in DFU.
   - [x] Display driver, see
         [NOTES.md](NOTES.md#the-driver-works-and-why-the-panel-was-black)
   - [x] Display colours on the console
-  - [ ] Brightness, a DSI command to the panel
+  - [x] Brightness, through `/sys/class/backlight/230400000.dsi.0`
   - [x] Notch trimmed out of the framebuffer, 2688 down to 2556
 - [x] AIC interrupts, including fast IPIs
 - [x] SMP on all six cores

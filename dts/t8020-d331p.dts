@@ -78,3 +78,31 @@
 &serial0 {
 	status = "okay";
 };
+
+&dsi_out {
+	dsi_out_panel: endpoint {
+		remote-endpoint = <&panel_in>;
+	};
+};
+
+/*
+ * The ADT calls the panel lcd,summit, the same name as the Touch Bar's, and
+ * AppleSummitLCD sets brightness the same way: DCS 0x51, low byte first for
+ * an 11 bit level, which is what panel-summit sends. The range is the ADT's
+ * /backlight DBVMax. DBVMin is 139 and iBoot leaves it at 740.
+ */
+&dsi {
+	status = "okay";
+
+	panel@0 {
+		compatible = "apple,d331p-summit", "apple,summit";
+		reg = <0>;
+		max-brightness = <2047>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&dsi_out_panel>;
+			};
+		};
+	};
+};

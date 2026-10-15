@@ -476,6 +476,37 @@
 		};
 
 		/*
+		 * The DSI host, a Synopsys DesignWare core at the start of the
+		 * window, the same one the M1 Touch Bar uses. AppleSynopsysMIPIDSI
+		 * reads and writes the generic packet registers at 0x6c, 0x70 and
+		 * 0x74 straight off the mapped base, which is all adp-mipi
+		 * touches. iBoot has already configured the link, so this only
+		 * ever sends commands. Nothing goes out until the panel's
+		 * backlight is written.
+		 *
+		 * The input port is left out: there is no adp display pipe to
+		 * connect it to, and adp-mipi only looks up port 1.
+		 */
+		dsi: dsi@230400000 {
+			compatible = "apple,t8020-display-pipe-mipi",
+				     "apple,h7-display-pipe-mipi";
+			reg = <0x2 0x30400000 0x0 0x100000>;
+			power-domains = <&ps_mipi_dsi>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				dsi_out: port@1 {
+					reg = <1>;
+				};
+			};
+		};
+
+		/*
 		 * The PMU side of the chip, reached over SPMI. The ADT node
 		 * /arm-io/spmi lists three register ranges and a wall of
 		 * interrupts; the driver only wants the first range.

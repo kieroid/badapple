@@ -998,8 +998,8 @@ was written for:
 | `/arm-io/mipi-dsim/lcd`, `lcd,summit` | | `panel-summit`, `apple,summit` |
 | `/arm-io/i2c3/display-pmu`, `display-pmu,acorn` | 0x23501c000, IRQ 411 | nothing |
 
-So the panel driver is already upstream and so is the DSI host. The missing
-piece is the pipe itself.
+So the panel driver is already upstream and so is the DSI host. Both work,
+see [brightness](#brightness). The pipe needed a driver of its own.
 
 **adp's register map does not describe this pipe.** `adp` wants a `be` and an
 `fe` window. T8103 has them 0x200000 apart, and T8020's single 0x2f0000 range
@@ -1034,16 +1034,38 @@ ipsw kernel extract work/*/kernelcache.release.* \
 (`AppleAcornDisplayPMU::writeReg(uint8_t *, uint8_t *)`), and has no brightness
 strings in it at all.
 
-**Brightness needs the pipe, there is no shortcut.** `panel-summit` sets it
-with `mipi_dsi_dcs_set_display_brightness`, a DSI command to the panel, which
-matches `DBVMax = 2047` and `override-boot-brightness = 740` on the ADT's
-`/backlight` node. The DWI block exists on this SoC, `/arm-io/dwi` at
-0x23b200000, and `apple,dwi-bl` binds to it, but its binding says plainly it is
-for LCD phones. Measured: the driver probes, the `dwi` power domain is on, the
-device appears as `/sys/class/backlight/23b200010.backlight` with
-`max_brightness` 2047, and writes do not stick. `actual_brightness` stays 0 and
-the screen does not change. The node is not in the tree, because it does
-nothing.
+### Brightness
+
+Works with upstream drivers and a device tree node, no new code. `adp-mipi`
+is the DSI host and `panel-summit` is the panel:
+
+```sh
+echo 2047 > /sys/class/backlight/230400000.dsi.0/brightness
+```
+
+**The DSI host is a plain DesignWare core.** `AppleSynopsysMIPIDSI` maps
+`/arm-io/mipi-dsim` and uses the first word of the window as the core base. It
+writes packet headers to 0x6c and payload to 0x70, polls 0x74 for FIFO state,
+and reads errors from 0xc0 with mask 0x1ffc, which is the DesignWare
+`INT_ST1` layout. Those are the only registers `adp-mipi` touches. A second
+block of 0x5c bytes, `mipi-top-size`, sits at +0x80000 and is not needed.
+iBoot has already set up the link, so Linux only sends commands.
+
+**The panel speaks the Touch Bar's protocol.** The ADT calls it `lcd,summit`,
+and `AppleSummitLCD` sets brightness by `backlight-level-encoding`. This phone
+has 11, which sends `[0x51, level & 0xff, level >> 8]`: DCS
+`SET_DISPLAY_BRIGHTNESS`, low byte first. `mipi_dsi_dcs_set_display_brightness`
+sends the same bytes. Apple sends them as packet type 0x29 and Linux as 0x39;
+the panel takes both. The range comes from `/backlight`: `DBVMax` 2047,
+`DBVMin` 139, and iBoot leaves it at 740.
+
+Nothing is sent until the backlight is written, so `brightness` reads 0 after
+boot even though the panel is at 740.
+
+**DWI is not the backlight on this phone.** `/arm-io/dwi` at 0x23b200000
+exists and `apple,dwi-bl` binds to it, but the binding is for LCD phones.
+Measured: the driver probes, `max_brightness` reads 2047, and writes do
+nothing. It is not in the tree.
 
 ### The pipe register map, from the kext
 
