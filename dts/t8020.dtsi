@@ -10,10 +10,8 @@
  * The arm-io ranges property maps child 0x0 to parent 0x200000000, so a
  * peripheral offset of 0x35200000 is absolute address 0x235200000.
  *
- * This is deliberately a bring-up subset: enough for a console and an
- * initramfs shell, nothing more. Blocks left out on purpose, with the reason:
- *
- *   pinctrl, i2c          Not needed to reach a shell.
+ * This is a bring-up subset: enough for a console, a shell and the pieces
+ * being worked on, nothing more.
  *
  * Copyright (c) 2026, kiki <kieran@lavato.net>
  */
@@ -32,6 +30,19 @@
 		#clock-cells = <0>;
 		clock-frequency = <24000000>;
 		clock-output-names = "clkref";
+	};
+
+	/*
+	 * The SPI blocks' input clock. The ADT gives it as clock-ids 362,
+	 * which does not resolve to anything in the pmgr clock list, so this
+	 * is M1's rate for the same block at the same address. If the real
+	 * clock is slower the bus just runs slower than asked, never faster.
+	 */
+	clk_spi: clock-spi {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+		clock-output-names = "clk_spi";
 	};
 
 	cpus {
@@ -504,6 +515,75 @@
 					reg = <1>;
 				};
 			};
+		};
+
+		/*
+		 * The AP GPIO block, gpio,t8020 in the ADT, 222 pins and seven
+		 * interrupt groups. The driver writes nothing at probe, so
+		 * pins iBoot set up stay as they are until someone asks for
+		 * one. GPIO flags are written as numbers below, 0 for active
+		 * high and 1 for active low, to avoid copying gpio.h in.
+		 */
+		pinctrl_ap: pinctrl@23c100000 {
+			compatible = "apple,t8020-pinctrl", "apple,pinctrl";
+			reg = <0x2 0x3c100000 0x0 0x1000>;
+			power-domains = <&ps_gpio>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&pinctrl_ap 0 0 222>;
+			apple,npins = <222>;
+
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 95 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 96 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 97 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 98 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 99 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 100 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 101 IRQ_TYPE_LEVEL_HIGH>;
+		};
+
+		/*
+		 * The display PMU, Acorn, sits on this bus, and the touch
+		 * controller's power comes from it. iBoot already talks to it,
+		 * so the pins are muxed and there is no pinctrl here.
+		 */
+		i2c3: i2c@23501c000 {
+			compatible = "apple,t8020-i2c", "apple,i2c";
+			reg = <0x2 0x3501c000 0x0 0x1000>;
+			clocks = <&clkref>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 411 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_i2c3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/*
+		 * The touch controller's bus. spi-1,samsung in the ADT: the
+		 * older block M1's SPI grew out of, which spi-apple drives in a
+		 * mode of its own. No "apple,spi" fallback, because the newer
+		 * block's driver code would not work on it. See "Touch" in
+		 * NOTES.md.
+		 * Chip select is a GPIO, as the ADT's function-spi_cs0 says.
+		 * iBoot leaves pin 67 as an output driven high, which is the
+		 * idle state the SPI core sets when it claims it.
+		 */
+		spi1: spi@235104000 {
+			compatible = "apple,t8020-spi";
+			reg = <0x2 0x35104000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 396 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_spi>;
+			power-domains = <&ps_spi1>;
+			cs-gpios = <&pinctrl_ap 67 1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
 		};
 
 		/*

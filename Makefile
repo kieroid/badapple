@@ -138,7 +138,9 @@ $(IMAGE): FORCE
 	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD \
 	    --disable CONFIG_ARM_APPLE_SOC_CPUFREQ \
 	    --enable CONFIG_SENSORS_APPLE_SOC_TEMP \
-	    --enable CONFIG_DRM_APPLE_H11P $(KCONFIG_EXTRA)
+	    --enable CONFIG_DRM_APPLE_H11P \
+	    --enable CONFIG_INPUT_TOUCHSCREEN \
+	    --enable CONFIG_TOUCHSCREEN_APPLE_MT_SPI $(KCONFIG_EXTRA)
 	$(MAKE) -C $(KDIR) $(KBUILD) olddefconfig
 	$(MAKE) -C $(KDIR) $(KBUILD) -j$$(nproc) Image.gz
 

@@ -1394,6 +1394,148 @@ channel stuck at 0 degrees. It says so once:
 apple-soc-temp 23b288000.tempsensor: SOC die 2: reads zero, skipped
 ```
 
+## Touch, what it needs
+
+This is what the ADT, the kexts and the firmware file say it takes, and how
+far the phone has got.
+
+The controller is `/arm-io/spi1/multi-touch`, compatible `hid-transport,k1`,
+`hbpp-version` 261. That is not the Z2 protocol the Touch Bar uses, so
+`apple_z2` does not fit. iOS drives it with `AppleHIDTransportSPI`, which
+boots it through `AppleHIDTransportBootloaderHBPP`, and `AppleMultitouchSPI`.
+There is also an `AOPTouchKext`, so some of it may go through the always-on
+processor.
+
+| piece | where | Linux |
+|---|---|---|
+| SPI controller | `spi1` at 0x235104000, `spi-1,samsung`, IRQ 396 | `spi-apple`, see below |
+| chip select | `gpio` pin 67 | `apple,pinctrl`, same block as T8015 |
+| reset | `gpio` pin 5 | same |
+| interrupt | `aop-gpio` at 0x24a820000, pin 19 | same driver, but on the AOP side |
+| clock | PMGR 0x23b078000 | a few register writes, see below |
+| power | Acorn display PMU on `i2c3`, register 0x05 | a read-modify-write, see below |
+| firmware | `Firmware/D331p_Multitouch.im4p`, `mtfw` | Apple's, so the user extracts it |
+
+`power-sequence` gives the order: `power_pulldown`, `power_ana`, then
+`clock_enable` 10 ms later.
+
+**Power.** The Acorn `dpLE` function is `AppleAcornDisplayPMU::setLDO`: read
+register 0x05 over I2C, set the mask bits to enable or clear them to disable,
+write it back. Touch uses mask 0x40 (`power_pulldown`) and 0x06
+(`power_ana`). The same register holds the display rails, so it has to be a
+read-modify-write.
+
+**Clock.** `TCLK` arguments `[8, 100, 24000000]` go to
+`ApplePMGR::enableTouchClock(enable, delay_us, divider)`, where the divider is
+24 MHz over the requested rate, so 1. `AppleT8020PMGR` puts the register at
+PMGR reg 0 + 0x78000, which is 0x23b078000:
+
+```text
+v = read(0x23b078000)
+write(v & ~BIT(31))
+udelay(8)
+write((v & 0x7ffffc00) | divider | BIT(19))    bit 19 enable, bits 9:0 divider
+poll until bit 18 clears                       bit 18 busy
+```
+
+Off is the reverse: clear bit 19, wait for bit 18, set bit 31, wait 100 us.
+
+**SPI.** `AppleSamsungSPI` writes the byte counts to 0x34 and 0x4c, pushes
+bytes through 0x10, reads status at 0x8, and sets config bits 0x20, 0x80 and
+0x100 at 0x4. Those are `spi-apple`'s RXCNT, TXCNT, TXDATA, STATUS and
+`CFG_MODE_IRQ`, `IE_RXCOMPLETE`, `IE_TXRXTHRESH`, so it is the same block.
+
+**The firmware is a boot script.** The im4p payload is not encrypted. It is an
+IOKit XML plist, one array per personality, `C1R1FC1,1` being the normal one,
+and each entry is an action for the host to replay over SPI:
+
+| type | does |
+|---|---|
+| `Binary` | write a payload to a controller address: vectors, bootloader, DCS images, `luna_d33.bin` |
+| `ReadModifyWrite` | read-modify-write a controller register, with `Mask` and `Value` |
+| `Poll` | wait for `Address & Mask == Value`, with a timeout |
+| `Property` | calibration from syscfg (`MtCl`, `LFCL`, `LSPr` and more), with a default `Payload` |
+| `Config` | settings for after boot |
+
+So a driver needs three bootloader primitives and a loop, not knowledge of
+the firmware. The calibration defaults are in the file, so syscfg can wait.
+The script ends by clearing a reset bit on the controller's Cortex-M4.
+
+`Config` says what happens after boot. `Protocol` is `HIDSPI`, SPI mode 0,
+`Transfer Length` 512, `Device Interface Id` 208 (0xd0), and two HID
+interfaces: `grape`, interface 0, the multitouch, and `luna`, interface 1,
+force sensing. 0xd0 and 512 byte packets look like the SPI HID transport the
+M1 MacBook keyboard and trackpad use, which Asahi already has a driver for.
+Not compared yet.
+
+**HBPP, from `AHTProtocolHBPP13`.** Bytes on the wire with 8 bit words. 32 bit
+fields go as two 16 bit halves, low half first, each high byte first, so
+0x400b0fd4 is sent `0f d4 40 0b`. Checksums are byte sums sent high byte
+first. `apple_z2` already writes blobs the same way, command 0x3001.
+
+| command | sent | reply |
+|---|---|---|
+| read word | `1c 73`, address, sum of the address bytes | `4c 39`, value, sum of the value bytes |
+| read-modify-write | `1e 33`, address, mask, value, sum of bytes 2 to 13 | |
+| status | `1a a1`, then `18 e1` filler | `4b c1`, `4a d1`, `49 69`, `48 79` or `1f 01` |
+
+A read is two transfers: the 8 byte command, then `1a a1 18 e1 18 e1 18 e1`
+while the reply comes back.
+
+### Touch on the phone so far
+
+`patches/linux-0009` is a bring-up probe, and the touchscreen node is
+disabled. What it showed:
+
+- **iBoot's state.** Reset pin 5 is a GPIO output driven low, chip select
+  pin 67 an output driven high, the touch clock `800002ee` (off), Acorn
+  register 0x05 is 0x40. Acorn answers at 0x2a, so that is a 7 bit address.
+- **The SPI pins are muxed.** 64, 65 and 66 are in peripheral function 1, next
+  to chip select. 66 is an input with a pull-down, so that is MISO.
+- **The clock enables** once the register is mapped non-posted:
+  `00080001`. A posted write to PMGR is dropped without an error.
+- **The SPI block is the older one.** See below.
+- **The chip never answers.** With the rails on (0x46), the clock running
+  and reset released at either polarity, MISO stays at its pull-down and the
+  interrupt line, `aop-gpio` 19 with a pull-up, stays high. Nothing on the
+  chip side moves at all.
+
+So the chip is not running, rather than the protocol being wrong. Left to
+check: whether bit 0x40 has to be cleared, whether there is a digital supply
+outside the ADT's power sequence (the firmware config says `Always Powered`,
+which may mean the AOP keeps it up on iOS), and whether the clock reaches the
+chip.
+
+The first version of the probe tried four power-ons back to back, with the
+pulldown bit set and cleared, and the phone crashed with the screen flashing.
+Every later boot left 0x40 alone and was fine, so clearing 0x40 is the main
+suspect. Not confirmed.
+
+### The SPI block is not M1's
+
+`spi-1,samsung` with `spi-version` 1 is the older Samsung S5L block that M1's
+SPI grew out of. It has the same registers up to 0x4c, `CTRL`, `CFG`,
+`STATUS`, `PIN`, `TXDATA`, `RXDATA`, `CLKDIV`, `RXCNT` and `TXCNT`, and
+nothing from 0x10c up. From `AppleSamsungSPI`:
+
+| what | where |
+|---|---|
+| TX FIFO level | `STATUS` bits 10:6, depth 16 |
+| RX FIFO level | `STATUS` bits 15:11 |
+| clear flags | write 0x40000f to `STATUS` |
+| master mode | `CFG` bits 4:3, both set |
+| always set | `CFG` bit 14 |
+| set by default, taken to be MSB first | `CFG` bit 13 |
+| start | `CTRL` = 0xd, run and both FIFO resets |
+
+`spi-apple` waits on 0x134 and never sets master mode, so on this block it
+fills the FIFO and times out. `patches/linux-0010` adds a polled mode for it,
+selected by `apple,t8020-spi`, and transfers complete. Version 0 is the same
+with 4 bit levels at bits 7:4 and 11:8 and a depth of 8, which is the layout
+openiBoot used.
+
+What is left to reverse: the `grape` touch report format.
+
 ## cpufreq, the part that completes transitions is not running
 
 `CONFIG_ARM_APPLE_SOC_CPUFREQ` is off. With it on, the boot stops inside

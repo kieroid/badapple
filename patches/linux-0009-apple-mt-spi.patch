@@ -1,0 +1,477 @@
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index 9b9ae8ac3..31548c16e 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -103,6 +103,16 @@ config TOUCHSCREEN_ADC
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called resistive-adc-touch.ko.
+ 
++config TOUCHSCREEN_APPLE_MT_SPI
++	tristate "Apple multitouch over SPI, T8020"
++	depends on SPI && I2C && (ARCH_APPLE || COMPILE_TEST)
++	help
++	  Say Y here if you have an iPhone with an A12 SoC. For now this only
++	  brings the touch controller up and checks that it answers.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called apple-mt-spi.
++
+ config TOUCHSCREEN_APPLE_Z2
+ 	tristate "Apple Z2 touchscreens"
+ 	depends on SPI && (ARCH_APPLE || COMPILE_TEST)
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index bfd9de833..de76bf1fc 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -15,6 +15,7 @@ obj-$(CONFIG_TOUCHSCREEN_AD7879_I2C)	+= ad7879-i2c.o
+ obj-$(CONFIG_TOUCHSCREEN_AD7879_SPI)	+= ad7879-spi.o
+ obj-$(CONFIG_TOUCHSCREEN_ADC)		+= resistive-adc-touch.o
+ obj-$(CONFIG_TOUCHSCREEN_ADS7846)	+= ads7846.o
++obj-$(CONFIG_TOUCHSCREEN_APPLE_MT_SPI)	+= apple-mt-spi.o
+ obj-$(CONFIG_TOUCHSCREEN_APPLE_Z2)	+= apple_z2.o
+ obj-$(CONFIG_TOUCHSCREEN_AR1021_I2C)	+= ar1021_i2c.o
+ obj-$(CONFIG_TOUCHSCREEN_ATMEL_MXT)	+= atmel_mxt_ts.o
+diff --git a/drivers/input/touchscreen/apple-mt-spi.c b/drivers/input/touchscreen/apple-mt-spi.c
+new file mode 100644
+index 000000000..bbad3dbe7
+--- /dev/null
++++ b/drivers/input/touchscreen/apple-mt-spi.c
+@@ -0,0 +1,438 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Apple multitouch over SPI, as found on T8020
++ *
++ * Copyright (c) 2026 kiki <kieran@lavato.net>
++ *
++ * Bring-up only. This powers the controller, takes it out of reset and asks
++ * its bootloader for one word over HBPP, the protocol AppleHIDTransportSPI
++ * boots it with. A reply that starts 4c 39 and carries a good checksum means
++ * the power, the clock, the reset, the SPI bus and the protocol are all right,
++ * and that is all this checks. Afterwards everything goes back the way it was
++ * found.
++ *
++ * iBoot leaves the reset pin driven low with the controller unpowered, so
++ * reset is taken to be active low. The Acorn pulldown bit, 0x40, is set in
++ * that state and left alone. Where every number here comes from is in
++ * "Touch" in the project NOTES.md.
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/spi/spi.h>
++
++/* Acorn display PMU: register 0x05 holds LDO enables, display rails too. */
++#define ACORN_LDO		0x05
++#define ACORN_PULLDOWN		0x40
++#define ACORN_ANA		0x06
++
++/* PMGR touch clock control, PMGR reg 0 + 0x78000, from AppleT8020PMGR. */
++#define TOUCH_CLK		0x23b078000ULL
++#define TOUCH_CLK_OFF		BIT(31)
++#define TOUCH_CLK_ENABLE	BIT(19)
++#define TOUCH_CLK_BUSY		BIT(18)
++/* What ApplePMGR::enableTouchClock keeps of the old value. */
++#define TOUCH_CLK_KEEP		0x7ffffc00
++/* 24 MHz in, 24 MHz wanted. */
++#define TOUCH_CLK_DIV		1
++
++/* Only read, to log how iBoot left the reset and chip select pins. */
++#define AP_GPIO			0x23c100000ULL
++#define RESET_PIN		5
++#define CS_PIN			67
++#define AP_GPIO_PINS		222
++#define MISO_PIN		66
++
++/* The controller's interrupt line, aop-gpio pin 19 in the ADT. Read only. */
++#define AOP_GPIO		0x24a820000ULL
++#define IRQ_PIN			19
++
++/* The bootloader's error word, ReadOnError in the firmware's boot script. */
++#define HBPP_PROBE_ADDR		0x400b0fd4
++
++#define HBPP_LEN		8
++
++struct apple_mt {
++	struct device *dev;
++	struct spi_device *spi;
++	struct i2c_adapter *pmu;
++	u16 pmu_addr;
++	struct gpio_desc *reset;
++	void __iomem *clk;
++	void __iomem *gpio;
++	void __iomem *aop_gpio;
++	u8 *tx;
++	u8 *rx;
++};
++
++static int acorn_read(struct apple_mt *mt, u16 addr)
++{
++	union i2c_smbus_data data;
++	int ret;
++
++	ret = i2c_smbus_xfer(mt->pmu, addr, 0, I2C_SMBUS_READ, ACORN_LDO,
++			     I2C_SMBUS_BYTE_DATA, &data);
++
++	return ret < 0 ? ret : data.byte;
++}
++
++static int acorn_write(struct apple_mt *mt, u8 val)
++{
++	union i2c_smbus_data data = { .byte = val };
++
++	return i2c_smbus_xfer(mt->pmu, mt->pmu_addr, 0, I2C_SMBUS_WRITE,
++			      ACORN_LDO, I2C_SMBUS_BYTE_DATA, &data);
++}
++
++/* ApplePMGR::enableTouchClock(true, 8, 1) */
++static int touch_clk_on(struct apple_mt *mt)
++{
++	u32 v = readl(mt->clk);
++
++	writel(v & ~TOUCH_CLK_OFF, mt->clk);
++	udelay(8);
++	writel((v & TOUCH_CLK_KEEP) | TOUCH_CLK_DIV | TOUCH_CLK_ENABLE, mt->clk);
++
++	return readl_poll_timeout(mt->clk, v, !(v & TOUCH_CLK_BUSY), 1, 10000);
++}
++
++/* ApplePMGR::enableTouchClock(false, 100, 0) */
++static int touch_clk_off(struct apple_mt *mt)
++{
++	u32 v = readl(mt->clk) & ~TOUCH_CLK_ENABLE;
++	int ret;
++
++	writel(v, mt->clk);
++	ret = readl_poll_timeout(mt->clk, v, !(v & TOUCH_CLK_BUSY), 1, 10000);
++	writel(readl(mt->clk) | TOUCH_CLK_OFF, mt->clk);
++	udelay(100);
++
++	return ret;
++}
++
++/*
++ * 32 bit fields go on the wire as two 16 bit halves, each high byte first,
++ * low half first: 0x400b0fd4 is sent 0f d4 40 0b. Checksums are the byte sum
++ * of the fields, sent high byte first.
++ */
++static void hbpp_put32(u8 *p, u32 v)
++{
++	p[0] = v >> 8;
++	p[1] = v;
++	p[2] = v >> 24;
++	p[3] = v >> 16;
++}
++
++static u32 hbpp_get32(const u8 *p)
++{
++	return p[0] << 8 | p[1] | p[2] << 24 | p[3] << 16;
++}
++
++static u16 hbpp_sum(const u8 *p, int len)
++{
++	u16 sum = 0;
++
++	while (len--)
++		sum += *p++;
++
++	return sum;
++}
++
++/*
++ * AppleHIDTransportBootloaderHBPP's readWord: the command on its own, then a
++ * second transfer that clocks out the acknowledge and filler while the reply
++ * comes back.
++ */
++static int hbpp_read_word(struct apple_mt *mt, u32 addr, u32 *val)
++{
++	struct spi_transfer xfer = {
++		.tx_buf = mt->tx,
++		.rx_buf = mt->rx,
++		.len = HBPP_LEN,
++	};
++	u16 sum;
++	int ret;
++
++	mt->tx[0] = 0x1c;
++	mt->tx[1] = 0x73;
++	hbpp_put32(mt->tx + 2, addr);
++	sum = hbpp_sum(mt->tx + 2, 4);
++	mt->tx[6] = sum >> 8;
++	mt->tx[7] = sum;
++
++	ret = spi_write(mt->spi, mt->tx, HBPP_LEN);
++	if (ret)
++		return ret;
++
++	/* "Inter Transaction Us" in the firmware's HIDSPI config */
++	usleep_range(250, 300);
++
++	mt->tx[0] = 0x1a;
++	mt->tx[1] = 0xa1;
++	mt->tx[2] = mt->tx[4] = mt->tx[6] = 0x18;
++	mt->tx[3] = mt->tx[5] = mt->tx[7] = 0xe1;
++	memset(mt->rx, 0, HBPP_LEN);
++
++	ret = spi_sync_transfer(mt->spi, &xfer, 1);
++	if (ret)
++		return ret;
++
++	dev_info(mt->dev, "read %08x: %*ph\n", addr, HBPP_LEN, mt->rx);
++
++	if (mt->rx[0] != 0x4c || mt->rx[1] != 0x39)
++		return -EIO;
++	if ((mt->rx[6] << 8 | mt->rx[7]) != hbpp_sum(mt->rx + 2, 4))
++		return -EBADMSG;
++
++	*val = hbpp_get32(mt->rx + 2);
++
++	return 0;
++}
++
++/*
++ * One power-on in the order the ADT's power-sequence gives: rails, then the
++ * clock 10 ms later, then out of reset. Every write is announced and followed
++ * by a pause, because an earlier version crashed the phone somewhere in here
++ * and left nothing readable.
++ */
++/* How the chip's interrupt line and MISO look right now. */
++static void apple_mt_pins(struct apple_mt *mt, const char *when)
++{
++	dev_info(mt->dev, "%s: irq pin %08x, miso pin %08x\n", when,
++		 readl(mt->aop_gpio + IRQ_PIN * 4),
++		 readl(mt->gpio + MISO_PIN * 4));
++}
++
++static int apple_mt_try(struct apple_mt *mt, u8 ldo_orig, int release)
++{
++	u8 ldo = ldo_orig | ACORN_ANA;
++	u32 val;
++	int ret;
++
++	dev_info(mt->dev, "step 6: reset held at %d, acorn ldo %02x -> %02x\n",
++		 !release, ldo_orig, ldo);
++	gpiod_direction_output_raw(mt->reset, !release);
++	msleep(1000);
++	ret = acorn_write(mt, ldo);
++	dev_info(mt->dev, "acorn write %d, ldo now %02x\n", ret,
++		 acorn_read(mt, mt->pmu_addr));
++	apple_mt_pins(mt, "rails on");
++	if (ret)
++		return ret;
++
++	dev_info(mt->dev, "step 7: touch clock on\n");
++	msleep(1000);
++	ret = touch_clk_on(mt);
++	dev_info(mt->dev, "clock %08x, %d\n", readl(mt->clk), ret);
++	apple_mt_pins(mt, "clock on");
++
++	dev_info(mt->dev, "step 8: reset pin %d\n", release);
++	msleep(1000);
++	gpiod_set_raw_value(mt->reset, release);
++	apple_mt_pins(mt, "reset 0 ms");
++	msleep(50);
++	apple_mt_pins(mt, "reset 50 ms");
++	msleep(450);
++	apple_mt_pins(mt, "reset 500 ms");
++
++	dev_info(mt->dev, "step 9: hbpp read %08x\n", HBPP_PROBE_ADDR);
++	msleep(1000);
++	ret = hbpp_read_word(mt, HBPP_PROBE_ADDR, &val);
++	if (!ret)
++		dev_info(mt->dev, "controller answered: %08x = %08x\n",
++			 HBPP_PROBE_ADDR, val);
++	else
++		dev_info(mt->dev, "no answer: %d\n", ret);
++
++	dev_info(mt->dev, "step 10: power down\n");
++	gpiod_set_raw_value(mt->reset, 0);
++	touch_clk_off(mt);
++	acorn_write(mt, ldo_orig);
++	msleep(500);
++
++	return ret;
++}
++
++static void apple_mt_unmap(void *addr)
++{
++	iounmap(addr);
++}
++
++static int apple_mt_probe(struct spi_device *spi)
++{
++	struct device *dev = &spi->dev;
++	struct device_node *np;
++	void __iomem *gpio;
++	struct apple_mt *mt;
++	int reset_dir, reset_val, ldo_orig, ret, i;
++	u32 clk_orig, addr;
++
++	mt = devm_kzalloc(dev, sizeof(*mt), GFP_KERNEL);
++	if (!mt)
++		return -ENOMEM;
++
++	mt->dev = dev;
++	mt->spi = spi;
++	mt->tx = devm_kzalloc(dev, HBPP_LEN, GFP_KERNEL);
++	mt->rx = devm_kzalloc(dev, HBPP_LEN, GFP_KERNEL);
++	if (!mt->tx || !mt->rx)
++		return -ENOMEM;
++
++	spi->mode = SPI_MODE_0;
++	spi->bits_per_word = 8;
++	ret = spi_setup(spi);
++	if (ret)
++		return ret;
++
++	np = of_parse_phandle(dev->of_node, "apple,pmu-bus", 0);
++	if (!np)
++		return -ENODEV;
++	mt->pmu = of_get_i2c_adapter_by_node(np);
++	of_node_put(np);
++	if (!mt->pmu)
++		return -EPROBE_DEFER;
++
++	ret = of_property_read_u32(dev->of_node, "apple,pmu-addr", &addr);
++	if (ret)
++		goto put_pmu;
++
++	/* GPIOD_ASIS: nothing changes until the first try. */
++	mt->reset = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
++	if (IS_ERR(mt->reset)) {
++		ret = PTR_ERR(mt->reset);
++		goto put_pmu;
++	}
++
++	/*
++	 * Non-posted, like everything else on this SoC: a posted write to
++	 * PMGR is silently dropped, which is how the first clock enable here
++	 * read back unchanged.
++	 */
++	mt->clk = ioremap_np(TOUCH_CLK, 4);
++	if (!mt->clk) {
++		ret = -ENOMEM;
++		goto put_pmu;
++	}
++	ret = devm_add_action_or_reset(dev, apple_mt_unmap, mt->clk);
++	if (ret)
++		goto put_pmu;
++
++	gpio = devm_ioremap(dev, AP_GPIO, 0x1000);
++	mt->aop_gpio = ioremap_np(AOP_GPIO, 0x1000);
++	if (!gpio || !mt->aop_gpio) {
++		ret = -ENOMEM;
++		goto put_pmu;
++	}
++	mt->gpio = gpio;
++	ret = devm_add_action_or_reset(dev, apple_mt_unmap, mt->aop_gpio);
++	if (ret)
++		goto put_pmu;
++
++	dev_info(dev, "step 0: aop gpio register %llx\n", AOP_GPIO + IRQ_PIN * 4);
++	msleep(1500);
++	apple_mt_pins(mt, "cold");
++
++	/*
++	 * Read only for now: the first version of this crashed the phone
++	 * with the screen flashing, and nothing was readable. Every access
++	 * is announced and followed by a pause, so the last line on screen
++	 * names the one that went wrong.
++	 */
++	dev_info(dev, "step 1: reset pin, gpio register %llx\n",
++		 AP_GPIO + RESET_PIN * 4);
++	msleep(1500);
++	reset_dir = gpiod_get_direction(mt->reset);
++	reset_val = gpiod_get_raw_value(mt->reset);
++	dev_info(dev, "reset pin %08x (%s, %d)\n", readl(gpio + RESET_PIN * 4),
++		 reset_dir ? "input" : "output", reset_val);
++
++	dev_info(dev, "step 2: cs pin, gpio register %llx\n", AP_GPIO + CS_PIN * 4);
++	msleep(1500);
++	dev_info(dev, "cs pin %08x\n", readl(gpio + CS_PIN * 4));
++
++	dev_info(dev, "step 3: touch clock register %llx\n", TOUCH_CLK);
++	msleep(1500);
++	clk_orig = readl(mt->clk);
++	dev_info(dev, "clock %08x\n", clk_orig);
++
++	dev_info(dev, "step 4: acorn register %02x at i2c %02x\n", ACORN_LDO,
++		 addr);
++	msleep(1500);
++	mt->pmu_addr = addr;
++	ldo_orig = acorn_read(mt, mt->pmu_addr);
++	dev_info(dev, "acorn ldo %d (%02x)\n", ldo_orig,
++		 ldo_orig < 0 ? 0 : ldo_orig);
++
++	/*
++	 * iBoot leaves the clock off, the rails off and the reset pin driven
++	 * low. Anything else means this is not the state the steps assume.
++	 */
++	if (ldo_orig < 0 || ldo_orig & ACORN_ANA || clk_orig & TOUCH_CLK_ENABLE ||
++	    reset_dir || reset_val) {
++		dev_err(dev, "not the state iBoot leaves, not touching it\n");
++		ret = -EBUSY;
++		goto put_pmu;
++	}
++
++	/*
++	 * Which pins are muxed to a peripheral says where the SPI pins are,
++	 * which the ADT does not. Read only.
++	 */
++	for (i = 0; i < AP_GPIO_PINS; i += 8) {
++		u32 v[8] = {};
++		int j;
++
++		for (j = 0; j < 8 && i + j < AP_GPIO_PINS; j++)
++			v[j] = readl(gpio + (i + j) * 4);
++		dev_info(dev, "pins %3d: %08x %08x %08x %08x %08x %08x %08x %08x\n",
++			 i, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
++	}
++
++	/* Active low is the guess, from the pin being low while unpowered. */
++	if (apple_mt_try(mt, ldo_orig, 1))
++		apple_mt_try(mt, ldo_orig, 0);
++
++	/* Back exactly as iBoot left it. */
++	writel(clk_orig, mt->clk);
++	acorn_write(mt, ldo_orig);
++	gpiod_direction_output_raw(mt->reset, 0);
++
++	dev_info(dev, "done, ldo %02x, clock %08x, reset pin %08x\n",
++		 acorn_read(mt, mt->pmu_addr), readl(mt->clk),
++		 readl(gpio + RESET_PIN * 4));
++	ret = 0;
++
++put_pmu:
++	i2c_put_adapter(mt->pmu);
++	return ret;
++}
++
++static const struct of_device_id apple_mt_of_match[] = {
++	{ .compatible = "apple,t8020-multitouch" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, apple_mt_of_match);
++
++static const struct spi_device_id apple_mt_spi_ids[] = {
++	{ "t8020-multitouch" },
++	{}
++};
++MODULE_DEVICE_TABLE(spi, apple_mt_spi_ids);
++
++static struct spi_driver apple_mt_driver = {
++	.driver = {
++		.name = "apple-mt-spi",
++		.of_match_table = apple_mt_of_match,
++	},
++	.id_table = apple_mt_spi_ids,
++	.probe = apple_mt_probe,
++};
++module_spi_driver(apple_mt_driver);
++
++MODULE_DESCRIPTION("Apple multitouch over SPI");
++MODULE_LICENSE("GPL");
