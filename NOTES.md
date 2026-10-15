@@ -917,8 +917,21 @@ voltage_now 3906000   current_now 444000   power_now 1734000   temp 294
 charge_behaviour [auto] inhibit-charge force-discharge
 ```
 
-So battery, charger detection, battery temperature and the power button, which
-arrives as `Apple SMC power/lid events` on input0.
+So battery, charger detection, battery temperature and every button, which
+arrive as `Apple SMC power/lid events` on input0. The ADT's `/buttons` node
+points all four at `smc-pmu`, and `macsmc-input` reads the same keys:
+
+| button | SMC key | event |
+|---|---|---|
+| side | `bHLD` | `KEY_POWER` |
+| volume up | `bVUP` | `KEY_VOLUMEUP` |
+| volume down | `bVDN` | `KEY_VOLUMEDOWN` |
+| ringer switch | `bRIN` | `KEY_MUTE` |
+
+The SMC also logs every press to its syslog as `SMC HID Event: 01 <button>
+<state>`, which is handy for telling a dead button from a dead input path.
+Button 1 is the side button, 2 volume up, 3 volume down, 4 the ringer switch.
+For the buttons, state 1 is pressed.
 
 `macsmc-hwmon` does not probe, which is expected: it says "No valid sensors
 found of any supported type" because it looks for Mac sensor key sets. The

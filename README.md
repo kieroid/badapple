@@ -126,7 +126,8 @@ a firmware reset is not enough, and put the phone back in DFU.
 - [x] NVMe through ANS2, reads and writes, ext4 mounted
 - [x] SMC
   - [x] Battery: capacity, health, cycles, voltage, current, temperature
-  - [x] Charger detection and the power button
+  - [x] Charger detection
+  - [x] Side button, volume buttons and ringer switch
   - [x] Poweroff, with the PMU scratchpad over SPMI so it stays off
   - [x] Reboot, through the watchdog, lands back in recovery
 - [x] Die temperature sensors, eight channels through hwmon
