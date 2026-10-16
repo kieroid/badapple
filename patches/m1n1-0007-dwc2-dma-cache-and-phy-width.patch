@@ -1,5 +1,5 @@
 diff --git a/src/usb_dwc2.c b/src/usb_dwc2.c
-index 9220d62..dee4f1d 100644
+index 9220d62..e8a67ad 100644
 --- a/src/usb_dwc2.c
 +++ b/src/usb_dwc2.c
 @@ -890,9 +890,56 @@ static void usb_dwc2_ep0_handle_setup(dwc2_dev_t *dev)
@@ -69,13 +69,7 @@ index 9220d62..dee4f1d 100644
      write32(dev->regs + DWC2_DIEPDMA(pep), (uintptr_t)dev->endpoints[ep].xfer_buffer);
      write32(dev->regs + DWC2_DIEPTSIZ(pep), (packet_count << 19) | hw_xfer_size);
      set32(dev->regs + DWC2_DIEPCTL(pep), DWC2_DXEPCTLi_EnableEP | DWC2_DXEPCTL_ClearNAK);
-@@ -1458,15 +1507,26 @@ dwc2_dev_t *usb_dwc2_init(u64 regs)
-     uint32_t hsphy_type = FIELD_GET(DWC2_GHWCFG2_HSPHYTYPE, read32(regs + DWC2_GHWCFG2));
-     uint32_t gusbcfg = read32(regs + DWC2_GUSBCFG);
- 
-+    printf("usb_dwc2: hsphy_type=%u GUSBCFG=0x%08x\n", hsphy_type, gusbcfg);
-+
-     switch (hsphy_type) {
+@@ -1462,11 +1511,20 @@ dwc2_dev_t *usb_dwc2_init(u64 regs)
          case 0b00: /* No HS */
              return NULL;
          case 0b01: /* UTMI+ */
@@ -101,36 +95,3 @@ index 9220d62..dee4f1d 100644
          case 0b10: /* ULPI */
              gusbcfg = FIELD_PREP(GUSBCFG_USBTRDTIM_MASK, 9);
              break;
-@@ -1475,6 +1535,8 @@ dwc2_dev_t *usb_dwc2_init(u64 regs)
-             break;
-     }
- 
-+    printf("usb_dwc2: writing GUSBCFG=0x%08x\n", gusbcfg);
-+
-     set32(regs + DWC2_DCTL, DWC2_DCTL_SftDisCon);
-     write32(regs + DWC2_GAHBCFG, FIELD_PREP(DWC2_GAHBCFG_HBSTLEN_MASK, 7) | DWC2_GAHBCFG_DMA_EN);
-     write32(regs + DWC2_GUSBCFG, gusbcfg);
-@@ -1491,6 +1553,23 @@ dwc2_dev_t *usb_dwc2_init(u64 regs)
-     write32(regs + DWC2_GINTMSK, DWC2_GINTSTS_ENUMDoneMsk | DWC2_GINTSTS_USBRstMsk);
-     clear32(regs + DWC2_DCTL, DWC2_DCTL_SftDisCon);
- 
-+    /*
-+     * Read the core back. Under Linux every write to these registers is
-+     * dropped: GAHBCFG, DCTL and GOTGCTL all read their old value immediately
-+     * after being written, while reads themselves are fine. PongoOS writes the
-+     * same registers on the same silicon minutes earlier and its gadget works,
-+     * so the question is whether this hits the same wall.
-+     *
-+     * Expected if the writes land: GAHBCFG=0x0000002e, DCFG=0x00000004,
-+     * DCTL with bit 1 clear, GINTMSK=0x00003000.
-+     */
-+    printf("usb_dwc2: readback GAHBCFG=%08x GUSBCFG=%08x DCFG=%08x DCTL=%08x\n",
-+           read32(regs + DWC2_GAHBCFG), read32(regs + DWC2_GUSBCFG), read32(regs + DWC2_DCFG),
-+           read32(regs + DWC2_DCTL));
-+    printf("usb_dwc2: readback GINTMSK=%08x GINTSTS=%08x GOTGCTL=%08x DSTS=%08x\n",
-+           read32(regs + DWC2_GINTMSK), read32(regs + DWC2_GINTSTS), read32(regs + DWC2_GOTGCTL),
-+           read32(regs + DWC2_DSTS));
-+
-     /* prepare control endpoint 0 IN and OUT */
-     if (usb_dwc2_ep_activate(dev, USB_LEP_CTRL_IN, 0, 64))
-         goto error;

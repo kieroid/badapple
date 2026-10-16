@@ -89,8 +89,3 @@ send "$RTSC"
 cmd firmware
 send "$KRNL"
 cmd bootx
-
-# bootx jumping is what taking the device off USB looks like, so losing it here
-# is the good outcome. The screen is where the rest of the story is.
-sleep 5
-echo "mode now: '$(mode)'"
