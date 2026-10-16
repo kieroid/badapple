@@ -13,7 +13,7 @@
 #   - the pwrstate fallback becomes apple,pmgr-pwrstate, which is what the
 #     driver actually binds against
 #
-# Needs pyimg4, and a checkout of m1n1 with the construct module importable.
+# Needs ipsw, and a checkout of m1n1 with the construct module importable.
 
 set -eu
 
@@ -29,7 +29,7 @@ python=${PYTHON:-$root/build/venv/bin/python}
 adt=$root/build/adt-d331p.bin
 out=$root/dts/t8020-pmgr.dtsi
 
-pyimg4 im4p extract -i "$im4p" -o "$adt"
+ipsw img4 im4p extract -o "$adt" "$im4p"
 
 {
 	cat <<'EOF'

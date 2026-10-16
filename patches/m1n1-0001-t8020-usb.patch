@@ -1,5 +1,5 @@
 diff --git a/src/usb.c b/src/usb.c
-index fce0d5d..56572c6 100644
+index fce0d5d..36ca0b8 100644
 --- a/src/usb.c
 +++ b/src/usb.c
 @@ -6,6 +6,7 @@
@@ -10,7 +10,7 @@ index fce0d5d..56572c6 100644
  #include "pmgr.h"
  #include "soc.h"
  #include "string.h"
-@@ -319,6 +320,94 @@ static int usb_init_i2c(const char *i2c_path)
+@@ -319,6 +320,90 @@ static int usb_init_i2c(const char *i2c_path)
      return 0;
  }
  
@@ -96,16 +96,12 @@ index fce0d5d..56572c6 100644
 +
 +    if (dart_map(dart, ram_base & 0xffffffff, (void *)ram_base, mem_size_actual) < 0)
 +        printf("usb: dart-usb flat map at 0x%lx failed\n", ram_base & 0xffffffff);
-+
-+    printf("usb: dart-usb TCR=%08x CONFIG=%08x STREAMS=%08x TTBR0=%08x ERR=%08x@%08x%08x\n",
-+           read32(0x239900100), read32(0x239900060), read32(0x2399000fc), read32(0x239900200),
-+           read32(0x239900040), read32(0x239900054), read32(0x239900050));
 +}
 +
  int usb_complex_init(struct usb_complex_config *config)
  {
      usb_type = USB_TYPE_DWC2;
-@@ -354,6 +443,33 @@ int usb_complex_init(struct usb_complex_config *config)
+@@ -354,6 +439,27 @@ int usb_complex_init(struct usb_complex_config *config)
              write32(config->USBComplexBase + USBX_USBDEV_REMAP_CTL_T8015,
                      USBX_REMAP_TO_DRAM_BITS_T8011);
              break;
@@ -128,18 +124,12 @@ index fce0d5d..56572c6 100644
 +            write32(config->USBComplexBase + USBX_CTL_T8011, USBX_CTL_EN_T8011);
 +            write32(config->USBComplexBase + USBX_USBDEV_REMAP_CTL_T8015,
 +                    USBX_REMAP_DMA_EN_ONLY_T8020);
-+            printf("usb: complex CTL=%08x remap 18=%08x 28=%08x 38=%08x 48=%08x\n",
-+                   read32(config->USBComplexBase + USBX_CTL_T8011),
-+                   read32(config->USBComplexBase + 0x18),
-+                   read32(config->USBComplexBase + 0x28),
-+                   read32(config->USBComplexBase + 0x38),
-+                   read32(config->USBComplexBase + USBX_USBDEV_REMAP_CTL_T8015));
 +            usb_t8020_dart_setup();
 +            break;
          default:
              printf("usb: Unsupported complex type!\n");
              return -1;
-@@ -454,8 +570,10 @@ int usb_complex_init_adt(void)
+@@ -454,8 +560,10 @@ int usb_complex_init_adt(void)
          type = USBCOMPLEX_S5L8960X;
      } else if (adt_is_compatible(adt, usbComplex_offset, "usb-complex,t8015")) {
          type = USBCOMPLEX_T8015;

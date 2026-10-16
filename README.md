@@ -1,10 +1,9 @@
 # Bad Apple
 
 Mainline Linux on the Apple A12 (T8020), on an iPhone XS Max (iPhone11,6,
-D331pAP). The goal is a console and a shell. No wifi, cellular or GPU.
+D331pAP). The goal is a console and a shell.
 
 The boot is tethered and reads nothing off the NAND, so the NAND can hold ext4.
-
 Registers and dead ends are in [NOTES.md](NOTES.md).
 
 ## Boot chain
@@ -25,79 +24,65 @@ iBSS stays in the chain. It brings up DRAM and the display.
 | Host | For |
 |---|---|
 | `clang`, `ld.lld` | kernel and m1n1 |
-| Rust with `rust-src` | m1n1 (`BUILDSTD=1`) |
+| Rust with `rust-src` | m1n1 |
 | `dtc`, `cpp` | `make check` |
 | `python3` | `tools/`, m1n1's proxyclient |
 | `git`, `curl`, `unzip` | `make deps`, `make initramfs` |
-| `ipsw`, `pyimg4` | unpacking the IPSW, img4 |
+| `ipsw` | the IPSW and img4 |
 | `irecovery` | recovery mode |
-| [usbliter8ra1n-patch](https://github.com/Trussh/usbliter8ra1n-patch) | jig firmware, flashed once, see [NOTES.md](NOTES.md#the-jig) |
+| [usbliter8ra1n-patch](https://github.com/Trussh/usbliter8ra1n-patch) | jig firmware, see [NOTES.md](NOTES.md#the-jig) |
 
-You also need an iPhone11,6 IPSW.
+And an iPhone11,6 IPSW.
 
 ## Build
 
 ```sh
-make deps       # clone m1n1, Linux and Hoolock's docs, make build/venv, apply patches/
-make check      # compile the device tree
-make m1n1
-make initramfs  # download Hoolock's test initramfs
-make kernel
+make deps                                  # clone m1n1, Linux, Hoolock's docs; apply patches/
+make images IPSW=/path/to/unpacked/ipsw    # once: iBSS, device tree, trustcache, touch firmware
+make boot                                  # builds the rest and boots
 ```
 
-`make boot` rebuilds what it needs, so the other targets are optional.
-`make check` is the only one that works on a bare checkout. `make patch` is
-safe to run again.
-
-## First time setup
-
-```sh
-make images IPSW=/path/to/unpacked/ipsw
-```
-
-This patches iBSS, wraps the device tree and trustcache, and converts the touch
-firmware. All of it lands in `build/iboot/` and stays there.
+`make check` builds only the device tree and works on a bare checkout.
 
 ## Run
 
 Put the phone in DFU on the jig. The exploit fires in about a second. Move the
-cable to the PC, then:
+cable to the PC and run `make boot`.
 
-```sh
-make boot
-```
+The phone comes up as `05ac:4142` and answers telnet on `172.16.42.1`.
+`tools/tsh.py "cmd"` runs one command. The first USB attach often fails and the
+phone retries by itself, so give it up to a minute.
 
-Within half a minute the phone shows up as `05ac:4142` and answers telnet on
-`172.16.42.1`. `tools/tsh.py "cmd"` runs one command. The first USB attach
-usually fails and the phone retries by itself, so give it time.
-
-If the phone is not pwned, its USB serial has no `PWND:[usbliter8]`. Unplug the
-jig for a few seconds and put the phone back in DFU.
+No `PWND:[usbliter8]` in the USB serial means the exploit did not fire. Unplug
+the jig for a few seconds and try again.
 
 ## Status
 
 - [x] Boot chain, tethered
 - [x] Device tree, PMGR domains generated from the ADT
 - [x] Display
-  - [x] Console on the framebuffer, notch cut out
-  - [x] Display driver
+  - [x] Console, notch cut out
+  - [x] Display driver, XRGB8888 and XRGB2101010
   - [x] Brightness, `/sys/class/backlight/230400000.dsi.0`
+  - [ ] HDR: high brightness mode, gamma tables
 - [x] AIC interrupts and fast IPIs
 - [x] SMP on all six cores
   - [ ] Chicken bits per core in the kernel, m1n1 sets them once
 - [x] NVMe, ext4
-- [x] SMC
-  - [x] Battery and charger
-  - [x] Side button, volume buttons, ringer switch
-  - [x] Poweroff and reboot
+- [x] SMC: battery, charger, buttons, ringer switch, poweroff, reboot
 - [x] Die temperature, hwmon
 - [x] USB gadget: telnet, DHCP, getty on `/dev/ttyGS0`
   - [ ] Why the first attach fails
-- [x] Touch, `/dev/input/event1`
-  - [ ] Real interrupt, power off, force sensor
-- [ ] cpufreq, needs the CLPC coprocessor
+- [x] Touch, `/dev/input/event1`, with its interrupt
+  - [ ] Power off, force sensor
+- [ ] cpufreq
 - [ ] Wifi, cellular, GPU, audio
 - [ ] Upstream
+
+cpufreq is off. The CPUs stay at iBoot's speed, 744 MHz on the P cores and
+792 MHz on the E cores. Asking for anything faster hangs the phone, most likely
+because the CPU voltage never goes up with the clock. See
+[NOTES.md](NOTES.md#cpufreq).
 
 ## License
 

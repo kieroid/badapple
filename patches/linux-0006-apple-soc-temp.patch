@@ -34,10 +34,10 @@ index 1229b6b39..234ed189a 100644
  obj-$(CONFIG_SENSORS_ARCTIC_FAN_CONTROLLER)	+= arctic_fan_controller.o
 diff --git a/drivers/hwmon/apple-soc-temp.c b/drivers/hwmon/apple-soc-temp.c
 new file mode 100644
-index 000000000..83b46657f
+index 000000000..0e14d545c
 --- /dev/null
 +++ b/drivers/hwmon/apple-soc-temp.c
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,202 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple SoC die temperature sensors
@@ -49,9 +49,8 @@ index 000000000..83b46657f
 + * the PMGR die sensors are 32 bit and evenly spaced, the CPU cluster ones are
 + * 64 bit and are not.
 + *
-+ * Each sensor can accumulate readings into a sum and a count, so a temperature
-+ * is sum / count. readBK holds a single unaveraged reading and is what iBoot
-+ * leaves behind, so in practice that is what gets read.
++ * Each sensor can also accumulate readings into a sum and a count, but iBoot
++ * leaves those at zero, so this reads readBK, a single reading.
 + */
 +
 +#include <linux/bitfield.h>
@@ -71,8 +70,6 @@ index 000000000..83b46657f
 +
 +struct apple_temp_sensor {
 +	const char *label;
-+	u32 sum;
-+	u32 cnt;
 +	u32 read_bk;
 +};
 +
@@ -82,31 +79,25 @@ index 000000000..83b46657f
 +	bool wide;
 +};
 +
-+/*
-+ * /arm-io/tempsensor0 to 4. One block, 0x4000 per sensor, averaged reads
-+ * 0x20000 further up.
-+ */
++/* /arm-io/tempsensor0 to 4. One block, 0x4000 per sensor. */
 +static const struct apple_temp_sensor t8020_pmgr_sensors[] = {
-+	{ "SOC die 0", 0x00028, 0x00030, 0x20000 },
-+	{ "SOC die 1", 0x04028, 0x04030, 0x24000 },
-+	{ "SOC die 2", 0x08028, 0x08030, 0x28000 },
-+	{ "SOC die 3", 0x0c028, 0x0c030, 0x2c000 },
-+	{ "SOC die 4", 0x10028, 0x10030, 0x30000 },
++	{ "SOC die 0", 0x20000 },
++	{ "SOC die 1", 0x24000 },
++	{ "SOC die 2", 0x28000 },
++	{ "SOC die 3", 0x2c000 },
++	{ "SOC die 4", 0x30000 },
 +};
 +
-+/*
-+ * /arm-io/tempsensor5 to 7, the P cluster and its two cores. The spacing is
-+ * 0x40 and then 0x200, which is why these are a table and not a stride.
-+ */
++/* /arm-io/tempsensor5 to 7, the P cluster and its two cores. */
 +static const struct apple_temp_sensor t8020_acc_sensors[] = {
-+	{ "ACC",   0x030, 0x038, 0x4000 },
-+	{ "ACCp0", 0x070, 0x078, 0x4010 },
-+	{ "ACCp1", 0x230, 0x238, 0x4020 },
++	{ "ACC",   0x4000 },
++	{ "ACCp0", 0x4010 },
++	{ "ACCp1", 0x4020 },
 +};
 +
 +/* /arm-io/tempsensor8, the E cluster, same offsets at its own base. */
 +static const struct apple_temp_sensor t8020_acce_sensors[] = {
-+	{ "ACCe", 0x030, 0x038, 0x4000 },
++	{ "ACCe", 0x4000 },
 +};
 +
 +static const struct apple_temp_soc t8020_pmgr = {
@@ -129,33 +120,16 @@ index 000000000..83b46657f
 +struct apple_temp {
 +	void __iomem *base;
 +	const struct apple_temp_soc *soc;
-+	/* which sensors of the block are actually running, see probe */
-+	const struct apple_temp_sensor *live[ARRAY_SIZE(t8020_pmgr_sensors)];
-+	unsigned int live_count;
 +};
 +
-+static u64 apple_temp_read_reg(struct apple_temp *temp, u32 offset)
++static u64 apple_temp_raw(const struct apple_temp *temp, int channel)
 +{
++	u32 offset = temp->soc->sensors[channel].read_bk;
++
 +	if (temp->soc->wide)
 +		return readq_relaxed(temp->base + offset);
 +
 +	return readl_relaxed(temp->base + offset);
-+}
-+
-+/*
-+ * Averaged if the hardware has been accumulating, otherwise the single read.
-+ * iBoot leaves the accumulators at zero, so in practice this is the single
-+ * read, but a sum is better when there is one.
-+ */
-+static u64 apple_temp_raw(struct apple_temp *temp, const struct apple_temp_sensor *sensor)
-+{
-+	u64 sum = apple_temp_read_reg(temp, sensor->sum);
-+	u64 cnt = apple_temp_read_reg(temp, sensor->cnt);
-+
-+	if (cnt)
-+		return div64_u64(sum, cnt);
-+
-+	return apple_temp_read_reg(temp, sensor->read_bk);
 +}
 +
 +static int apple_temp_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
@@ -167,7 +141,7 @@ index 000000000..83b46657f
 +		return -EOPNOTSUPP;
 +
 +	/* millidegrees, from a reading in 1/64 of a degree */
-+	*val = (FIELD_GET(TEMP_READ_VALUE, apple_temp_raw(temp, temp->live[channel])) * 1000)
++	*val = (FIELD_GET(TEMP_READ_VALUE, apple_temp_raw(temp, channel)) * 1000)
 +		>> TEMP_READ_SHIFT;
 +
 +	return 0;
@@ -181,15 +155,26 @@ index 000000000..83b46657f
 +	if (type != hwmon_temp || attr != hwmon_temp_label)
 +		return -EOPNOTSUPP;
 +
-+	*str = temp->live[channel]->label;
++	*str = temp->soc->sensors[channel].label;
 +
 +	return 0;
 +}
 +
++/*
++ * Not every sensor in a block is running. On D331p, PMGR sensor 2 reads zero
++ * while the other four read sensible temperatures, so hide whatever reads
++ * nothing rather than publish a channel stuck at 0 degrees.
++ */
 +static umode_t apple_temp_hwmon_is_visible(const void *data, enum hwmon_sensor_types type,
 +					   u32 attr, int channel)
 +{
-+	return type == hwmon_temp ? 0444 : 0;
++	const struct apple_temp *temp = data;
++
++	if (type != hwmon_temp || channel >= temp->soc->count ||
++	    !apple_temp_raw(temp, channel))
++		return 0;
++
++	return 0444;
 +}
 +
 +static const struct hwmon_ops apple_temp_hwmon_ops = {
@@ -198,15 +183,25 @@ index 000000000..83b46657f
 +	.read_string = apple_temp_hwmon_read_string,
 +};
 +
++static const struct hwmon_channel_info * const apple_temp_info[] = {
++	HWMON_CHANNEL_INFO(temp,
++			   HWMON_T_INPUT | HWMON_T_LABEL,
++			   HWMON_T_INPUT | HWMON_T_LABEL,
++			   HWMON_T_INPUT | HWMON_T_LABEL,
++			   HWMON_T_INPUT | HWMON_T_LABEL,
++			   HWMON_T_INPUT | HWMON_T_LABEL),
++	NULL
++};
++
++static const struct hwmon_chip_info apple_temp_chip = {
++	.ops = &apple_temp_hwmon_ops,
++	.info = apple_temp_info,
++};
++
 +static int apple_temp_probe(struct platform_device *pdev)
 +{
-+	struct hwmon_channel_info *info;
-+	struct hwmon_chip_info *chip;
-+	const u32 **info_list;
 +	struct apple_temp *temp;
 +	struct device *hwmon;
-+	u32 *config;
-+	unsigned int i;
 +
 +	temp = devm_kzalloc(&pdev->dev, sizeof(*temp), GFP_KERNEL);
 +	if (!temp)
@@ -220,44 +215,8 @@ index 000000000..83b46657f
 +	if (IS_ERR(temp->base))
 +		return PTR_ERR(temp->base);
 +
-+	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
-+	info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
-+	info_list = devm_kcalloc(&pdev->dev, 2, sizeof(*info_list), GFP_KERNEL);
-+	config = devm_kcalloc(&pdev->dev, temp->soc->count + 1, sizeof(*config), GFP_KERNEL);
-+	if (!chip || !info || !info_list || !config)
-+		return -ENOMEM;
-+
-+	/*
-+	 * Not every sensor in a block is running. On D331p, PMGR sensor 2
-+	 * reads zero in both its status and its value while the other four
-+	 * read sensible temperatures, so skip whatever reads nothing rather
-+	 * than publish a channel stuck at 0 degrees.
-+	 */
-+	for (i = 0; i < temp->soc->count; i++) {
-+		const struct apple_temp_sensor *sensor = &temp->soc->sensors[i];
-+
-+		if (!apple_temp_raw(temp, sensor)) {
-+			dev_info(&pdev->dev, "%s: reads zero, skipped\n", sensor->label);
-+			continue;
-+		}
-+
-+		config[temp->live_count] = HWMON_T_INPUT | HWMON_T_LABEL;
-+		temp->live[temp->live_count++] = sensor;
-+	}
-+
-+	if (!temp->live_count)
-+		return -ENODEV;
-+
-+	info->type = hwmon_temp;
-+	info->config = config;
-+	info_list[0] = (const u32 *)info;
-+	chip->ops = &apple_temp_hwmon_ops;
-+	chip->info = (const struct hwmon_channel_info * const *)info_list;
-+
-+	platform_set_drvdata(pdev, temp);
-+
 +	hwmon = devm_hwmon_device_register_with_info(&pdev->dev, "apple_soc_temp",
-+						    temp, chip, NULL);
++						     temp, &apple_temp_chip, NULL);
 +
 +	return PTR_ERR_OR_ZERO(hwmon);
 +}

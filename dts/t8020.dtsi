@@ -241,7 +241,9 @@
 
 			ausbphy0: phy@239000060 {
 				compatible = "apple,t8020-ausb-phy", "apple,ausb-phy";
-				reg = <0x2 0x39000060 0x0 0x20>;
+				/* The PHY, and the USB complex registers before it. */
+				reg = <0x2 0x39000060 0x0 0x20>,
+				      <0x2 0x39000000 0x0 0x60>;
 				power-domains = <&ps_usbctlreg>;
 				#phy-cells = <1>;
 				/* Tunables to be filled by loader */
@@ -544,6 +546,32 @@
 				     <AIC_IRQ 99 IRQ_TYPE_LEVEL_HIGH>,
 				     <AIC_IRQ 100 IRQ_TYPE_LEVEL_HIGH>,
 				     <AIC_IRQ 101 IRQ_TYPE_LEVEL_HIGH>;
+		};
+
+		/*
+		 * The AOP GPIO block, aop-gpio in the ADT, 52 pins. The ADT
+		 * lists only groups 4 to 6 as supported, but group 0, which
+		 * the driver uses, reaches AIC 176 all the same.
+		 */
+		pinctrl_aop: pinctrl@24a820000 {
+			compatible = "apple,t8020-pinctrl", "apple,pinctrl";
+			reg = <0x2 0x4a820000 0x0 0x4000>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&pinctrl_aop 0 0 52>;
+			apple,npins = <52>;
+
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 176 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 177 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 178 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 179 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 180 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 181 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 182 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
 		/*

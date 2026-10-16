@@ -7,8 +7,8 @@ Registers, gotchas, and things that turned out wrong. Build and boot are in
 
 ```sh
 ipsw extract --pattern 'DeviceTree.*' -o work <ipsw>
-pyimg4 im4p extract -i work/*/Firmware/all_flash/DeviceTree.d331pap.im4p \
-    -o build/adt-d331p.bin
+ipsw img4 im4p extract -o build/adt-d331p.bin \
+    work/*/Firmware/all_flash/DeviceTree.d331pap.im4p
 cd build/m1n1/proxyclient
 ../../venv/bin/python -c '
 from m1n1.adt import load_adt
@@ -153,7 +153,6 @@ No `PWND` means the exploit did not run.
 | 0003 | keep the log on screen with a payload |
 | 0004 | proxyclient: an ADT property it cannot parse is not fatal |
 | 0005 | A12 MIDR parts, or m1n1 takes an M4-only path |
-| 0006 | skip the in-memory log buffer, near where an SError lands |
 | 0007 | dwc2: cache maintenance on DMA buffers, and the PHY width |
 | 0008 | CPU start block at pmgr + 0xd4000 |
 | 0009 | A12 chicken bits, from XNU's `start.s` |
@@ -195,8 +194,7 @@ role is `7 << 20`. VBUS detect stays forced. A working PHY reads `0x01c10003`.
 dwc2 dropped every write while reads worked. `bus@239000000` needs its own
 `nonposted-mmio`: the kernel only checks the node and its parent. The same
 mistake in `linux-0001`, a plain `ioremap` of the complex, raised an SError
-that only killed E cores. Use `ioremap_np` everywhere on this SoC, except the
-cpufreq block.
+that only killed E cores. Use `ioremap_np` everywhere on this SoC.
 
 ### The first attach fails, worked around
 
@@ -340,7 +338,7 @@ per instance.
 | offset | what |
 |---|---|
 | 0x50004 | bit 31 enabled |
-| 0x5001c | format word |
+| 0x5001c | format word, see below |
 | 0x50030 | surface address, low 32 bits |
 | 0x50060 | stride |
 | 0x50080 | size, `w << 16 \| h` |
@@ -377,10 +375,29 @@ disp0_busif -> disp0_fe -> disp0_be -> mipi_dsi
 Two other bugs: no `.fops` in `drm_driver` (oops in `drm_fbdev_dma_fb_open`),
 and reprogramming the plane on every damage, which corrupts the picture.
 
-**Pixel format.** The pipe scans XRGB2101010. fbdev could not pick it: colour
-mode 30 meant 30 bpp, and the colour fields had no depth 30 case. `linux-0008`
-adds both and the driver asks for depth 30. Userspace that picks XRGB8888 still
-gets wrong colours until the format word at 0x5001c is understood.
+**Pixel format.** iBoot leaves the pipe scanning XRGB2101010. The driver writes
+the format word on every flip, so fbdev and userspace get XRGB8888.
+
+The kext builds the word in `FUN_fffffff00901db2c`. Bits 24-25 are the pixel
+size, 26-27 the channel order, 13-20 a swizzle of four 2 bit fields. Tested by
+drawing red, green, blue and white bands as XRGB8888 and changing the word:
+
+| word | where from | result |
+|---|---|---|
+| 0x03dc8000 | iBoot | right for XRGB2101010 |
+| 0x01dc8000 | iBoot's, size 1 | solid red, an error colour |
+| 0x017c8000 | kext, size 1, order 0 | RGBX8888: byte 3 is red, byte 0 unused |
+| 0x057c8000 | kext, size 1, order 1 | XRGB8888 |
+
+Bits 21 and 23 differ between iBoot's word and the kext's and are not
+understood.
+
+**HDR** here is EDR, as on iOS: the panel has no PQ or HLG mode, so normal
+content is drawn below full code and the brightness turned up. Tested with
+XRGB2101010, brightness 2047, the left half at code 1023 and the right at 545:
+the left is much brighter. iOS goes past 2047 for HDR, probably through a high
+brightness mode in `AppleSummitLCD` that is not found yet. The gamma tables at
+0x52000 could do tone mapping but are not mapped out.
 
 ### Brightness
 
@@ -426,7 +443,7 @@ Works: 10-finger multitouch on `/dev/input/event1`. `linux-0009` is the driver,
 | controller | `/arm-io/spi1/multi-touch`, `hid-transport,k1`, `hbpp-version` 0x105 |
 | SPI | `spi1`, 4 MHz, mode 0, CS on GPIO 67 |
 | reset | GPIO 5, active low |
-| interrupt | `aop-gpio` 19, low when there is data |
+| interrupt | `aop-gpio` 19, low when there is data, group 0 to AIC 176 |
 | clock | PMGR 0x23b078000 |
 | power | Acorn register 0x05 on i2c3 |
 | firmware | `Firmware/D331p_Multitouch.im4p` in the IPSW |
@@ -534,15 +551,12 @@ One early probe crashed with the screen flashing. Cause unknown, not seen since.
 
 ## cpufreq
 
-Off. Cluster DVFS at 0x210e20000 (E) and 0x211e20000 (P), T8103 layout.
+Off. A pstate above 2 hangs the SoC, at once or after a while.
 
-- `DVFS_CMD` ignores 32 bit writes. Use `writeq`.
-- `ioremap_np` hangs the E cluster block. Plain `ioremap` here, the one
-  exception on this SoC.
-- E pstates 1 to 4 work, 5 hangs the SoC. P works once, then `BUSY` sticks.
-
-The ADT has `clpc` and `pmp` under pmgr: on this generation a coprocessor
-completes DVFS requests, and we do not run it. The phone stays at pstate 2.
+Cluster DVFS blocks are at 0x210e20000 (E) and 0x211e20000 (P), in the T8103
+layout: `CMD` at 0x20 with PS1 in bits 3:0, PS2 in 15:12, `SET` bit 25, `BUSY`
+bit 31, and `STATUS` at 0x50. `CMD` ignores 32 bit writes, use `writeq`.
+Non-posted mappings work on both clusters.
 
 | pstate | E | P |
 |---|---|---|
@@ -555,8 +569,58 @@ completes DVFS requests, and we do not run it. The phone stays at pstate 2.
 | 7 | | 2436 MHz, boost |
 | 8 | | 2496 MHz, boost |
 
-From a live ADT (`voltage-states1-sram`, `voltage-states5-sram`); the IPSW
-copies are zeroed.
+From a live ADT (`voltage-states1-sram`, `voltage-states5-sram`). The IPSW
+copies are zeroed. iBoot leaves both clusters at pstate 2.
+
+### What happens
+
+- Pstates 1 and 2 work.
+- 3 and 4 complete, then the SoC hangs later: E went 3 to 4 and died, P ran
+  at 4 at idle for minutes.
+- 5 hangs at once, on both clusters.
+
+Best guess: the CPU voltage never moves, so anything above pstate 2 runs on
+pstate 2's voltage. How long it lasts depends on load.
+
+### The pstate table
+
+Rows of 0x20 bytes from cluster + 0x70000. Row n is pstate n, row 0 is the
+live one. The top byte of the first word rises with the pstate, likely the
+voltage. On P: 0x3e, 0x3e, 0x4a, 0x6a, 0x8e, 0xb0, 0xe0, 0xe2. Bit 63 of the
+third word is set from row 5 up, on both clusters.
+
+### What iOS does
+
+From `AppleT8020PMGR` and `ApplePMGR` in 20G81. Offsets are from the cluster
+base, 0x210e00000 or 0x211e00000.
+
+| function | does |
+|---|---|
+| startup, `FUN_fffffff00940eb18` | PMGR 0x9c000 and 0x9c040 bit 31, 0x440f8 = 1, then `_initAPSC` |
+| `_initAPSC`, `FUN_fffffff00940f0cc` | row 0 takes row 2's voltage byte; `CMD` PS2 = 2 and bit 20, then bits 29 and 30, bit 40 on P |
+| `setPerfState`, `FUN_fffffff009411418` | waits for `BUSY`, sets 0x50000 bit 26, copies the target row's fields into row 0 and 0x40110 + ps * 8 into 0x40110, restores 0x50000, writes `CMD` |
+| `enableAPSC` | clears `CMD` bit 22, waits for bit 7 |
+| `enableCPUFixedFreqRelock` | `CMD` bit 42 |
+
+The `setPerfState` masks are 0xff00000000000000, 0x3f0ff00000000 and
+0x3000000ffff0000 for the three words. iBoot leaves 0x9c040 and 0x440f8 at 0.
+
+### Tried
+
+With each of these added in turn, P still hung at pstate 5:
+
+1. `SPMI_SOC0` to `2` on. The ADT marks them on but not critical, so Linux
+   gates them.
+2. The row 0 copy before each switch.
+3. The iOS startup.
+4. `CMD` bit 42.
+
+With the startup and the copy, E hung going from 1 to 3.
+
+Next: find how the CPU voltage reaches the PMU, and a way to read the CPU
+rail from Linux, so one boot can show whether the voltage moves. Code for the
+iOS sequence in m1n1 and the cpufreq driver exists, but is kept out of the
+tree until then.
 
 ## Debugging
 
@@ -575,11 +639,14 @@ copies are zeroed.
   `/bin/sh`.
 - "Not the USB DART." It was the DART.
 - `05ac:12a8` is another phone. Ours is `05ac:4142`.
+- "cpufreq needs the CLPC coprocessor." Not shown. The voltage is the likely
+  problem.
+- "`ioremap_np` hangs the E cluster block." Wrong, that was a pstate 5 hang.
+- "P works once, then `BUSY` sticks." Wrong, P went 2 to 3 to 4 every time.
 
 ## Known gaps
 
-1. cpufreq, needs the CLPC coprocessor.
+1. cpufreq: a pstate above 2 hangs the SoC.
 2. Chicken bits are set once by m1n1, not per core by the kernel.
 3. The first USB attach fails; the gadget retries.
-4. Touch uses polling, no power off, no force sensor.
-5. Userspace in XRGB8888 gets wrong colours.
+4. Touch has no power off and no force sensor.

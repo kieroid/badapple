@@ -36,10 +36,10 @@ index 48d30bf61..2fd47771f 100644
  obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
 diff --git a/drivers/gpu/drm/tiny/apple-h11p.c b/drivers/gpu/drm/tiny/apple-h11p.c
 new file mode 100644
-index 000000000..b41231b98
+index 000000000..0255782ce
 --- /dev/null
 +++ b/drivers/gpu/drm/tiny/apple-h11p.c
-@@ -0,0 +1,526 @@
+@@ -0,0 +1,500 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple H11P display pipe, as found on T8020
@@ -47,9 +47,9 @@ index 000000000..b41231b98
 + * Copyright (c) 2026 kiki <kieran@lavato.net>
 + *
 + * iBoot brings the panel and the pipe up and hands over a running scanout, so
-+ * this driver takes that over rather than programming it: the mode, the stride
-+ * and the pixel format are whatever iBoot chose, and all this does is point
-+ * the plane at a buffer of its own and commit.
++ * this driver takes that over rather than programming it: the mode is
++ * whatever iBoot chose, and all this does is point the plane at a buffer of
++ * its own, set the stride and pixel format, and commit.
 + *
 + * The one thing worth knowing about the hardware is that the register window
 + * is mirrored every 0x200000 and only the second copy accepts writes. Reads
@@ -86,6 +86,7 @@ index 000000000..b41231b98
 +/* The plane fetch unit, which Apple calls GenPipe. Instances are 0x8000 apart. */
 +#define GP_BASE			0x50000
 +#define GP_STATUS		(GP_BASE + 0x004)
++#define GP_FORMAT		(GP_BASE + 0x01c)
 +#define GP_SURFACE		(GP_BASE + 0x030)
 +#define GP_STRIDE		(GP_BASE + 0x060)
 +#define GP_DST_SIZE		(GP_BASE + 0x080)
@@ -101,6 +102,14 @@ index 000000000..b41231b98
 + */
 +#define GP_SURFACE_ALIGN	64
 +
++/*
++ * Format words. Bits 24-25 are the pixel size, 26-27 the channel order and
++ * 13-20 a channel swizzle, from the kext. XRGB2101010 is the word iBoot
++ * leaves, XRGB8888 the one the kext would write, both checked on the panel.
++ */
++#define GP_FORMAT_XRGB8888	0x057c8000
++#define GP_FORMAT_XRGB2101010	0x03dc8000
++
 +struct apple_h11p {
 +	struct drm_device drm;
 +	struct drm_simple_display_pipe pipe;
@@ -109,12 +118,12 @@ index 000000000..b41231b98
 +	struct dev_pm_domain_list *pds;
 +	void __iomem *read;
 +	void __iomem *write;
-+	u32 stride;
 +	/* high bits of the physical address the pipe is fetching from */
 +	u32 surface_hi;
 +	/* what the pipe was last told, so an unchanged flip writes nothing */
 +	u32 live_surface;
 +	u32 live_stride;
++	u32 live_format;
 +};
 +
 +static struct apple_h11p *to_h11p(struct drm_device *drm)
@@ -144,7 +153,7 @@ index 000000000..b41231b98
 +static void apple_h11p_flip(struct apple_h11p *h11p, struct drm_plane_state *state)
 +{
 +	dma_addr_t addr;
-+	u32 stride;
++	u32 stride, format;
 +
 +	if (!state || !state->fb)
 +		return;
@@ -160,6 +169,8 @@ index 000000000..b41231b98
 +	 * TTBRs are invalid, which they could not be if the scanout used it.
 +	 */
 +	stride = state->fb->pitches[0];
++	format = state->fb->format->format == DRM_FORMAT_XRGB2101010 ?
++		 GP_FORMAT_XRGB2101010 : GP_FORMAT_XRGB8888;
 +
 +	/*
 +	 * Only touch the hardware when something actually moved. fbcon renders
@@ -169,7 +180,7 @@ index 000000000..b41231b98
 +	 * picture and eventually takes the phone down.
 +	 */
 +	if (lower_32_bits(addr) == h11p->live_surface &&
-+	    stride == h11p->live_stride)
++	    stride == h11p->live_stride && format == h11p->live_format)
 +		return;
 +
 +	/*
@@ -178,10 +189,12 @@ index 000000000..b41231b98
 +	 */
 +	writel(lower_32_bits(addr), h11p->write + GP_SURFACE);
 +	writel(stride, h11p->write + GP_STRIDE);
++	writel(format, h11p->write + GP_FORMAT);
 +	writel(GP_COMMIT_PLANE0, h11p->write + GP_COMMIT);
 +
 +	h11p->live_surface = lower_32_bits(addr);
 +	h11p->live_stride = stride;
++	h11p->live_format = format;
 +
 +	drm_dbg_kms(&h11p->drm, "flip to 0x%08x stride %u, reads back 0x%08x\n",
 +		    lower_32_bits(addr), stride, readl(h11p->read + GP_SURFACE));
@@ -216,16 +229,6 @@ index 000000000..b41231b98
 +
 +	apple_h11p_flip(h11p, plane_state);
 +	apple_h11p_send_event(pipe);
-+}
-+
-+static void apple_h11p_pipe_disable(struct drm_simple_display_pipe *pipe)
-+{
-+	/*
-+	 * Deliberately nothing. Blanking would need the run mode registers,
-+	 * which are not mapped, and leaving the scanout running means the
-+	 * console stays readable instead of the screen going dark on the first
-+	 * modeset.
-+	 */
 +}
 +
 +static void apple_h11p_pipe_update(struct drm_simple_display_pipe *pipe,
@@ -265,41 +268,18 @@ index 000000000..b41231b98
 +	return 0;
 +}
 +
-+static int apple_h11p_pipe_prepare_fb(struct drm_simple_display_pipe *pipe,
-+				      struct drm_plane_state *plane_state)
-+{
-+	return drm_gem_plane_helper_prepare_fb(&pipe->plane, plane_state);
-+}
-+
 +static const struct drm_simple_display_pipe_funcs apple_h11p_pipe_funcs = {
 +	.enable = apple_h11p_pipe_enable,
-+	.disable = apple_h11p_pipe_disable,
 +	.update = apple_h11p_pipe_update,
 +	.check = apple_h11p_pipe_check,
 +	/*
-+	 * Not the shadow plane helpers: those are for drivers that copy out of
-+	 * a shmem buffer. The buffers here are contiguous and the hardware
-+	 * scans them directly, so all this needs is the implicit fence.
++	 * No .disable: blanking needs the run mode registers, which are not
++	 * mapped, and a running scanout keeps the console readable. No
++	 * .prepare_fb: the default waits on the implicit fence, which is all
++	 * a contiguous buffer the hardware scans directly needs.
 +	 */
-+	.prepare_fb = apple_h11p_pipe_prepare_fb,
 +};
 +
-+/*
-+ * The hardware is scanning out 30 bit pixels: the boot args report depth
-+ * 0x2001e, whose low half is 30, and iBoot programs the format register for
-+ * it. Writing 0x0000ff00 into the scanout from the m1n1 proxy showed blue,
-+ * not the green it would be under XRGB8888, which is what those bits mean
-+ * read as XRGB2101010.
-+ *
-+ * fbdev gets XRGB2101010 through preferred_depth 30, which needs two small
-+ * fixes in the DRM core: colour mode 30 used to map to 30 bits per pixel, and
-+ * the fbdev colour fields had no case for depth 30.
-+ *
-+ * XRGB8888 stays for userspace that only knows that format. Its pixels are
-+ * read as 2101010 too, so its colours come out wrong, white as cyan. Fixing
-+ * that means programming the format word at 0x5001c, whose encoding is not
-+ * worked out yet, see NOTES.md.
-+ */
 +static const u32 apple_h11p_formats[] = {
 +	DRM_FORMAT_XRGB8888,
 +	DRM_FORMAT_XRGB2101010,
@@ -361,8 +341,6 @@ index 000000000..b41231b98
 +	u32 size = readl(h11p->read + GP_DST_SIZE);
 +	u32 width = size >> 16;
 +	u32 height = size & 0xffff;
-+
-+	h11p->stride = readl(h11p->read + GP_STRIDE);
 +
 +	h11p->mode = (struct drm_display_mode) {
 +		.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
@@ -491,9 +469,6 @@ index 000000000..b41231b98
 +				     "cannot tell where the pipe is fetching from\n");
 +
 +	apple_h11p_read_mode(h11p);
-+	dev_info(&pdev->dev, "took over %dx%d, stride %d, surface 0x%08x, status 0x%08x\n",
-+		 h11p->mode.hdisplay, h11p->mode.vdisplay, h11p->stride,
-+		 readl(h11p->read + GP_SURFACE), readl(h11p->read + GP_STATUS));
 +
 +	ret = drmm_mode_config_init(drm);
 +	if (ret)
@@ -503,7 +478,6 @@ index 000000000..b41231b98
 +	drm->mode_config.max_width = h11p->mode.hdisplay;
 +	drm->mode_config.min_height = h11p->mode.vdisplay;
 +	drm->mode_config.max_height = h11p->mode.vdisplay;
-+	drm->mode_config.preferred_depth = 30;
 +	drm->mode_config.funcs = &apple_h11p_mode_config_funcs;
 +
 +	drm_connector_helper_add(&h11p->connector,

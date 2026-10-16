@@ -96,6 +96,8 @@
 		compatible = "apple,t8020-multitouch";
 		reg = <0>;
 		spi-max-frequency = <4000000>;
+		/* Low while the controller has data, "touch" in the ADT. */
+		interrupts-extended = <&pinctrl_aop 19 IRQ_TYPE_LEVEL_LOW>;
 		reset-gpios = <&pinctrl_ap 5 1>;
 		firmware-name = "apple/d331p-mtfw.bin";
 		/*

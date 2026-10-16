@@ -120,9 +120,8 @@ kernel: $(IMAGE)
 # nothing follows. Hoolock ships it enabled for pmOS netboot, which we do not
 # use.
 #
-# Same for CONFIG_ARM_APPLE_SOC_CPUFREQ, which hangs the boot one initcall
-# after Bluetooth: requests are accepted and never completed, because the
-# coprocessor that arbitrates DVFS is not running. See NOTES.md.
+# Same for CONFIG_ARM_APPLE_SOC_CPUFREQ: a pstate above 2 gets no voltage
+# change and hangs the SoC sooner or later. See NOTES.md.
 #
 # Both have to be reapplied after the config copy, otherwise they are silently
 # undone on the next build. Passing KCONFIG_EXTRA does not carry them either,

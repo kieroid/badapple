@@ -122,7 +122,7 @@ def count_ops(blob):
 
 def main():
     if len(sys.argv) not in (3, 4):
-        sys.exit(__doc__ or 'usage: mtfw.py <payload.plist> <out.bin> [personality]')
+        sys.exit('usage: mtfw.py <payload.plist> <out.bin> [personality]')
     personality = sys.argv[3] if len(sys.argv) == 4 else 'C1R1FC1,1'
     firmware = parse_plist(open(sys.argv[1], encoding='utf-8').read())
     if personality not in firmware:

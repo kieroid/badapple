@@ -1,5 +1,5 @@
 diff --git a/drivers/nvme/host/apple.c b/drivers/nvme/host/apple.c
-index c63e28c75..8e5e50686 100644
+index c63e28c75..5f6e1780e 100644
 --- a/drivers/nvme/host/apple.c
 +++ b/drivers/nvme/host/apple.c
 @@ -42,6 +42,23 @@
@@ -254,33 +254,7 @@ index c63e28c75..8e5e50686 100644
  		/* Setup NVMMU for both queues */
  		writeq(anv->adminq.tcb_dma_addr,
  			anv->mmio_nvme + APPLE_NVMMU_ASQ_TCB_BASE);
-@@ -1166,6 +1255,25 @@ static void apple_nvme_reset_work(struct work_struct *work)
- 	if (ret)
- 		goto out;
- 
-+	/*
-+	 * Tell the controller that IO submission queue entries are 128 bytes.
-+	 *
-+	 * The ring path has always written them at that stride, and sizes the
-+	 * allocation to match, but nothing ever said so in CC: nvme_enable_ctrl
-+	 * hardcodes NVME_NVM_IOSQES, which is 6, or 64 bytes. The T8020
-+	 * firmware checks, and answers Create IO SQ with status 2, invalid
-+	 * field, until CC agrees with the queue the host actually built.
-+	 *
-+	 * The linear path allocates 64 byte entries, so it wants the value
-+	 * nvme_enable_ctrl already wrote and is left alone.
-+	 */
-+	if (!anv->hw->has_linear_sq && !anv->hw->has_nvmmu) {
-+		anv->ctrl.ctrl_config &= ~NVME_CC_IOSQES_MASK;
-+		anv->ctrl.ctrl_config |= APPLE_NVME_IOSQES
-+					 << NVME_CC_IOSQES_SHIFT;
-+		writel(anv->ctrl.ctrl_config, anv->mmio_nvme + NVME_REG_CC);
-+	}
-+
- 	dev_dbg(anv->dev, "Starting admin queue");
- 	apple_nvme_init_queue(&anv->adminq);
- 	nvme_unquiesce_admin_queue(&anv->ctrl);
-@@ -1181,24 +1289,42 @@ static void apple_nvme_reset_work(struct work_struct *work)
+@@ -1181,24 +1270,42 @@ static void apple_nvme_reset_work(struct work_struct *work)
  	if (ret)
  		goto out;
  
@@ -331,7 +305,7 @@ index c63e28c75..8e5e50686 100644
  
  	anv->ctrl.queue_count = nr_io_queues + 1;
  
-@@ -1347,11 +1473,45 @@ static int apple_nvme_alloc_tagsets(struct apple_nvme *anv)
+@@ -1347,11 +1454,45 @@ static int apple_nvme_alloc_tagsets(struct apple_nvme *anv)
  	return 0;
  }
  
@@ -377,7 +351,7 @@ index c63e28c75..8e5e50686 100644
  
  	q->cqes = dmam_alloc_coherent(anv->dev,
  				      depth * sizeof(struct nvme_completion),
-@@ -1359,7 +1519,17 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
+@@ -1359,7 +1500,17 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
  	if (!q->cqes)
  		return -ENOMEM;
  
@@ -396,7 +370,7 @@ index c63e28c75..8e5e50686 100644
  		iosq_size = depth * sizeof(struct nvme_command);
  	else
  		iosq_size = depth << APPLE_NVME_IOSQES;
-@@ -1369,17 +1539,27 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
+@@ -1369,17 +1520,27 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,
  	if (!q->sqes)
  		return -ENOMEM;
  
@@ -426,7 +400,7 @@ index c63e28c75..8e5e50686 100644
  	}
  
  	/*
-@@ -1501,7 +1681,7 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
+@@ -1501,7 +1662,7 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
  		goto put_dev;
  	}
  
@@ -435,7 +409,7 @@ index c63e28c75..8e5e50686 100644
  		anv->adminq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_ASQ_DB;
  		anv->adminq.cq_db = anv->mmio_nvme + APPLE_ANS_ACQ_DB;
  		anv->ioq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_IOSQ_DB;
-@@ -1698,17 +1878,38 @@ static DEFINE_SIMPLE_DEV_PM_OPS(apple_nvme_pm_ops, apple_nvme_suspend,
+@@ -1698,17 +1859,38 @@ static DEFINE_SIMPLE_DEV_PM_OPS(apple_nvme_pm_ops, apple_nvme_suspend,
  				apple_nvme_resume);
  
  static const struct apple_nvme_hw apple_nvme_t8015_hw = {

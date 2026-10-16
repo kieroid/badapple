@@ -34,10 +34,10 @@ index bfd9de833..de76bf1fc 100644
  obj-$(CONFIG_TOUCHSCREEN_ATMEL_MXT)	+= atmel_mxt_ts.o
 diff --git a/drivers/input/touchscreen/apple-mt-spi.c b/drivers/input/touchscreen/apple-mt-spi.c
 new file mode 100644
-index 000000000..e01c93b42
+index 000000000..778fa2947
 --- /dev/null
 +++ b/drivers/input/touchscreen/apple-mt-spi.c
-@@ -0,0 +1,955 @@
+@@ -0,0 +1,823 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple multitouch over SPI, as found on T8020
@@ -46,20 +46,17 @@ index 000000000..e01c93b42
 + *
 + * The touchscreen on A12 iPhones. This powers the controller the way iOS
 + * does, boots it over HBPP by replaying the firmware's own boot script, and
-+ * then reads touch reports over HIDSPI into a multitouch input device. On
-+ * any failure before that it puts the PMU, the clock and the reset pin back
-+ * as iBoot left them.
++ * then reads touch reports over HIDSPI into a multitouch input device.
 + *
 + * The firmware is Apple's, so it is not here. tools/mtfw.py turns the one in
 + * the IPSW into the op list this reads.
 + *
-+ * Still missing: a real interrupt instead of polling the line, power off on
-+ * remove and suspend, and the force sensor on the second interface.
++ * Still missing: power off on remove and suspend, and the force sensor on
++ * the second interface.
 + *
 + * Where every number here comes from is in "Touch" in the project NOTES.md.
 + */
 +
-+#include <linux/bitfield.h>
 +#include <linux/crc16.h>
 +#include <linux/delay.h>
 +#include <linux/firmware.h>
@@ -68,9 +65,9 @@ index 000000000..e01c93b42
 +#include <linux/input.h>
 +#include <linux/input/mt.h>
 +#include <linux/input/touchscreen.h>
++#include <linux/interrupt.h>
 +#include <linux/io.h>
 +#include <linux/iopoll.h>
-+#include <linux/kthread.h>
 +#include <linux/module.h>
 +#include <linux/of.h>
 +#include <linux/property.h>
@@ -103,9 +100,6 @@ index 000000000..e01c93b42
 +#define TOUCH_CLK_KEEP		0x7ffffc00
 +/* 24 MHz in, 24 MHz wanted. */
 +#define TOUCH_CLK_DIV		1
-+
-+/* The bootloader's error word, ReadOnError in the firmware's boot script. */
-+#define HBPP_PROBE_ADDR		0x400b0fd4
 +
 +#define HBPP_LEN		8
 +
@@ -179,13 +173,6 @@ index 000000000..e01c93b42
 +	__le16 multi;
 +} __packed;
 +
-+/* The interrupt line, aop-gpio pin 19, polled for now. Low means data. */
-+#define AOP_GPIO		0x24a820000ULL
-+#define IRQ_PIN			19
-+#define GPIO_MODE		GENMASK(3, 1)
-+#define GPIO_MODE_INPUT		7
-+#define GPIO_INPUT_ENABLE	BIT(9)
-+
 +struct apple_mt {
 +	struct device *dev;
 +	struct spi_device *spi;
@@ -196,10 +183,8 @@ index 000000000..e01c93b42
 +	u8 *tx;
 +	u8 *rx;
 +	u8 *pkt;
-+	void __iomem *aop_gpio;
 +	u8 *htx;
 +	u8 *hrx;
-+	unsigned int logged;
 +	struct input_dev *input;
 +	struct touchscreen_properties props;
 +};
@@ -588,29 +573,6 @@ index 000000000..e01c93b42
 +	iounmap(addr);
 +}
 +
-+static bool hidspi_irq(struct apple_mt *mt)
-+{
-+	return !(readl(mt->aop_gpio + IRQ_PIN * 4) & 1);
-+}
-+
-+static bool hidspi_wait_irq(struct apple_mt *mt, unsigned int ms)
-+{
-+	unsigned long deadline = jiffies + msecs_to_jiffies(ms);
-+
-+	while (!hidspi_irq(mt)) {
-+		if (time_after(jiffies, deadline) || kthread_should_stop())
-+			return false;
-+		usleep_range(500, 1000);
-+	}
-+
-+	return true;
-+}
-+
-+static void hidspi_seal(u8 *pkt)
-+{
-+	put_unaligned_le16(crc16(0, pkt, HIDSPI_PKT - 2), pkt + HIDSPI_PKT - 2);
-+}
-+
 +/* An empty packet, for when the host has nothing to say. */
 +static void hidspi_tx_none(struct apple_mt *mt)
 +{
@@ -618,36 +580,14 @@ index 000000000..e01c93b42
 +
 +	memset(mt->htx, 0, HIDSPI_XFER);
 +	pkt[0] = HIDSPI_NONE;
-+	hidspi_seal(pkt);
-+}
-+
-+static void hidspi_log(struct apple_mt *mt, const char *what, const u8 *pkt,
-+		       bool crc_ok, u32 status)
-+{
-+	u16 len = get_unaligned_le16(pkt + 6);
-+
-+	if (pkt[0] == HIDSPI_NONE && crc_ok)
-+		return;
-+	if (!crc_ok)
-+		dev_warn_ratelimited(mt->dev, "%s: bad packet crc\n", what);
-+	if (mt->logged >= 60)
-+		return;
-+	mt->logged++;
-+
-+	dev_info(mt->dev,
-+		 "%s: flags %02x dev %02x off %u rem %u len %u crc %s status %08x\n",
-+		 what, pkt[0], pkt[1], get_unaligned_le16(pkt + 2),
-+		 get_unaligned_le16(pkt + 4), len, crc_ok ? "ok" : "BAD", status);
-+	if (pkt[0] != HIDSPI_NONE && len)
-+		print_hex_dump(KERN_INFO, "  ", DUMP_PREFIX_OFFSET, 16, 1,
-+			       pkt + 8, min_t(u16, len, 96), false);
++	put_unaligned_le16(crc16(0, pkt, HIDSPI_PKT - 2), pkt + HIDSPI_PKT - 2);
 +}
 +
 +/*
 + * One transaction. The host's packet goes out in mt->htx while the device's
 + * comes back in mt->hrx.
 + */
-+static int hidspi_xfer(struct apple_mt *mt, const char *what)
++static int hidspi_xfer(struct apple_mt *mt)
 +{
 +	struct spi_transfer pkt_xfer = {
 +		.tx_buf = mt->htx,
@@ -660,7 +600,6 @@ index 000000000..e01c93b42
 +		.len = HIDSPI_PAD + 4,
 +	};
 +	u8 *pkt = mt->hrx + HIDSPI_PAD;
-+	u32 status = 0;
 +	bool crc_ok, real;
 +	u16 len;
 +	int ret;
@@ -685,29 +624,13 @@ index 000000000..e01c93b42
 +		ret = spi_sync_transfer(mt->spi, &status_xfer, 1);
 +		if (ret)
 +			return ret;
-+		status = get_unaligned_le32(mt->hrx + HIDSPI_XFER + HIDSPI_PAD);
 +	}
 +
-+	hidspi_log(mt, what, pkt, crc_ok, status);
++	if (!crc_ok)
++		dev_warn_ratelimited(mt->dev, "bad packet crc\n");
 +	usleep_range(250, 300);
 +
 +	return real ? pkt[0] : 0;
-+}
-+
-+/* Read whatever the device has, while it keeps the line low. */
-+static void hidspi_drain(struct apple_mt *mt, const char *what, unsigned int ms)
-+{
-+	unsigned long deadline = jiffies + msecs_to_jiffies(ms);
-+
-+	while (!kthread_should_stop() && time_before(jiffies, deadline)) {
-+		if (!hidspi_irq(mt)) {
-+			usleep_range(500, 1000);
-+			continue;
-+		}
-+		hidspi_tx_none(mt);
-+		if (hidspi_xfer(mt, what) < 0)
-+			return;
-+	}
 +}
 +
 +static void apple_mt_touches(struct apple_mt *mt, const u8 *p, size_t len)
@@ -777,32 +700,16 @@ index 000000000..e01c93b42
 +	apple_mt_touches(mt, msg + 8, plen);
 +}
 +
-+/*
-+ * The read loop, for now in a thread that polls the interrupt line, and
-+ * also asks blind every 20 ms in case the line only pulses.
-+ */
-+static int hidspi_thread(void *data)
++/* The line stays low while the device has data, so this runs until it is out. */
++static irqreturn_t apple_mt_irq(int irq, void *data)
 +{
 +	struct apple_mt *mt = data;
-+	u32 cfg;
 +
-+	cfg = readl(mt->aop_gpio + IRQ_PIN * 4);
-+	writel((cfg & ~GPIO_MODE) | FIELD_PREP(GPIO_MODE, GPIO_MODE_INPUT) |
-+	       GPIO_INPUT_ENABLE, mt->aop_gpio + IRQ_PIN * 4);
++	hidspi_tx_none(mt);
++	if (hidspi_xfer(mt) > 0)
++		apple_mt_packet(mt);
 +
-+	hidspi_drain(mt, "boot", 2000);
-+
-+	/* Only the boot packets get logged, not every touch. */
-+	mt->logged = UINT_MAX;
-+
-+	while (!kthread_should_stop()) {
-+		hidspi_wait_irq(mt, 20);
-+		hidspi_tx_none(mt);
-+		if (hidspi_xfer(mt, "input") > 0)
-+			apple_mt_packet(mt);
-+	}
-+
-+	return 0;
++	return IRQ_HANDLED;
 +}
 +
 +static int apple_mt_input(struct apple_mt *mt)
@@ -844,8 +751,8 @@ index 000000000..e01c93b42
 +	struct apple_mt *mt;
 +	const struct firmware *fw = NULL;
 +	const char *fw_name;
-+	int ldo_orig, seq_orig, ret;
-+	u32 clk_orig, addr, val;
++	u32 addr;
++	int ret;
 +
 +	mt = devm_kzalloc(dev, sizeof(*mt), GFP_KERNEL);
 +	if (!mt)
@@ -885,13 +792,6 @@ index 000000000..e01c93b42
 +	if (ret)
 +		return ret;
 +
-+	mt->aop_gpio = ioremap_np(AOP_GPIO, 0x1000);
-+	if (!mt->aop_gpio)
-+		return -ENOMEM;
-+	ret = devm_add_action_or_reset(dev, apple_mt_unmap, mt->aop_gpio);
-+	if (ret)
-+		return ret;
-+
 +	ret = of_property_read_u32(dev->of_node, "apple,pmu-addr", &addr);
 +	if (ret)
 +		return ret;
@@ -909,20 +809,6 @@ index 000000000..e01c93b42
 +	if (!mt->pmu)
 +		return -EPROBE_DEFER;
 +
-+	clk_orig = readl(mt->clk);
-+	ldo_orig = acorn_read(mt, ACORN_LDO);
-+	seq_orig = acorn_read(mt, ACORN_SEQ_TRG);
-+	if (ldo_orig < 0 || seq_orig < 0) {
-+		ret = ldo_orig < 0 ? ldo_orig : seq_orig;
-+		dev_err(dev, "no acorn at %02x: %d\n", mt->pmu_addr, ret);
-+		goto put_pmu;
-+	}
-+	if (clk_orig & TOUCH_CLK_ENABLE) {
-+		dev_err(dev, "touch clock already on, not touching it\n");
-+		ret = -EBUSY;
-+		goto put_pmu;
-+	}
-+
 +	ret = acorn_start(mt);
 +	if (!ret)
 +		ret = apple_mt_power_on(mt);
@@ -930,39 +816,21 @@ index 000000000..e01c93b42
 +		gpiod_set_value_cansleep(mt->reset, 0);
 +		/* The chip pulls its interrupt line within a millisecond. */
 +		msleep(20);
-+		ret = hbpp_read_word(mt, HBPP_PROBE_ADDR, &val);
-+	}
-+
-+	if (ret) {
-+		dev_err(dev, "controller did not answer: %d\n", ret);
-+	} else {
-+		dev_info(dev, "controller answered, error word %08x\n", val);
-+
 +		ret = request_firmware(&fw, fw_name, dev);
-+		if (ret)
-+			dev_err(dev, "no %s: %d\n", fw_name, ret);
-+		else
-+			ret = apple_mt_boot(mt, fw);
-+		release_firmware(fw);
-+
-+		if (!ret) {
-+			dev_info(dev, "boot script done, controller running\n");
-+			ret = apple_mt_input(mt);
-+			if (ret)
-+				dev_err(dev, "no input device: %d\n", ret);
-+			else
-+				kthread_run(hidspi_thread, mt, "apple-mt-hidspi");
-+			ret = 0;
-+			goto put_pmu;
-+		}
 +	}
-+
-+	/* Back as iBoot left it. */
-+	apple_mt_power_off(mt);
-+	writel(clk_orig, mt->clk);
-+	acorn_write(mt, ACORN_SEQ_TRG, seq_orig);
-+	acorn_write(mt, ACORN_LDO, ldo_orig);
-+	ret = 0;
++	if (!ret)
++		ret = apple_mt_boot(mt, fw);
++	release_firmware(fw);
++	if (!ret)
++		ret = apple_mt_input(mt);
++	if (!ret)
++		ret = devm_request_threaded_irq(dev, spi->irq, NULL, apple_mt_irq,
++						IRQF_ONESHOT, "apple-mt", mt);
++	if (ret) {
++		dev_err(dev, "bring-up failed: %d\n", ret);
++		apple_mt_power_off(mt);
++		goto put_pmu;
++	}
 +
 +put_pmu:
 +	i2c_put_adapter(mt->pmu);
