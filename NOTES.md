@@ -610,10 +610,22 @@ What went in while chasing the hangs and stays because the tested setup had
 it: `SPMI_SOC0` to `2` kept on, one lock across both clusters, and 100 us
 after a voltage raise before the switch.
 
+### Thermal
+
+Two zones, `pcpu-thermal` on the ACC sensor and `ecpu-thermal` on ACCe, both
+passive at 85 C and critical at 105 C, with cpufreq as the cooling device.
+`apple-soc-temp` registers its channels as thermal sensors through
+`HWMON_C_REGISTER_TZ`.
+
+The die sensor answers within a poll. Under full load P reads about 90 C at
+2376 MHz and 10 C less one step down, so with a 2 C hysteresis step_wise let
+go on the next poll and P still reached 93 C. With 10 C it stays between 67
+and 88 C over 90 s of full load, stepping between 2376, 2136 and 1704 MHz. E
+stays near 65 C. A smoother loop would need power_allocator and per core
+power numbers.
+
 ### Left
 
-- No thermal zones, so nothing throttles. Under full load P went from 69 to
-  82 C in 24 s.
 - Boost, P pstates 7 and 8.
 - iOS also copies the target row into row 0 on every switch
   (`FUN_fffffff009411418`) and runs a startup (`FUN_fffffff00940eb18`) that
@@ -643,7 +655,7 @@ after a voltage raise before the switch.
 
 ## Known gaps
 
-1. cpufreq: no thermal zones, pstate 1 and boost unused.
+1. cpufreq: pstate 1 and boost unused, thermal control is coarse.
 2. Chicken bits are set once by m1n1, not per core by the kernel.
 3. The first USB attach fails; the gadget retries.
 4. Touch has no power off and no force sensor.

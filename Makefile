@@ -135,6 +135,7 @@ $(IMAGE): FORCE
 	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD \
 	    --enable CONFIG_ARM_APPLE_SOC_CPUFREQ \
 	    --enable CONFIG_SENSORS_APPLE_SOC_TEMP \
+	    --enable CONFIG_CPU_THERMAL \
 	    --enable CONFIG_DRM_APPLE_H11P \
 	    --enable CONFIG_INPUT_TOUCHSCREEN \
 	    --enable CONFIG_TOUCHSCREEN_APPLE_MT_SPI $(KCONFIG_EXTRA)

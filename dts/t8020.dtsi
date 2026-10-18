@@ -19,6 +19,7 @@
 #include <dt-bindings/interrupt-controller/apple-aic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/phy/phy.h>
+#include <dt-bindings/thermal/thermal.h>
 
 / {
 	interrupt-parent = <&aic>;
@@ -91,6 +92,7 @@
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			performance-domains = <&cpufreq_e>;
 			operating-points-v2 = <&tempest_opp>;
+			#cooling-cells = <2>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -102,6 +104,7 @@
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			performance-domains = <&cpufreq_e>;
 			operating-points-v2 = <&tempest_opp>;
+			#cooling-cells = <2>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -113,6 +116,7 @@
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			performance-domains = <&cpufreq_e>;
 			operating-points-v2 = <&tempest_opp>;
+			#cooling-cells = <2>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -124,6 +128,7 @@
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			performance-domains = <&cpufreq_e>;
 			operating-points-v2 = <&tempest_opp>;
+			#cooling-cells = <2>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -135,6 +140,7 @@
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			performance-domains = <&cpufreq_p>;
 			operating-points-v2 = <&vortex_opp>;
+			#cooling-cells = <2>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_1>;
@@ -146,6 +152,7 @@
 			cpu-release-addr = <0 0>; /* To be filled by loader */
 			performance-domains = <&cpufreq_p>;
 			operating-points-v2 = <&vortex_opp>;
+			#cooling-cells = <2>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_1>;
@@ -226,6 +233,78 @@
 			opp-hz = /bits/ 64 <2376000000>;
 			opp-level = <6>;
 			clock-latency-ns = <130000>;
+		};
+	};
+
+	/*
+	 * Nothing else throttles the CPUs. Under full load the P cluster went
+	 * from 69 to 82 C in 24 s. The sensors have no interrupt, so the zones
+	 * poll. Channel 0 of each CPU block is the cluster sensor.
+	 *
+	 * The die sensor answers within a poll: one step down from 2376 MHz
+	 * drops it by about 10 C. With a small hysteresis step_wise lets go on
+	 * the next poll and P runs at full speed most of the time, so the
+	 * hysteresis is wider than that swing.
+	 */
+	thermal-zones {
+		pcpu-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&tempsensor_acc 0>;
+
+			trips {
+				pcpu_alert: pcpu-alert {
+					temperature = <85000>;
+					hysteresis = <10000>;
+					type = "passive";
+				};
+
+				pcpu-crit {
+					temperature = <105000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&pcpu_alert>;
+					cooling-device =
+						<&cpu_p0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+						<&cpu_p1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+
+		ecpu-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&tempsensor_acce 0>;
+
+			trips {
+				ecpu_alert: ecpu-alert {
+					temperature = <85000>;
+					hysteresis = <10000>;
+					type = "passive";
+				};
+
+				ecpu-crit {
+					temperature = <105000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&ecpu_alert>;
+					cooling-device =
+						<&cpu_e0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+						<&cpu_e1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+						<&cpu_e2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+						<&cpu_e3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
 		};
 	};
 
@@ -782,16 +861,19 @@
 		tempsensor_pmgr: tempsensor@23b288000 {
 			compatible = "apple,t8020-pmgr-tempsensor";
 			reg = <0x2 0x3b288000 0x0 0x34000>;
+			#thermal-sensor-cells = <1>;
 		};
 
 		tempsensor_acc: tempsensor@211e30000 {
 			compatible = "apple,t8020-acc-tempsensor";
 			reg = <0x2 0x11e30000 0x0 0x8000>;
+			#thermal-sensor-cells = <1>;
 		};
 
 		tempsensor_acce: tempsensor@210e30000 {
 			compatible = "apple,t8020-acce-tempsensor";
 			reg = <0x2 0x10e30000 0x0 0x8000>;
+			#thermal-sensor-cells = <1>;
 		};
 
 		pmgr_mini: power-management@23d200000 {

@@ -49,9 +49,9 @@ make boot                                  # builds the rest and boots
 Put the phone in DFU on the jig. The exploit fires in about a second. Move the
 cable to the PC and run `make boot`.
 
-The phone comes up as `05ac:4142` and answers telnet on `172.16.42.1`.
+The phone shows up as `05ac:4142` with telnet on `172.16.42.1`.
 `tools/tsh.py "cmd"` runs one command. The first USB attach often fails and the
-phone retries by itself, so give it up to a minute.
+phone retries, so give it a minute.
 
 No `PWND:[usbliter8]` in the USB serial means the exploit did not fire. Unplug
 the jig for a few seconds and try again.
@@ -70,18 +70,15 @@ the jig for a few seconds and try again.
   - [ ] Chicken bits per core in the kernel, m1n1 sets them once
 - [x] NVMe, ext4
 - [x] SMC: battery, charger, buttons, ringer switch, poweroff, reboot
-- [x] Die temperature, hwmon
+- [x] Die temperature, hwmon, thermal zones at 85 C
 - [x] USB gadget: telnet, DHCP, getty on `/dev/ttyGS0`
   - [ ] Why the first attach fails
 - [x] Touch, `/dev/input/event1`, with its interrupt
   - [ ] Power off, force sensor
-- [x] cpufreq: E 792 to 1572 MHz, P 744 to 2376 MHz
-  - [ ] Thermal limits, boost
+- [x] cpufreq: E up to 1572 MHz, P up to 2376 MHz
+  - [ ] Boost, 2496 MHz
 - [ ] Wifi, cellular, GPU, audio
 - [ ] Upstream
-
-Nothing throttles the CPUs yet, so avoid long full loads. See
-[NOTES.md](NOTES.md#cpufreq).
 
 ## License
 

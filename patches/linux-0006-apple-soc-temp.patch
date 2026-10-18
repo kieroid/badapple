@@ -34,10 +34,10 @@ index 1229b6b39..234ed189a 100644
  obj-$(CONFIG_SENSORS_ARCTIC_FAN_CONTROLLER)	+= arctic_fan_controller.o
 diff --git a/drivers/hwmon/apple-soc-temp.c b/drivers/hwmon/apple-soc-temp.c
 new file mode 100644
-index 000000000..0e14d545c
+index 000000000..c2dedc6f9
 --- /dev/null
 +++ b/drivers/hwmon/apple-soc-temp.c
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,203 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple SoC die temperature sensors
@@ -184,6 +184,7 @@ index 000000000..0e14d545c
 +};
 +
 +static const struct hwmon_channel_info * const apple_temp_info[] = {
++	HWMON_CHANNEL_INFO(chip, HWMON_C_REGISTER_TZ),
 +	HWMON_CHANNEL_INFO(temp,
 +			   HWMON_T_INPUT | HWMON_T_LABEL,
 +			   HWMON_T_INPUT | HWMON_T_LABEL,
