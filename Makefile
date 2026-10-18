@@ -120,10 +120,7 @@ kernel: $(IMAGE)
 # nothing follows. Hoolock ships it enabled for pmOS netboot, which we do not
 # use.
 #
-# Same for CONFIG_ARM_APPLE_SOC_CPUFREQ: a pstate above 2 gets no voltage
-# change and hangs the SoC sooner or later. See NOTES.md.
-#
-# Both have to be reapplied after the config copy, otherwise they are silently
+# These have to be reapplied after the config copy, otherwise they are silently
 # undone on the next build. Passing KCONFIG_EXTRA does not carry them either,
 # which is worth knowing before blaming whatever driver you just added.
 #
@@ -136,7 +133,7 @@ kernel: $(IMAGE)
 $(IMAGE): FORCE
 	cp $(CONFIG_16K) $(KDIR)/.config
 	cd $(KDIR) && ./scripts/config --disable CONFIG_BLK_DEV_NBD \
-	    --disable CONFIG_ARM_APPLE_SOC_CPUFREQ \
+	    --enable CONFIG_ARM_APPLE_SOC_CPUFREQ \
 	    --enable CONFIG_SENSORS_APPLE_SOC_TEMP \
 	    --enable CONFIG_DRM_APPLE_H11P \
 	    --enable CONFIG_INPUT_TOUCHSCREEN \

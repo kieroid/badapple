@@ -158,6 +158,7 @@ No `PWND` means the exploit did not run.
 | 0009 | A12 chicken bits, from XNU's `start.s` |
 | 0010 | dwc2 errors to the framebuffer, not only the UART |
 | 0011 | notch for board 0x1a |
+| 0012 | hand the CPU rails to software, for cpufreq |
 
 An SError hits every boot at the top of RAM (`L2C_ERR_ADR` 0x8ec78c000). Cause
 unknown. Its status register is write-1-to-clear, so m1n1's usual clear, a
@@ -551,12 +552,12 @@ One early probe crashed with the screen flashing. Cause unknown, not seen since.
 
 ## cpufreq
 
-Off. A pstate above 2 hangs the SoC, at once or after a while.
+Works: E 792 to 1572 MHz, P 744 to 2376 MHz, schedutil. `m1n1-0012` hands the
+CPU rails to software and `linux-0011` sets the voltage around every switch.
 
 Cluster DVFS blocks are at 0x210e20000 (E) and 0x211e20000 (P), in the T8103
 layout: `CMD` at 0x20 with PS1 in bits 3:0, PS2 in 15:12, `SET` bit 25, `BUSY`
 bit 31, and `STATUS` at 0x50. `CMD` ignores 32 bit writes, use `writeq`.
-Non-posted mappings work on both clusters.
 
 | pstate | E | P |
 |---|---|---|
@@ -572,55 +573,51 @@ Non-posted mappings work on both clusters.
 From a live ADT (`voltage-states1-sram`, `voltage-states5-sram`). The IPSW
 copies are zeroed. iBoot leaves both clusters at pstate 2.
 
-### What happens
+### The voltage
 
-- Pstates 1 and 2 work.
-- 3 and 4 complete, then the SoC hangs later: E went 3 to 4 and died, P ran
-  at 4 at idle for minutes.
-- 5 hangs at once, on both clusters.
+iBoot leaves the CPU rails in a mode that does not follow the pstate, so a
+switch above pstate 2 runs on pstate 2's voltage and hangs the SoC sooner or
+later. The PMGR voltage block at 0x23b0a0000:
 
-Best guess: the CPU voltage never moves, so anything above pstate 2 runs on
-pstate 2's voltage. How long it lasts depends on load.
-
-### The pstate table
-
-Rows of 0x20 bytes from cluster + 0x70000. Row n is pstate n, row 0 is the
-live one. The top byte of the first word rises with the pstate, likely the
-voltage. On P: 0x3e, 0x3e, 0x4a, 0x6a, 0x8e, 0xb0, 0xe0, 0xe2. Bit 63 of the
-third word is set from row 5 up, on both clusters.
-
-### What iOS does
-
-From `AppleT8020PMGR` and `ApplePMGR` in 20G81. Offsets are from the cluster
-base, 0x210e00000 or 0x211e00000.
-
-| function | does |
+| offset | what |
 |---|---|
-| startup, `FUN_fffffff00940eb18` | PMGR 0x9c000 and 0x9c040 bit 31, 0x440f8 = 1, then `_initAPSC` |
-| `_initAPSC`, `FUN_fffffff00940f0cc` | row 0 takes row 2's voltage byte; `CMD` PS2 = 2 and bit 20, then bits 29 and 30, bit 40 on P |
-| `setPerfState`, `FUN_fffffff009411418` | waits for `BUSY`, sets 0x50000 bit 26, copies the target row's fields into row 0 and 0x40110 + ps * 8 into 0x40110, restores 0x50000, writes `CMD` |
-| `enableAPSC` | clears `CMD` bit 22, waits for bit 7 |
-| `enableCPUFixedFreqRelock` | `CMD` bit 42 |
+| 0xa0000 | bits 14:8, one per rail: set means software requests are ignored. iBoot leaves 0x023fff00 |
+| 0xa000c + 4n | rail n, request and readback. Bits 7:0 the code, bit 8 set by a write, bit 31 busy |
+| 0xa0020 | P CPU rail |
+| 0xa0024 | E CPU rail |
 
-The `setPerfState` masks are 0xff00000000000000, 0x3f0ff00000000 and
-0x3000000ffff0000 for the three words. iBoot leaves 0x9c040 and 0x440f8 at 0.
+A code is 3.125 mV above a base of 375 or 400 mV. Each pstate's row in the
+cluster's pstate table, 0x20 bytes per row from cluster + 0x70000, carries its
+code in the top byte of the first word. On P: 0x3e, 0x3e, 0x4a, 0x6a, 0x8e,
+0xb0, 0xe0, 0xe2. The rails read back exactly pstate 2's codes at boot, and
+stay there through a switch until software takes over.
 
-### Tried
+`AppleT8020PMGR` hands the rails over in `FUN_fffffff0094104e4`: clear bits
+14:8 of 0xa0000, write each rail's current code back, wait for bit 31. m1n1
+does the same. The driver then writes the target row's code before raising
+the clock, and after the clock has come down.
 
-With each of these added in turn, P still hung at pstate 5:
+### Pstate 1
 
-1. `SPMI_SOC0` to `2` on. The ADT marks them on but not critical, so Linux
-   gates them.
-2. The row 0 copy before each switch.
-3. The iOS startup.
-4. `CMD` bit 42.
+A switch to pstate 1 reaches it, then `BUSY` never clears and no later switch
+completes until a reset. Seen on both clusters, most often on P. Its row also
+looks different: the third word is 0x3000000000000048, without the 0xb8xx
+field the others have. Left out of the OPP tables.
 
-With the startup and the copy, E hung going from 1 to 3.
+### Not shown to be needed
 
-Next: find how the CPU voltage reaches the PMU, and a way to read the CPU
-rail from Linux, so one boot can show whether the voltage moves. Code for the
-iOS sequence in m1n1 and the cpufreq driver exists, but is kept out of the
-tree until then.
+What went in while chasing the hangs and stays because the tested setup had
+it: `SPMI_SOC0` to `2` kept on, one lock across both clusters, and 100 us
+after a voltage raise before the switch.
+
+### Left
+
+- No thermal zones, so nothing throttles. Under full load P went from 69 to
+  82 C in 24 s.
+- Boost, P pstates 7 and 8.
+- iOS also copies the target row into row 0 on every switch
+  (`FUN_fffffff009411418`) and runs a startup (`FUN_fffffff00940eb18`) that
+  sets APSC, PLL relock and more. Neither turned out to be needed.
 
 ## Debugging
 
@@ -639,14 +636,14 @@ tree until then.
   `/bin/sh`.
 - "Not the USB DART." It was the DART.
 - `05ac:12a8` is another phone. Ours is `05ac:4142`.
-- "cpufreq needs the CLPC coprocessor." Not shown. The voltage is the likely
-  problem.
+- "cpufreq needs the CLPC coprocessor." Wrong. The rails were in a mode that
+  ignores the pstate.
 - "`ioremap_np` hangs the E cluster block." Wrong, that was a pstate 5 hang.
 - "P works once, then `BUSY` sticks." Wrong, P went 2 to 3 to 4 every time.
 
 ## Known gaps
 
-1. cpufreq: a pstate above 2 hangs the SoC.
+1. cpufreq: no thermal zones, pstate 1 and boost unused.
 2. Chicken bits are set once by m1n1, not per core by the kernel.
 3. The first USB attach fails; the gadget retries.
 4. Touch has no power off and no force sensor.

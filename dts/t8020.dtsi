@@ -89,6 +89,8 @@
 			compatible = "apple,tempest";
 			reg = <0x0 0x0>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
+			performance-domains = <&cpufreq_e>;
+			operating-points-v2 = <&tempest_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -98,6 +100,8 @@
 			compatible = "apple,tempest";
 			reg = <0x0 0x1>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
+			performance-domains = <&cpufreq_e>;
+			operating-points-v2 = <&tempest_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -107,6 +111,8 @@
 			compatible = "apple,tempest";
 			reg = <0x0 0x2>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
+			performance-domains = <&cpufreq_e>;
+			operating-points-v2 = <&tempest_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -116,6 +122,8 @@
 			compatible = "apple,tempest";
 			reg = <0x0 0x3>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
+			performance-domains = <&cpufreq_e>;
+			operating-points-v2 = <&tempest_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_0>;
@@ -125,6 +133,8 @@
 			compatible = "apple,vortex";
 			reg = <0x0 0x10100>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
+			performance-domains = <&cpufreq_p>;
+			operating-points-v2 = <&vortex_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_1>;
@@ -134,6 +144,8 @@
 			compatible = "apple,vortex";
 			reg = <0x0 0x10101>;
 			cpu-release-addr = <0 0>; /* To be filled by loader */
+			performance-domains = <&cpufreq_p>;
+			operating-points-v2 = <&vortex_opp>;
 			enable-method = "spin-table";
 			device_type = "cpu";
 			next-level-cache = <&l2_cache_1>;
@@ -155,12 +167,98 @@
 		};
 	};
 
+	/*
+	 * Frequencies are what iBoot fills into voltage-states1-sram (E) and
+	 * voltage-states5-sram (P) in the live DeviceTree. The IPSW copies are
+	 * zeroed. opp-level is the pstate, latencies are A11's.
+	 *
+	 * Pstate 1, 528 MHz on E and 504 MHz on P, is left out: a switch to it
+	 * reaches it but leaves BUSY set in the cluster's CMD for good. P
+	 * pstates 7 and 8, 2436 and 2496 MHz, are boost and left out too.
+	 */
+	tempest_opp: opp-table-0 {
+		compatible = "operating-points-v2";
+		opp02 {
+			opp-hz = /bits/ 64 <792000000>;
+			opp-level = <2>;
+			clock-latency-ns = <140000>;
+		};
+		opp03 {
+			opp-hz = /bits/ 64 <1056000000>;
+			opp-level = <3>;
+			clock-latency-ns = <105000>;
+		};
+		opp04 {
+			opp-hz = /bits/ 64 <1308000000>;
+			opp-level = <4>;
+			clock-latency-ns = <115000>;
+		};
+		opp05 {
+			opp-hz = /bits/ 64 <1572000000>;
+			opp-level = <5>;
+			clock-latency-ns = <125000>;
+		};
+	};
+
+	vortex_opp: opp-table-1 {
+		compatible = "operating-points-v2";
+		opp02 {
+			opp-hz = /bits/ 64 <744000000>;
+			opp-level = <2>;
+			clock-latency-ns = <140000>;
+		};
+		opp03 {
+			opp-hz = /bits/ 64 <1176000000>;
+			opp-level = <3>;
+			clock-latency-ns = <110000>;
+		};
+		opp04 {
+			opp-hz = /bits/ 64 <1704000000>;
+			opp-level = <4>;
+			clock-latency-ns = <110000>;
+		};
+		opp05 {
+			opp-hz = /bits/ 64 <2136000000>;
+			opp-level = <5>;
+			clock-latency-ns = <125000>;
+		};
+		opp06 {
+			opp-hz = /bits/ 64 <2376000000>;
+			opp-level = <6>;
+			clock-latency-ns = <130000>;
+		};
+	};
+
 	soc {
 		compatible = "simple-bus";
 		#address-cells = <2>;
 		#size-cells = <2>;
 		nonposted-mmio;
 		ranges;
+
+		/*
+		 * The cluster DVFS blocks. The first reg reaches the pstate
+		 * table 0x50000 up, whose rows carry each pstate's voltage.
+		 * The second is the cluster's rail in the PMGR voltage block,
+		 * which m1n1 hands to software.
+		 */
+		cpufreq_e: performance-controller@210e20000 {
+			compatible = "apple,t8020-cluster-cpufreq",
+				     "apple,t8103-cluster-cpufreq",
+				     "apple,cluster-cpufreq";
+			reg = <0x2 0x10e20000 0 0x60000>,
+			      <0x2 0x3b0a0024 0 0x4>;
+			#performance-domain-cells = <0>;
+		};
+
+		cpufreq_p: performance-controller@211e20000 {
+			compatible = "apple,t8020-cluster-cpufreq",
+				     "apple,t8103-cluster-cpufreq",
+				     "apple,cluster-cpufreq";
+			reg = <0x2 0x11e20000 0 0x60000>,
+			      <0x2 0x3b0a0020 0 0x4>;
+			#performance-domain-cells = <0>;
+		};
 
 		/* iBoot calls this one debug-console and leaves it running. */
 		serial0: serial@235200000 {
@@ -726,6 +824,23 @@
 };
 
 #include "t8020-pmgr.dtsi"
+
+/*
+ * The ADT marks these on but not critical, so the generated file leaves them
+ * gateable and Linux gates them as unused. iOS keeps them on. Kept on here
+ * too while cpufreq is new, though it is not shown that cpufreq needs them.
+ */
+&ps_spmi_soc0 {
+	apple,always-on;
+};
+
+&ps_spmi_soc1 {
+	apple,always-on;
+};
+
+&ps_spmi_soc2 {
+	apple,always-on;
+};
 
 /*
  * The CPU and CPU power manager domains, marked always-on as core devices the

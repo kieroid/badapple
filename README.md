@@ -75,13 +75,12 @@ the jig for a few seconds and try again.
   - [ ] Why the first attach fails
 - [x] Touch, `/dev/input/event1`, with its interrupt
   - [ ] Power off, force sensor
-- [ ] cpufreq
+- [x] cpufreq: E 792 to 1572 MHz, P 744 to 2376 MHz
+  - [ ] Thermal limits, boost
 - [ ] Wifi, cellular, GPU, audio
 - [ ] Upstream
 
-cpufreq is off. The CPUs stay at iBoot's speed, 744 MHz on the P cores and
-792 MHz on the E cores. Asking for anything faster hangs the phone, most likely
-because the CPU voltage never goes up with the clock. See
+Nothing throttles the CPUs yet, so avoid long full loads. See
 [NOTES.md](NOTES.md#cpufreq).
 
 ## License
