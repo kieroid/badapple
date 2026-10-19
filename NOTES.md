@@ -7,11 +7,12 @@ Registers, gotchas, and things that turned out wrong. Build and boot are in
 
 | Device | Boot | Console | Display | XRGB8888 | Brightness | HDR | AIC | SMP | Chicken bits per core | NVMe | Battery | Buttons | Poweroff | Die temp | Thermal zones | USB gadget | Touch | Touch interrupt | Touch power off | Force sensor | cpufreq | Boost | cpuidle | PCIe | Wifi | Bluetooth | Audio | Cellular | Camera | GPU | Upstream |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :white_check_mark: | :x: | :x: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: | :x: | :x: | :x: |
+| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :white_check_mark: | :x: | :x: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: | :x: | :x: |
 
 - Wifi joins WPA2 networks on 2.4 and 5 GHz, with Alpine's `iw` and
   `wpa_supplicant` brought in by hand.
-- Bluetooth boots its firmware, then never reaches RTI state 2.
+- Bluetooth comes up as `hci0` and scans, with Alpine's `hciconfig` and
+  `hcitool` brought in by hand.
 
 ## Reading the ADT
 
@@ -699,9 +700,25 @@ For debugging, `CONFIG_BRCMDBG` with `brcmfmac.debug=0x108000` and
 own console in dmesg.
 
 Bluetooth: `hci_bcm4377` wants a beamforming blob the 4377 never uses and
-these ADTs do not have, `linux-0013` makes it optional. The firmware then
-boots and reaches RTI state 1, moves to bootstage 3 and never acks state 2.
-Upstream was written for the T2 Macs' B3.
+these ADTs do not have, `linux-0013` makes it optional.
+
+The RTI handshake stopped at state 1 until the context address went where iOS
+puts it. iOS's `AppleConvergedPCI` maps register indexes to BAR2 offsets in one
+table for every chip: the high word of the context address is `0x200490`.
+Upstream writes it to `0x200450`, which iOS only reads, as the device
+capabilities. On the T2 Macs the context sits below 4 GB, so that never showed.
+`linux-0013` fixes the offset.
+
+`linux-0013` also copies iOS's wake before the bootstage read: write 1 to BAR0
+`0x154`, wait 25 us, up to four times while the bootstage reads above 3. One
+boot read garbage there without it.
+
+iOS does more that Linux does not need here: it writes `0x610` around the host
+window, mirrors the image address and size to BAR0 `0x5a0` to `0x5a8`, and
+turns on MSI over MMIO when capability bit 3 is set. This chip reports `0x3`.
+
+Do not read the Bluetooth BARs with `devmem` after a failed probe. The function
+is disabled by then and the read takes the phone down.
 
 ## Debugging
 
@@ -731,4 +748,5 @@ Upstream was written for the T2 Macs' B3.
 2. Chicken bits are set once by m1n1, not per core by the kernel.
 3. The first USB attach fails; the gadget retries.
 4. Touch has no power off and no force sensor.
-5. Bluetooth stops before RTI state 2. Wifi needs its tools brought in.
+5. Wifi and Bluetooth need their tools brought in. Bluetooth pairing is
+   untested, it needs `bluetoothd`.

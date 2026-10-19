@@ -64,10 +64,10 @@ the jig for a few seconds and try again.
 
 | Device | Display | Touch | USB | Storage | SMP | cpufreq | Wifi | Bluetooth | Audio | Cellular | GPU |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: | :x: |
+| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: |
 
-Hoolock's initramfs has no `iw` or `wpa_supplicant`, so wifi needs them
-brought in. Details and the full list are in [NOTES.md](NOTES.md#status).
+Hoolock's initramfs has no `iw`, `wpa_supplicant` or BlueZ tools, so wifi
+and Bluetooth need them brought in. Details and the full list are in [NOTES.md](NOTES.md#status).
 
 ## License
 
