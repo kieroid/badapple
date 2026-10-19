@@ -30,6 +30,9 @@
 		 * not enough, it has to be an alias.
 		 */
 		ausbphy0 = &ausbphy0;
+		/* m1n1 fills MAC addresses, antenna SKU and calibration through these. */
+		wifi0 = &wifi0;
+		bluetooth0 = &bluetooth0;
 	};
 
 	chosen {
@@ -138,5 +141,25 @@
 				remote-endpoint = <&dsi_out_panel>;
 			};
 		};
+	};
+};
+
+/*
+ * The BCM4377. The board type is /arm-io/wlan module-instance and picks the
+ * firmware the genie island uses.
+ */
+&port02 {
+	wifi0: wifi@0,0 {
+		compatible = "pci14e4,4488";
+		reg = <0x10000 0x0 0x0 0x0 0x0>;
+		brcm,board-type = "apple,geniek";
+		local-mac-address = [00 00 00 00 00 00];
+	};
+
+	bluetooth0: bluetooth@0,1 {
+		compatible = "pci14e4,5fa0";
+		reg = <0x10100 0x0 0x0 0x0 0x0>;
+		brcm,board-type = "apple,geniek";
+		local-bd-address = [00 00 00 00 00 00];
 	};
 };

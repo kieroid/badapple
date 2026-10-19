@@ -396,6 +396,84 @@
 			#iommu-cells = <1>;
 		};
 
+		/*
+		 * PCIe. m1n1 powers it and applies the tunables iBoot leaves in
+		 * the live ADT, as on T8103, whose register layout this shares.
+		 * Port 2 is the BCM4377 wifi and Bluetooth, port 3 the baseband.
+		 * The ADT's 64 bit window overlaps its 32 bit one, so it is cut
+		 * short here.
+		 */
+		pcie0: pcie@610000000 {
+			compatible = "apple,t8020-pcie", "apple,pcie";
+			device_type = "pci";
+
+			reg = <0x6 0x10000000 0x0 0x1000000>,
+			      <0x6 0x00000000 0x0 0x80000>,
+			      <0x6 0x01000000 0x0 0x4000>,
+			      <0x6 0x02000000 0x0 0x4000>,
+			      <0x6 0x03000000 0x0 0x4000>,
+			      <0x6 0x04000000 0x0 0x4000>,
+			      <0x6 0x00090000 0x0 0x4000>;
+			/*
+			 * The PHY glue of port n is at rc + 0x88000 + 0x4000 * n,
+			 * one slot past where the driver assumes for T8103, so it
+			 * is given here. Only port 2 is in use.
+			 */
+			reg-names = "config", "rc", "port0", "port1", "port2", "port3",
+				    "phy2";
+
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 468 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 471 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 474 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 477 IRQ_TYPE_LEVEL_HIGH>;
+
+			msi-controller;
+			msi-parent = <&pcie0>;
+			msi-ranges = <&aic AIC_IRQ 480 IRQ_TYPE_EDGE_RISING 32>;
+
+			iommu-map = <0x100 &dart_apcie2 0 1>;
+			iommu-map-mask = <0xff00>;
+
+			bus-range = <0 4>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x43000000 0x6 0x20000000 0x6 0x20000000 0x0 0x20000000>,
+				 <0x02000000 0x0 0x40000000 0x6 0x40000000 0x0 0x40000000>;
+
+			power-domains = <&ps_apcie_gp>;
+
+			port02: pci@2,0 {
+				device_type = "pci";
+				reg = <0x1000 0x0 0x0 0x0 0x0>;
+				/* function-perst in the ADT. CLKREQ#, pin 101, is muxed by iBoot. */
+				reset-gpios = <&pinctrl_ap 106 1>;
+				/* gP0e, function-reg_on of /amfm, the wifi REG_ON. */
+				pwren-gpios = <&smc_gpio 14 0>;
+
+				#address-cells = <3>;
+				#size-cells = <2>;
+				ranges;
+
+				interrupt-controller;
+				#interrupt-cells = <1>;
+
+				interrupt-map-mask = <0 0 0 7>;
+				interrupt-map = <0 0 0 1 &port02 0 0 0 0>,
+						<0 0 0 2 &port02 0 0 0 1>,
+						<0 0 0 3 &port02 0 0 0 2>,
+						<0 0 0 4 &port02 0 0 0 3>;
+			};
+		};
+
+		dart_apcie2: iommu@603008000 {
+			compatible = "apple,t8020-dart", "apple,t8103-dart";
+			reg = <0x6 0x03008000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 475 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+		};
+
 		bus@239000000 {
 			compatible = "apple,t8020-usb-complex", "simple-pm-bus";
 			#address-cells = <2>;
@@ -570,6 +648,20 @@
 
 			smc_hwmon: hwmon {
 				compatible = "apple,smc-hwmon";
+			};
+
+			/* The PMU's GPIOs, the SMC's gPxx keys. */
+			smc_gpio: gpio {
+				compatible = "apple,smc-gpio";
+				gpio-controller;
+				#gpio-cells = <2>;
+
+				/* gP09, function-power_enable of /arm-io/bluetooth. */
+				bt-power-hog {
+					gpio-hog;
+					gpios = <9 0>;
+					output-high;
+				};
 			};
 
 			/*

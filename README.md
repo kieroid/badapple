@@ -37,10 +37,15 @@ And an iPhone11,6 IPSW.
 ## Build
 
 ```sh
-make deps                                  # clone m1n1, Linux, Hoolock's docs; apply patches/
-make images IPSW=/path/to/unpacked/ipsw    # once: iBSS, device tree, trustcache, touch firmware
-make boot                                  # builds the rest and boots
+make deps     # clone m1n1, Linux, Hoolock's docs; apply patches/
+make images IPSW=/path/to/unpacked/ipsw IPSW_FILE=/path/to.ipsw
+make boot     # builds the rest and boots
 ```
+
+`make images` runs once. It patches iBSS, wraps the device tree and trustcache,
+and converts the touch, wifi and Bluetooth firmware. `IPSW_FILE` is the `.ipsw`
+itself, since the wifi firmware is in its root image. iOS 16.6.1's is not
+encrypted.
 
 `make check` builds only the device tree and works on a bare checkout.
 
@@ -58,27 +63,12 @@ the jig for a few seconds and try again.
 
 ## Status
 
-- [x] Boot chain, tethered
-- [x] Device tree, PMGR domains generated from the ADT
-- [x] Display
-  - [x] Console, notch cut out
-  - [x] Display driver, XRGB8888 and XRGB2101010
-  - [x] Brightness, `/sys/class/backlight/230400000.dsi.0`
-  - [ ] HDR: high brightness mode, gamma tables
-- [x] AIC interrupts and fast IPIs
-- [x] SMP on all six cores
-  - [ ] Chicken bits per core in the kernel, m1n1 sets them once
-- [x] NVMe, ext4
-- [x] SMC: battery, charger, buttons, ringer switch, poweroff, reboot
-- [x] Die temperature, hwmon, thermal zones at 85 C
-- [x] USB gadget: telnet, DHCP, getty on `/dev/ttyGS0`
-  - [ ] Why the first attach fails
-- [x] Touch, `/dev/input/event1`, with its interrupt
-  - [ ] Power off, force sensor
-- [x] cpufreq: E up to 1572 MHz, P up to 2376 MHz
-  - [ ] Boost, 2496 MHz
-- [ ] Wifi, cellular, GPU, audio
-- [ ] Upstream
+| Device | Display | Touch | USB | Storage | SMP | cpufreq | Wifi | Bluetooth | Audio | Cellular | GPU |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: | :x: | :x: |
+
+Wifi firmware runs and `wlan0` comes up, but nothing has joined a network yet.
+Details and the full list are in [NOTES.md](NOTES.md#status).
 
 ## License
 

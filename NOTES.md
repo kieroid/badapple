@@ -3,6 +3,15 @@
 Registers, gotchas, and things that turned out wrong. Build and boot are in
 [README.md](README.md).
 
+## Status
+
+| Device | Boot | Console | Display | XRGB8888 | Brightness | HDR | AIC | SMP | Chicken bits per core | NVMe | Battery | Buttons | Poweroff | Die temp | Thermal zones | USB gadget | Touch | Touch interrupt | Touch power off | Force sensor | cpufreq | Boost | cpuidle | PCIe | Wifi | Bluetooth | Audio | Cellular | Camera | GPU | Upstream |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :white_check_mark: | :x: | :x: | :white_check_mark: | :x: | :x: | :x: | :x: | :x: | :x: | :x: |
+
+Wifi: the firmware runs and `wlan0` is up, joining a network is untested.
+Bluetooth: the firmware boots, then the chip never reaches RTI state 2.
+
 ## Reading the ADT
 
 ```sh
@@ -159,6 +168,7 @@ No `PWND` means the exploit did not run.
 | 0010 | dwc2 errors to the framebuffer, not only the UART |
 | 0011 | notch for board 0x1a |
 | 0012 | hand the CPU rails to software, for cpufreq |
+| 0013 | PCIe on T8020 |
 
 An SError hits every boot at the top of RAM (`L2C_ERR_ADR` 0x8ec78c000). Cause
 unknown. Its status register is write-1-to-clear, so m1n1's usual clear, a
@@ -624,12 +634,64 @@ and 88 C over 90 s of full load, stepping between 2376, 2136 and 1704 MHz. E
 stays near 65 C. A smoother loop would need power_allocator and per core
 power numbers.
 
+### Boost
+
+Pstate 7, 2436 MHz at code 0xe0, works when asked for by hand. A request for
+8 reads back as `STATUS` 0x78: the hardware stays at 7. Row 8 has 3 in bits
+43:40 of its second word where the others have 0xf, which m1n1 calls the
+max load. Linux only ever idles cores with WFI, so both P cores always count
+as busy. 8 likely needs cpuidle that powers a core down. Neither is in the
+OPP table: 7 is 2.5% over 6.
+
 ### Left
 
-- Boost, P pstates 7 and 8.
+- cpuidle with core power down, then boost.
 - iOS also copies the target row into row 0 on every switch
   (`FUN_fffffff009411418`) and runs a startup (`FUN_fffffff00940eb18`) that
   sets APSC, PLL relock and more. Neither turned out to be needed.
+
+## PCIe, wifi and Bluetooth
+
+`apcie,t8020` has the T8103 register layout: config, rc, PHY, PHY IP, AXI and
+fuse, then three regs per port (port, PHY glue, PHY IP lane). The tunables are
+not in the IPSW's ADT, iBoot adds them to the live one: `apcie-axi2af`,
+`-common`, `-phy`, `-phy-ip` on the controller and `apcie-config` and
+`pcie-rc` per bridge. m1n1 exports the live ADT as `/dev/mtd1`.
+
+`m1n1-0013` initializes it with the T8103 table, no fuse bits, the single
+`apcie-phy-ip-tunables` set, and without the Gen3 and Gen4 shadow sets a Gen2
+port does not have.
+
+| port | device | PERST# | CLKREQ# | DART |
+|---|---|---|---|---|
+| 2 | BCM4377 wifi and Bluetooth | GPIO 106 | GPIO 101 | `dart-apcie2` |
+| 3 | baseband | GPIO 107 | GPIO 102 | `dart-apcie3` |
+
+- Port n's PHY glue is at rc + 0x88000 + 0x4000 n, one slot past where
+  `pcie-apple` assumes, so the DT gives `phy2`. Without it the driver writes
+  port 1's glue and the boot hangs.
+- `dart-apcie2` has one SID and the port no RID to SID table, so everything on
+  the port is SID 0. `linux-0012` skips the table when it reads back empty.
+- The chip needs two PMU GPIOs, both SMC `gP` keys: `gP0e`, wifi REG_ON
+  (`function-reg_on` of `/amfm`) and `gP09`, Bluetooth power
+  (`function-power_enable` of `/arm-io/bluetooth`). `linux-0012` adds a
+  `pwren-gpios` to `pcie-apple` for the first, the DT hogs the second.
+
+### BCM4377
+
+PCI revision 3, B2. OTP: module DTCK 5.3, vendor u (USI). Island `geniek`, from
+`module-instance` in `/arm-io/wlan`. `tools/bcmfw.py` renames iOS 16.6.1's
+`C-4377__s-B2` wifi files and `BCM4377B2` Bluetooth files to what `brcmfmac`
+and `hci_bcm4377` ask for. m1n1 fills in the MAC addresses, the antenna SKU
+(NA) and the calibration blobs through the `wifi0` and `bluetooth0` aliases.
+
+Wifi firmware 16.20.357.3.2.50.143 runs. The sysfs firmware fallback is off,
+or the missing `regulatory.db` holds everything up for 60 s.
+
+Bluetooth: `hci_bcm4377` wants a beamforming blob the 4377 never uses and
+these ADTs do not have, `linux-0013` makes it optional. The firmware then
+boots and reaches RTI state 1, moves to bootstage 3 and never acks state 2.
+Upstream was written for the T2 Macs' B3.
 
 ## Debugging
 
@@ -659,3 +721,4 @@ power numbers.
 2. Chicken bits are set once by m1n1, not per core by the kernel.
 3. The first USB attach fails; the gadget retries.
 4. Touch has no power off and no force sensor.
+5. Wifi has not joined a network, Bluetooth stops before RTI state 2.

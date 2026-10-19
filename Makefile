@@ -51,6 +51,9 @@ IPSW     ?=
 IBSS_IM4P = $(firstword $(wildcard $(IPSW)/Firmware/dfu/iBSS.d331p*.im4p))
 ADT_IM4P  = $(firstword $(wildcard $(IPSW)/Firmware/all_flash/DeviceTree.d331pap*.im4p))
 MTFW_IM4P = $(firstword $(wildcard $(IPSW)/Firmware/D331p_Multitouch.im4p))
+# The .ipsw file itself, for the wifi and Bluetooth firmware, which sits in the
+# root filesystem image. iOS 16.6.1's is not encrypted.
+IPSW_FILE ?=
 
 # console=tty0 is the framebuffer m1n1 hands over, which is readable on the
 # phone itself. The shell arrives separately over the USB gadget. earlycon
@@ -136,6 +139,11 @@ $(IMAGE): FORCE
 	    --enable CONFIG_ARM_APPLE_SOC_CPUFREQ \
 	    --enable CONFIG_SENSORS_APPLE_SOC_TEMP \
 	    --enable CONFIG_CPU_THERMAL \
+	    --enable CONFIG_WIRELESS --enable CONFIG_CFG80211 --enable CONFIG_WLAN \
+	    --enable CONFIG_WLAN_VENDOR_BROADCOM \
+	    --enable CONFIG_BRCMFMAC --enable CONFIG_BRCMFMAC_PCIE \
+	    --enable CONFIG_BT_HCIBCM4377 \
+	    --disable CONFIG_FW_LOADER_USER_HELPER \
 	    --enable CONFIG_DRM_APPLE_H11P \
 	    --enable CONFIG_INPUT_TOUCHSCREEN \
 	    --enable CONFIG_TOUCHSCREEN_APPLE_MT_SPI $(KCONFIG_EXTRA)
@@ -154,7 +162,7 @@ $(INITRAMFS):
 # Apple never signed; the trustcache is 24 bytes of header with no entries,
 # which is all iBoot wants here.
 images: $(IBOOT)/iBSS.patched.raw $(IBOOT)/devicetree.img4 $(IBOOT)/trustcache.img4 \
-	$(IBOOT)/mtfw.cpio
+	$(IBOOT)/mtfw.cpio $(IBOOT)/bcmfw.cpio
 
 $(IBOOT):
 	mkdir -p $@
@@ -181,6 +189,16 @@ $(IBOOT)/mtfw.cpio: tools/mtfw.py | $(IBOOT)
 	    $(IBOOT)/mtfw-root/lib/firmware/apple/d331p-mtfw.bin
 	cd $(IBOOT)/mtfw-root && find . | cpio -o -H newc > ../mtfw.cpio
 
+# The BCM4377's wifi and Bluetooth firmware, renamed for brcmfmac and
+# hci_bcm4377. Apple's too, so it stays in build/ as well.
+$(IBOOT)/bcmfw.cpio: tools/bcmfw.py | $(IBOOT)
+	@test -n "$(IPSW_FILE)" || { echo "set IPSW_FILE=<.ipsw file>"; exit 1; }
+	rm -rf $(IBOOT)/ios-root $(IBOOT)/bcmfw-root
+	ipsw extract --files --pattern '.*(C-4377__s-B2/|bluetooth/BCM4377B2).*' \
+	    -o $(IBOOT)/ios-root $(IPSW_FILE)
+	python3 tools/bcmfw.py $(IBOOT)/ios-root/*/root $(IBOOT)/bcmfw-root
+	cd $(IBOOT)/bcmfw-root && find . | cpio -o -H newc > ../bcmfw.cpio
+
 $(IBOOT)/empty_trustcache.bin: | $(IBOOT)
 	printf '\x01\x00\x00\x00\x6e\x17\x68\x17\x88\x2d\x44\x40\x83\xb6\xf3\x22\x06\xbc\x4f\x17\x00\x00\x00\x00' > $@
 
@@ -205,13 +223,14 @@ $(IBOOT)/kernelcache-m1n1.img4: $(M1N1) FORCE | $(IBOOT)
 # FORCE because BOOTARGS is not a file: without it an override on the command
 # line, say to add initcall_debug for one boot, is silently ignored whenever
 # the kernel itself has not changed. Packing costs a couple of seconds.
-# m1n1 keeps only the last initramfs it finds, so the touch firmware cannot be
-# a second payload. Linux reads cpio archives back to back in one stream,
-# though, so it goes on the end of Hoolock's, inside the same gzip.
-BOOT_INITRAMFS = $(if $(wildcard $(IBOOT)/mtfw.cpio),$(IBOOT)/initramfs-mtfw.gz,$(INITRAMFS))
+# m1n1 keeps only the last initramfs it finds, so firmware cannot be a second
+# payload. Linux reads cpio archives back to back in one stream, though, so the
+# firmware cpios go on the end of Hoolock's, inside the same gzip.
+FW_CPIOS = $(wildcard $(IBOOT)/mtfw.cpio $(IBOOT)/bcmfw.cpio)
+BOOT_INITRAMFS = $(if $(FW_CPIOS),$(IBOOT)/initramfs-fw.gz,$(INITRAMFS))
 
-$(IBOOT)/initramfs-mtfw.gz: $(INITRAMFS) $(IBOOT)/mtfw.cpio
-	{ gzip -dc $(INITRAMFS); cat $(IBOOT)/mtfw.cpio; } | gzip -9 > $@
+$(IBOOT)/initramfs-fw.gz: $(INITRAMFS) $(FW_CPIOS)
+	{ gzip -dc $(INITRAMFS); cat $(FW_CPIOS); } | gzip -9 > $@
 
 $(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(BOOT_INITRAMFS) FORCE | $(IBOOT)
 	{ cat $(M1N1); \
