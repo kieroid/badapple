@@ -159,7 +159,7 @@ No `PWND` means the exploit did not run.
 | patch | what |
 |---|---|
 | 0001 | T8020 USB: complex registers, power domains 0x802a8, 0x802b0, 0x802c0, USB DART stream 0 |
-| 0002 | halt instead of reboot on a fault, clear the SError properly, limit how many get printed |
+| 0002 | halt instead of reboot on a fault; clear the SError at the top of RAM and go on. Still needed: without it m1n1 halts after placing its log buffer |
 | 0003 | keep the log on screen with a payload |
 | 0004 | proxyclient: an ADT property it cannot parse is not fatal |
 | 0005 | A12 MIDR parts, or m1n1 takes an M4-only path |
@@ -613,12 +613,6 @@ A switch to pstate 1 reaches it, then `BUSY` never clears and no later switch
 completes until a reset. Seen on both clusters, most often on P. Its row also
 looks different: the third word is 0x3000000000000048, without the 0xb8xx
 field the others have. Left out of the OPP tables.
-
-### Not shown to be needed
-
-What went in while chasing the hangs and stays because the tested setup had
-it: `SPMI_SOC0` to `2` kept on, one lock across both clusters, and 100 us
-after a voltage raise before the switch.
 
 ### Thermal
 

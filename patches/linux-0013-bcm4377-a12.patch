@@ -1,26 +1,8 @@
 diff --git a/drivers/bluetooth/hci_bcm4377.c b/drivers/bluetooth/hci_bcm4377.c
-index 66d49b471..7b528eb74 100644
+index 66d49b471..16ab88012 100644
 --- a/drivers/bluetooth/hci_bcm4377.c
 +++ b/drivers/bluetooth/hci_bcm4377.c
-@@ -1941,8 +1941,15 @@ static int bcm4377_setup_rti(struct bcm4377_data *bcm4377)
- 		  bcm4377->bar2 + bcm4377->hw->bar2_offset + BCM4377_BAR2_CONTEXT_ADDR_HI);
- 	iowrite32(2, bcm4377->bar0 + BCM4377_BAR0_RTI_CONTROL);
- 
--	ret = wait_for_completion_interruptible_timeout(&bcm4377->event,
--							BCM4377_TIMEOUT);
-+	/*
-+	 * The event also fires for bootstage changes, and the 4377 in A12
-+	 * iPhones moves from bootstage 2 to 3 before it acks state 2, so wait
-+	 * for the RTI state itself.
-+	 */
-+	do {
-+		ret = wait_for_completion_interruptible_timeout(&bcm4377->event,
-+								BCM4377_TIMEOUT);
-+	} while (ret > 0 && bcm4377->rti_status != 2);
- 	if (ret == 0) {
- 		dev_err(&bcm4377->pdev->dev,
- 			"timed out while waiting for RTI to transition to state 2");
-@@ -2225,14 +2232,13 @@ static int bcm4377_probe_of(struct bcm4377_data *bcm4377)
+@@ -2225,14 +2225,13 @@ static int bcm4377_probe_of(struct bcm4377_data *bcm4377)
  		return ret;
  	}
  

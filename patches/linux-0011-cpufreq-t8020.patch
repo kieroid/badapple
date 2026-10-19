@@ -1,8 +1,8 @@
 diff --git a/drivers/cpufreq/apple-soc-cpufreq.c b/drivers/cpufreq/apple-soc-cpufreq.c
-index 7c50ce74f..e89e93d30 100644
+index 7c50ce74f..92edea6dd 100644
 --- a/drivers/cpufreq/apple-soc-cpufreq.c
 +++ b/drivers/cpufreq/apple-soc-cpufreq.c
-@@ -60,6 +60,21 @@
+@@ -60,6 +60,19 @@
  
  #define APPLE_DVFS_TRANSITION_TIMEOUT 400
  
@@ -17,14 +17,12 @@ index 7c50ce74f..e89e93d30 100644
 +#define APPLE_DVFS_ROW_VOLTAGE		GENMASK_ULL(63, 56)
 +#define APPLE_RAIL_CODE			GENMASK(7, 0)
 +#define APPLE_RAIL_BUSY			BIT(31)
-+/* The PMU ramps after the rail stops being busy. */
-+#define APPLE_RAIL_SETTLE_US		100
 +#define APPLE_RAIL_TIMEOUT_US		2000
 +
  struct apple_soc_cpufreq_info {
  	bool has_ps2;
  	u64 max_pstate;
-@@ -67,11 +82,13 @@ struct apple_soc_cpufreq_info {
+@@ -67,11 +80,13 @@ struct apple_soc_cpufreq_info {
  	u64 cur_pstate_shift;
  	u64 ps1_mask;
  	u64 ps1_shift;
@@ -38,7 +36,7 @@ index 7c50ce74f..e89e93d30 100644
  	const struct apple_soc_cpufreq_info *info;
  };
  
-@@ -95,6 +112,16 @@ static const struct apple_soc_cpufreq_info soc_t8103_info = {
+@@ -95,6 +110,16 @@ static const struct apple_soc_cpufreq_info soc_t8103_info = {
  	.ps1_shift = APPLE_DVFS_CMD_PS1_SHIFT,
  };
  
@@ -55,7 +53,7 @@ index 7c50ce74f..e89e93d30 100644
  static const struct apple_soc_cpufreq_info soc_t8112_info = {
  	.has_ps2 = false,
  	.max_pstate = 31,
-@@ -117,6 +144,10 @@ static const struct of_device_id apple_soc_cpufreq_of_match[] __maybe_unused = {
+@@ -117,6 +142,10 @@ static const struct of_device_id apple_soc_cpufreq_of_match[] __maybe_unused = {
  		.compatible = "apple,s5l8960x-cluster-cpufreq",
  		.data = &soc_s5l8960x_info,
  	},
@@ -66,13 +64,10 @@ index 7c50ce74f..e89e93d30 100644
  	{
  		.compatible = "apple,t8103-cluster-cpufreq",
  		.data = &soc_t8103_info,
-@@ -168,6 +199,69 @@ static unsigned int apple_soc_cpufreq_get_rate(unsigned int cpu)
+@@ -168,6 +197,60 @@ static unsigned int apple_soc_cpufreq_get_rate(unsigned int cpu)
  	return 0;
  }
  
-+/* Both clusters' rails go through the same PMU, so switch one at a time. */
-+static DEFINE_RAW_SPINLOCK(apple_soc_cpufreq_rail_lock);
-+
 +static int apple_soc_cpufreq_set_rail(struct apple_cpu_priv *priv, u32 code)
 +{
 +	u32 reg;
@@ -92,23 +87,19 @@ index 7c50ce74f..e89e93d30 100644
 +					     unsigned int pstate, u64 cmd)
 +{
 +	u32 want, have;
-+	unsigned long flags;
 +	u64 reg;
-+	int ret = 0;
++	int ret;
 +
 +	want = FIELD_GET(APPLE_DVFS_ROW_VOLTAGE,
 +			 readq_relaxed(priv->reg_base + APPLE_DVFS_ROWS +
 +				       pstate * APPLE_DVFS_ROW_STRIDE));
-+
-+	raw_spin_lock_irqsave(&apple_soc_cpufreq_rail_lock, flags);
 +
 +	/* Raise the voltage before the clock, and lower it after. */
 +	have = FIELD_GET(APPLE_RAIL_CODE, readl_relaxed(priv->rail));
 +	if (want > have) {
 +		ret = apple_soc_cpufreq_set_rail(priv, want);
 +		if (ret)
-+			goto out;
-+		udelay(APPLE_RAIL_SETTLE_US);
++			return ret;
 +	}
 +
 +	writeq_relaxed(cmd, priv->reg_base + APPLE_DVFS_CMD);
@@ -122,21 +113,19 @@ index 7c50ce74f..e89e93d30 100644
 +	if (ret) {
 +		dev_warn_ratelimited(priv->cpu_dev, "pstate %u did not finish, CMD %016llx\n",
 +				     pstate, readq_relaxed(priv->reg_base + APPLE_DVFS_CMD));
-+		goto out;
++		return ret;
 +	}
 +
 +	if (want < have)
-+		ret = apple_soc_cpufreq_set_rail(priv, want);
-+out:
-+	raw_spin_unlock_irqrestore(&apple_soc_cpufreq_rail_lock, flags);
++		return apple_soc_cpufreq_set_rail(priv, want);
 +
-+	return ret;
++	return 0;
 +}
 +
  static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
  					unsigned int index)
  {
-@@ -191,6 +285,9 @@ static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
+@@ -191,6 +274,9 @@ static int apple_soc_cpufreq_set_target(struct cpufreq_policy *policy,
  		FIELD_MODIFY(APPLE_DVFS_CMD_PS2, &reg, pstate);
  	reg |= APPLE_DVFS_CMD_SET;
  
@@ -146,7 +135,7 @@ index 7c50ce74f..e89e93d30 100644
  	writeq_relaxed(reg, priv->reg_base + APPLE_DVFS_CMD);
  
  	return 0;
-@@ -206,7 +303,7 @@ static unsigned int apple_soc_cpufreq_fast_switch(struct cpufreq_policy *policy,
+@@ -206,7 +292,7 @@ static unsigned int apple_soc_cpufreq_fast_switch(struct cpufreq_policy *policy,
  }
  
  static int apple_soc_cpufreq_find_cluster(struct cpufreq_policy *policy,
@@ -155,7 +144,7 @@ index 7c50ce74f..e89e93d30 100644
  					  const struct apple_soc_cpufreq_info **info)
  {
  	struct of_phandle_args args;
-@@ -220,15 +317,21 @@ static int apple_soc_cpufreq_find_cluster(struct cpufreq_policy *policy,
+@@ -220,15 +306,21 @@ static int apple_soc_cpufreq_find_cluster(struct cpufreq_policy *policy,
  		return ret;
  
  	match = of_match_node(apple_soc_cpufreq_of_match, args.np);
@@ -180,7 +169,7 @@ index 7c50ce74f..e89e93d30 100644
  
  	return 0;
  }
-@@ -237,7 +340,7 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
+@@ -237,7 +329,7 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
  {
  	int ret, i;
  	unsigned int transition_latency;
@@ -189,7 +178,7 @@ index 7c50ce74f..e89e93d30 100644
  	struct device *cpu_dev;
  	struct apple_cpu_priv *priv;
  	const struct apple_soc_cpufreq_info *info;
-@@ -253,7 +356,7 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
+@@ -253,7 +345,7 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
  	if (!priv)
  		return -ENOMEM;
  
@@ -198,7 +187,7 @@ index 7c50ce74f..e89e93d30 100644
  	if (ret) {
  		dev_err(cpu_dev, "%s: failed to get cluster info: %d\n", __func__, ret);
  		goto out_free_priv;
-@@ -293,6 +396,7 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
+@@ -293,6 +385,7 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
  
  	priv->cpu_dev = cpu_dev;
  	priv->reg_base = reg_base;
@@ -206,7 +195,7 @@ index 7c50ce74f..e89e93d30 100644
  	priv->info = info;
  	policy->driver_data = priv;
  	policy->freq_table = freq_table;
-@@ -313,6 +417,8 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
+@@ -313,6 +406,8 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
  out_free_table:
  	dev_pm_opp_of_cpumask_remove_table(policy->cpus);
  out_iounmap:
@@ -215,7 +204,7 @@ index 7c50ce74f..e89e93d30 100644
  	iounmap(reg_base);
  out_free_priv:
  	kfree(priv);
-@@ -325,6 +431,8 @@ static void apple_soc_cpufreq_exit(struct cpufreq_policy *policy)
+@@ -325,6 +420,8 @@ static void apple_soc_cpufreq_exit(struct cpufreq_policy *policy)
  
  	dev_pm_opp_free_cpufreq_table(priv->cpu_dev, &policy->freq_table);
  	dev_pm_opp_of_cpumask_remove_table(policy->cpus);
