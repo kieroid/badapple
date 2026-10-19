@@ -1,7 +1,6 @@
 # Bad Apple
 
-Mainline Linux on the Apple A12 (T8020), on an iPhone XS Max (iPhone11,6,
-D331pAP). The goal is a console and a shell.
+Mainline Linux on the Apple A12 (T8020).
 
 The boot is tethered and reads nothing off the NAND, so the NAND can hold ext4.
 Registers and dead ends are in [NOTES.md](NOTES.md).
@@ -65,10 +64,10 @@ the jig for a few seconds and try again.
 
 | Device | Display | Touch | USB | Storage | SMP | cpufreq | Wifi | Bluetooth | Audio | Cellular | GPU |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: | :x: | :x: |
+| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: | :x: |
 
-Wifi firmware runs and `wlan0` comes up, but nothing has joined a network yet.
-Details and the full list are in [NOTES.md](NOTES.md#status).
+Hoolock's initramfs has no `iw` or `wpa_supplicant`, so wifi needs them
+brought in. Details and the full list are in [NOTES.md](NOTES.md#status).
 
 ## License
 

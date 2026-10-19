@@ -7,10 +7,11 @@ Registers, gotchas, and things that turned out wrong. Build and boot are in
 
 | Device | Boot | Console | Display | XRGB8888 | Brightness | HDR | AIC | SMP | Chicken bits per core | NVMe | Battery | Buttons | Poweroff | Die temp | Thermal zones | USB gadget | Touch | Touch interrupt | Touch power off | Force sensor | cpufreq | Boost | cpuidle | PCIe | Wifi | Bluetooth | Audio | Cellular | Camera | GPU | Upstream |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :white_check_mark: | :x: | :x: | :white_check_mark: | :x: | :x: | :x: | :x: | :x: | :x: | :x: |
+| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :x: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :white_check_mark: | :x: | :x: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: | :x: | :x: | :x: |
 
-Wifi: the firmware runs and `wlan0` is up, joining a network is untested.
-Bluetooth: the firmware boots, then the chip never reaches RTI state 2.
+- Wifi joins WPA2 networks on 2.4 and 5 GHz, with Alpine's `iw` and
+  `wpa_supplicant` brought in by hand.
+- Bluetooth boots its firmware, then never reaches RTI state 2.
 
 ## Reading the ADT
 
@@ -555,8 +556,7 @@ in 1/100 mm over the whole panel. Size 6890 by 14910, y inverted.
 
 ### Left to do
 
-A real interrupt through an AOP pinctrl node (iOS uses falling edge), power off
-on remove and suspend, the force sensor, better calibration.
+Power off on remove and suspend, the force sensor, better calibration.
 
 One early probe crashed with the screen flashing. Cause unknown, not seen since.
 
@@ -688,6 +688,22 @@ and `hci_bcm4377` ask for. m1n1 fills in the MAC addresses, the antenna SKU
 Wifi firmware 16.20.357.3.2.50.143 runs. The sysfs firmware fallback is off,
 or the missing `regulatory.db` holds everything up for 60 s.
 
+The first transmit used to kill the firmware: "H2D DMA data transfer error"
+in its console, and a DART fault with status 0x80000010, which is
+`READ_FAULT` on a valid PTE. That 4K page DART takes the DART1 `NO_WRITE`
+bit as no read, so every buffer mapped to the device only was unreadable to
+it. `linux-0014` leaves both protection bits off on 4K page DARTs. Scans
+worked before because they only need receive buffers.
+
+To connect, Alpine 3.21's aarch64 `iw`, `wpa_supplicant` and their libraries
+run against the initramfs' musl with `LD_LIBRARY_PATH`. busybox `udhcpc`
+needs a script, there is none in the initramfs. With them it associates,
+completes WPA2, gets a DHCP lease and reaches the internet.
+
+For debugging, `CONFIG_BRCMDBG` with `brcmfmac.debug=0x108000` and
+`/sys/kernel/debug/ieee80211/phy0/console_interval` set puts the firmware's
+own console in dmesg.
+
 Bluetooth: `hci_bcm4377` wants a beamforming blob the 4377 never uses and
 these ADTs do not have, `linux-0013` makes it optional. The firmware then
 boots and reaches RTI state 1, moves to bootstage 3 and never acks state 2.
@@ -721,4 +737,4 @@ Upstream was written for the T2 Macs' B3.
 2. Chicken bits are set once by m1n1, not per core by the kernel.
 3. The first USB attach fails; the gadget retries.
 4. Touch has no power off and no force sensor.
-5. Wifi has not joined a network, Bluetooth stops before RTI state 2.
+5. Bluetooth stops before RTI state 2. Wifi needs its tools brought in.
