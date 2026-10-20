@@ -87,5 +87,11 @@ send "$RDTR"
 cmd devicetree
 send "$RTSC"
 cmd firmware
+# Optional coprocessor firmware, see "make ticket". Without it nothing changes.
+for f in build/iboot/gfx.img4; do
+	[ -f "$f" ] || continue
+	send "$f"
+	cmd firmware
+done
 send "$KRNL"
 cmd bootx

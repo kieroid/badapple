@@ -48,6 +48,11 @@ encrypted.
 
 `make check` builds only the device tree and works on a bare checkout.
 
+Optional, for the GPU coprocessor: with the phone in DFU, run
+`make ticket TICKET_IPSW=/path/to/signed.ipsw` before `make images`. It asks
+Apple for a ticket for your phone, which iBoot needs before it loads
+coprocessor firmware. Without it nothing changes.
+
 ## Run
 
 Put the phone in DFU on the jig. The exploit fires in about a second. Move the

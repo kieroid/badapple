@@ -30,6 +30,8 @@
 		 * not enough, it has to be an alias.
 		 */
 		ausbphy0 = &ausbphy0;
+		/* m1n1 enables it when iBoot preloaded its firmware. */
+		gfxasc = &gfx_asc;
 		/* m1n1 fills MAC addresses, antenna SKU and calibration through these. */
 		wifi0 = &wifi0;
 		bluetooth0 = &bluetooth0;

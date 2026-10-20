@@ -53,6 +53,8 @@ its `ranges`. Raw `reg` gives the offset. `get_reg()` gives the real address.
 | mipi-dsim | 0x230400000 | | DSI host |
 | cluster 0 (E) | 0x210000000 | | 4x Tempest, 2 MB L2 |
 | cluster 1 (P) | 0x211000000 | | 2x Vortex, 8 MB L2 |
+| sgx | 0x204000000 | 339 to 342, 351, 354 | GPU, G11P |
+| gfx-asc | 0x206400000 | 347 to 350 | GPU coprocessor, mailbox at +0x8000 |
 
 `dts/t8020-pmgr.dtsi` comes from `make pmgr DT=<DeviceTree im4p>`, not by hand.
 The iPhone XS (D321AP) ADT matches this one for the SoC, so it would be a second
@@ -171,6 +173,7 @@ No `PWND` means the exploit did not run.
 | 0011 | notch for board 0x1a |
 | 0012 | hand the CPU rails to software, for cpufreq |
 | 0013 | PCIe on T8020 |
+| 0015 | enable `apple,asc-rtk` nodes and pass their `segment-ranges` when iBoot loaded the firmware |
 
 An SError hits every boot at the top of RAM (`L2C_ERR_ADR` 0x8ec78c000). Cause
 unknown. Its status register is write-1-to-clear, so m1n1's usual clear, a
@@ -720,6 +723,35 @@ turns on MSI over MMIO when capability bit 3 is set. This chip reports `0x3`.
 Do not read the Bluetooth BARs with `devmem` after a failed probe. The function
 is disabled by then and the read takes the phone down.
 
+## GPU
+
+The A12 GPU is G11P, two generations before the M1's G13. Asahi's driver,
+m1n1's GPU setup and Mesa all target G13 and later, so none of it applies as
+is. iOS splits it into `AGXFirmwareKextG11PRTBuddy`, which is the generic
+RTBuddy loader, and `AGXG11P`, which talks to firmware endpoints 0x20 and 0x21.
+
+The coprocessor's firmware is `Firmware/agx/armfw_g11p.im4p`, a raw
+`RTKit-2062.142.1` image. iBoot loads it with the `firmware` command as
+`gfxf`, but only with a manifest that lists `gfxf`. None of the borrowed ones
+do, so `make ticket` fetches one for the phone and `make images` wraps the
+firmware with it. `tools/iboot-boot.sh` sends it when it exists.
+
+Once loaded, iBoot adds `segment-ranges` to `/arm-io/gfx-asc`: `__TEXT` at
+0x800160000 (0x44000, firmware VA 0) and `__DATA` at 0x8001a4000 (0x8c000,
+VA 0x44000), both inside carveouts Linux never sees. It also patches the GPU
+MMU (UAT) addresses into the image, `__rtk_patch_uat_*`.
+
+`linux-0019` adds `apple,asc-rtk`, which powers `ps_gfx`, sets RUN at +0x44
+and runs RTKit's handshake. Buffers the firmware already placed are read
+through `segment-ranges`; ones it wants the host to place are refused, since
+the coprocessor only sees memory its UAT maps. m1n1 enables the node only
+when the firmware was loaded.
+
+On the phone the handshake works: protocol 12, endpoints 0x00, 0x01, 0x20
+and 0x21. Then the firmware asks for a crashlog buffer at address 0 and never
+acks the power state. Getting further needs Linux buffers mapped into the UAT,
+so the table location and format come next.
+
 ## Debugging
 
 - simpledrm's console lags. `boot_delay=8` lets it keep up, `initcall_debug`
@@ -750,3 +782,5 @@ is disabled by then and the read takes the phone down.
 4. Touch has no power off and no force sensor.
 5. Wifi and Bluetooth need their tools brought in. Bluetooth pairing is
    untested, it needs `bluetoothd`.
+6. GPU: the coprocessor boots its firmware but stops at the first host
+   buffer, which needs a UAT mapping.

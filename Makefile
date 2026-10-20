@@ -7,6 +7,8 @@
 # m1n1       build the m1n1 chainload payload
 # kernel     build Image.gz with Hoolock's 16K config
 # initramfs  download Hoolock's test initramfs
+# ticket     optional: fetch an Apple ticket that lists coprocessor firmware,
+#            needs the phone in DFU and TICKET_IPSW=<a signed .ipsw>
 # images     one-time: patch iBSS and wrap the device tree and trustcache,
 #            needs IPSW=<unpacked ipsw dir>
 # kernelcache  pack m1n1, the device tree, the kernel and the initramfs as a
@@ -51,6 +53,7 @@ IPSW     ?=
 IBSS_IM4P = $(firstword $(wildcard $(IPSW)/Firmware/dfu/iBSS.d331p*.im4p))
 ADT_IM4P  = $(firstword $(wildcard $(IPSW)/Firmware/all_flash/DeviceTree.d331pap*.im4p))
 MTFW_IM4P = $(firstword $(wildcard $(IPSW)/Firmware/D331p_Multitouch.im4p))
+GFX_IM4P  = $(firstword $(wildcard $(IPSW)/Firmware/agx/armfw_g11p.im4p))
 # The .ipsw file itself, for the wifi and Bluetooth firmware, which sits in the
 # root filesystem image. iOS 16.6.1's is not encrypted.
 IPSW_FILE ?=
@@ -60,7 +63,7 @@ IPSW_FILE ?=
 # picks up UART0 through stdout-path, for anyone with a serial cable.
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel cma=64M
 
-.PHONY: check deps patch pmgr m1n1 kernel initramfs images kernelcache \
+.PHONY: check deps patch pmgr m1n1 kernel initramfs images ticket kernelcache \
 	m1n1cache boot clean FORCE
 FORCE:
 
@@ -162,7 +165,7 @@ $(INITRAMFS):
 # Apple never signed; the trustcache is 24 bytes of header with no entries,
 # which is all iBoot wants here.
 images: $(IBOOT)/iBSS.patched.raw $(IBOOT)/devicetree.img4 $(IBOOT)/trustcache.img4 \
-	$(IBOOT)/mtfw.cpio $(IBOOT)/bcmfw.cpio
+	$(IBOOT)/mtfw.cpio $(IBOOT)/bcmfw.cpio $(if $(wildcard $(TICKET)),$(IBOOT)/gfx.img4)
 
 $(IBOOT):
 	mkdir -p $@
@@ -198,6 +201,27 @@ $(IBOOT)/bcmfw.cpio: tools/bcmfw.py | $(IBOOT)
 	    -o $(IBOOT)/ios-root $(IPSW_FILE)
 	python3 tools/bcmfw.py $(IBOOT)/ios-root/*/root $(IBOOT)/bcmfw-root
 	cd $(IBOOT)/bcmfw-root && find . | cpio -o -H newc > ../bcmfw.cpio
+
+# Optional. Coprocessor firmware, like the GPU's, is loaded by iBoot, and iBoot
+# only takes it with a manifest that lists it. None of the borrowed ones do, so
+# this asks Apple's TSS server for a ticket for your phone, once, with the phone
+# in DFU. TICKET_IPSW is any .ipsw Apple still signs for it, and the ticket keeps
+# working after that. ipsw's own TSS request gets refused for this phone,
+# idevicerestore's does not; -t saves the ticket and exits.
+TICKET := $(IBOOT)/apticket.im4m
+
+ticket: | $(IBOOT)
+	@test -n "$(TICKET_IPSW)" || { echo "set TICKET_IPSW=<a signed .ipsw>"; exit 1; }
+	rm -rf $(IBOOT)/tss
+	idevicerestore -t -C $(IBOOT)/tss $(TICKET_IPSW)
+	python3 -c 'import gzip, plistlib, sys; \
+	    sys.stdout.buffer.write(plistlib.loads(gzip.decompress(open(sys.argv[1], "rb").read()))["ApImg4Ticket"])' \
+	    $(IBOOT)/tss/shsh/*.shsh > $(TICKET)
+
+# The GPU coprocessor's firmware, sent with the firmware command.
+$(IBOOT)/gfx.img4: $(TICKET) | $(IBOOT)
+	@test -n "$(GFX_IM4P)" || { echo "set IPSW=<unpacked ipsw dir>"; exit 1; }
+	ipsw img4 create --im4p $(GFX_IM4P) --im4m $(TICKET) --output $@
 
 $(IBOOT)/empty_trustcache.bin: | $(IBOOT)
 	printf '\x01\x00\x00\x00\x6e\x17\x68\x17\x88\x2d\x44\x40\x83\xb6\xf3\x22\x06\xbc\x4f\x17\x00\x00\x00\x00' > $@

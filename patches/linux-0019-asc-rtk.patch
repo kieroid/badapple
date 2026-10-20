@@ -1,0 +1,145 @@
+diff --git a/drivers/soc/apple/Makefile b/drivers/soc/apple/Makefile
+index cad33f1cc..7745c3173 100644
+--- a/drivers/soc/apple/Makefile
++++ b/drivers/soc/apple/Makefile
+@@ -15,3 +15,4 @@ obj-$(CONFIG_APPLE_TUNABLE) += apple-tunable.o
+ apple-tunable-y = tunable.o
+ 
+ obj-$(CONFIG_APPLE_PMP_T8015_V1) += pmp_t8015_v1.o
++obj-$(CONFIG_APPLE_RTKIT) += asc-rtk.o
+diff --git a/drivers/soc/apple/asc-rtk.c b/drivers/soc/apple/asc-rtk.c
+new file mode 100644
+index 000000000..14f40f9a8
+--- /dev/null
++++ b/drivers/soc/apple/asc-rtk.c
+@@ -0,0 +1,130 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/*
++ * Starts an ASC coprocessor whose firmware iBoot preloaded and runs only
++ * RTKit's own endpoints, so its syslog and crashlog land in dmesg. For
++ * bringing up firmware, like the A12 GPU's, that has no driver yet.
++ *
++ * The firmware reaches memory through its own MMU, which iBoot set up, so the
++ * only buffers it can use are its own. m1n1 passes iBoot's segment-ranges on,
++ * and buffer requests that already carry an address are read through them.
++ * Requests that want the host to pick an address are refused.
++ *
++ * Copyright (c) 2026 kiki <kieran@lavato.net>
++ */
++
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/soc/apple/rtkit.h>
++
++#define ASC_CPU_CONTROL		0x44
++#define ASC_CPU_CONTROL_RUN	BIT(4)
++
++/* One entry of the ADT's segment-ranges. */
++struct asc_segment {
++	__le64 phys;
++	__le64 iova;
++	__le64 remap;
++	__le32 size;
++	__le32 flags;
++} __packed;
++
++struct asc_rtk {
++	struct device *dev;
++	const struct asc_segment *segs;
++	int nsegs;
++};
++
++static int asc_rtk_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
++{
++	struct asc_rtk *asc = cookie;
++	int i;
++
++	/* Address 0 asks the host to pick one, which this cannot do. */
++	for (i = 0; bfr->iova && i < asc->nsegs; i++) {
++		u64 iova = le64_to_cpu(asc->segs[i].iova);
++		u32 size = le32_to_cpu(asc->segs[i].size);
++
++		if (bfr->iova < iova || bfr->iova + bfr->size > iova + size)
++			continue;
++
++		bfr->buffer = devm_memremap(asc->dev, le64_to_cpu(asc->segs[i].phys) +
++					    bfr->iova - iova, bfr->size, MEMREMAP_WB);
++		return PTR_ERR_OR_ZERO(bfr->buffer);
++	}
++
++	dev_warn(asc->dev, "refusing buffer of %#zx bytes at %pad\n", bfr->size,
++		 &bfr->iova);
++	return -ENOMEM;
++}
++
++/* The buffers are the firmware's own and devm unmaps them. */
++static void asc_rtk_shmem_destroy(void *cookie, struct apple_rtkit_shmem *bfr)
++{
++}
++
++static const struct apple_rtkit_ops asc_rtk_ops = {
++	.shmem_setup = asc_rtk_shmem_setup,
++	.shmem_destroy = asc_rtk_shmem_destroy,
++};
++
++static int asc_rtk_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct apple_rtkit *rtk;
++	struct asc_rtk *asc;
++	void __iomem *base;
++	int len, ret;
++
++	asc = devm_kzalloc(dev, sizeof(*asc), GFP_KERNEL);
++	if (!asc)
++		return -ENOMEM;
++	asc->dev = dev;
++	asc->segs = of_get_property(dev->of_node, "apple,segment-ranges", &len);
++	asc->nsegs = asc->segs ? len / sizeof(*asc->segs) : 0;
++
++	base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(base))
++		return PTR_ERR(base);
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++
++	rtk = devm_apple_rtkit_init(dev, asc, NULL, 0, &asc_rtk_ops);
++	if (IS_ERR(rtk))
++		return dev_err_probe(dev, PTR_ERR(rtk), "RTKit init failed\n");
++
++	writel(ASC_CPU_CONTROL_RUN, base + ASC_CPU_CONTROL);
++
++	ret = apple_rtkit_boot(rtk);
++	if (ret)
++		return dev_err_probe(dev, ret, "firmware did not boot\n");
++
++	dev_info(dev, "firmware booted, %d segments\n", asc->nsegs);
++	return 0;
++}
++
++static const struct of_device_id asc_rtk_of_match[] = {
++	{ .compatible = "apple,asc-rtk" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, asc_rtk_of_match);
++
++static struct platform_driver asc_rtk_driver = {
++	.driver = {
++		.name = "apple-asc-rtk",
++		.of_match_table = asc_rtk_of_match,
++	},
++	.probe = asc_rtk_probe,
++};
++module_platform_driver(asc_rtk_driver);
++
++MODULE_AUTHOR("kiki <kieran@lavato.net>");
++MODULE_DESCRIPTION("Boots a preloaded Apple ASC coprocessor for bring-up");
++MODULE_LICENSE("Dual MIT/GPL");

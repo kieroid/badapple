@@ -698,6 +698,40 @@
 			#mbox-cells = <0>;
 		};
 
+		/*
+		 * The GPU's coprocessor. iBoot loads its firmware when sent one,
+		 * and only then does m1n1 enable these two, so a boot without it
+		 * is unchanged. apple,asc-rtk only starts it and logs what it
+		 * says; there is no GPU driver yet.
+		 *
+		 * The ADT lists the mailbox interrupts as 348, 347, 350, 349, the
+		 * same descending pairs as ANS. ps_gfx is the one PMGR domain;
+		 * the ADT's gates 208 to 210 are virtual devices under it.
+		 */
+		gfx_asc_mbox: mbox@206408000 {
+			compatible = "apple,t8020-asc-mailbox",
+				     "apple,t8015-asc-mailbox";
+			reg = <0x2 0x06408000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 347 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 348 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 349 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 350 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+					  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+			power-domains = <&ps_gfx>;
+			status = "disabled";
+		};
+
+		gfx_asc: coprocessor@206400000 {
+			compatible = "apple,t8020-gfx-asc", "apple,asc-rtk";
+			reg = <0x2 0x06400000 0x0 0x8000>;
+			mboxes = <&gfx_asc_mbox>;
+			power-domains = <&ps_gfx>;
+			status = "disabled";
+		};
+
 		aic: interrupt-controller@23b100000 {
 			compatible = "apple,t8020-aic", "apple,t8015-aic", "apple,aic";
 			reg = <0x2 0x3b100000 0x0 0x8000>;
