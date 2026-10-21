@@ -743,14 +743,59 @@ MMU (UAT) addresses into the image, `__rtk_patch_uat_*`.
 
 `linux-0019` adds `apple,asc-rtk`, which powers `ps_gfx`, sets RUN at +0x44
 and runs RTKit's handshake. Buffers the firmware already placed are read
-through `segment-ranges`; ones it wants the host to place are refused, since
-the coprocessor only sees memory its UAT maps. m1n1 enables the node only
-when the firmware was loaded.
+through `segment-ranges`. The ASC has no DART, so ones it wants the host to
+place are plain DMA memory at their physical address. m1n1 enables the node
+only when the firmware was loaded.
 
 On the phone the handshake works: protocol 12, endpoints 0x00, 0x01, 0x20
-and 0x21. Then the firmware asks for a crashlog buffer at address 0 and never
-acks the power state. Getting further needs Linux buffers mapped into the UAT,
-so the table location and format come next.
+and 0x21, and the firmware boots.
+
+### Init and power
+
+`tools/gfx-proxy.py` drives the firmware from the m1n1 proxy. It is one shot:
+the firmware cannot be restarted without a DFU boot, and a power cycle of
+`ps_gfx` hangs it after its MMU comes on.
+
+The init message (EP 0x20, `0x81 << 48 | addr`) points at a block of u64s:
+RegionB at 3, RegionC at 4, a firmware mem-desc ring at 5 and a mem-desc
+table at 0x13 with its count at 0x14. Table entries are `u64 va, u32 pa >> 12,
+u32 0, u16 16K pages, u16 flags` and map host memory into the firmware. The
+regions match m1n1's G13 InitData where it matters: 17 channels (12 run
+queues, device control, event, firmware log, KTrace, stats), stats pointers
+at 0x170 to 0x180, hwdata A and B at 0x188 and 0x1a0. hwdata B holds IO maps
+at 0x640 + 0x20 * n (Fender 0x204d00000, RGX 0x204000000) and the perf state
+tables from ADT `sgx/perf-states`.
+
+RegionC fields the firmware needs:
+
+| Offset | What |
+| --- | --- |
+| 0x0 | KTrace categories, 0xff for everything |
+| 0x9150 | per-context TLB generation, u32 each |
+| 0x9158 | per-context page table base, u64 each |
+| 0xb198 | firmware sets it when init is done |
+| 0xb1cc | set to 1 so the first power-up installs the job handlers |
+
+With the GPU powered, any RGX access wedged the coprocessor. The cause was
+the same as cpufreq: iBSS leaves the PMGR rail mask (0x23b0a0000 bits 14:8)
+set, so rail 2 (GPU SRAM) and rail 4 (GPU) stay at 0. With the bits clear the
+hardware copies the GPU row of the DVFS table (0x23b070000 + pstate * 0x10)
+into the rails on every pstate change. `m1n1-0012` already clears all of
+them for Linux boots.
+
+### Jobs
+
+Device control messages (channel 12, doorbell `0x83 << 48 | 0x11`) work. Run
+queue messages are m1n1's: `u32 type, u64 queue, u32 head, u32 event, u32
+new`, doorbell = channel index. The command queue is m1n1's
+`CommandQueueInfo` with the context pointer at 0xa4. A barrier with its wait
+met goes through: the firmware advances the read index and clears
+`has_commands`.
+
+A compute command (type 3) gets through the handler, but the scheduler never
+runs its microsequence yet. The microsequence opcodes match m1n1's
+(0x0e store, 0x18 end, 0x29 start compute, 0x2b complete). Starting real
+compute work then needs GPU page tables and a G11 shader.
 
 ## Debugging
 
@@ -782,5 +827,5 @@ so the table location and format come next.
 4. Touch has no power off and no force sensor.
 5. Wifi and Bluetooth need their tools brought in. Bluetooth pairing is
    untested, it needs `bluetoothd`.
-6. GPU: the coprocessor boots its firmware but stops at the first host
-   buffer, which needs a UAT mapping.
+6. GPU: the firmware boots, powers the GPU and takes queue messages, but no
+   job runs on the GPU yet.
