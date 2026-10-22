@@ -53,7 +53,7 @@ index 000000000..a65700ba2
 + *
 + * The one thing worth knowing about the hardware is that the register window
 + * is mirrored every 0x200000 and only the second copy accepts writes. Reads
-+ * work through either. See "Display" in the project NOTES.md.
++ * work through either. See docs/display.md in the project.
 + */
 +
 +#include <linux/aperture.h>

@@ -92,7 +92,7 @@
  * Bring-up only: the driver powers the controller, reads one word from its
  * bootloader, and powers it down again. Reset is pin 5, active low, and the
  * power comes from the Acorn display PMU at 0x2a on i2c3, all from
- * /arm-io/spi1/multi-touch in the ADT. See "Touch" in NOTES.md.
+ * /arm-io/spi1/multi-touch in the ADT. See docs/touch.md.
  */
 &spi1 {
 	status = "okay";

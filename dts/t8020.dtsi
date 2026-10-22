@@ -5,7 +5,7 @@
  * Other names: H11
  *
  * Every address and interrupt number here was read out of the DeviceTree
- * shipped in the iPhone11,2 IPSW (see "Reading the ADT" in NOTES.md), not
+ * shipped in the iPhone11,2 IPSW (see docs/soc.md), not
  * guessed from T8015.
  * The arm-io ranges property maps child 0x0 to parent 0x200000000, so a
  * peripheral offset of 0x35200000 is absolute address 0x235200000.
@@ -894,8 +894,7 @@
 		 * The touch controller's bus. spi-1,samsung in the ADT: the
 		 * older block M1's SPI grew out of, which spi-apple drives in a
 		 * mode of its own. No "apple,spi" fallback, because the newer
-		 * block's driver code would not work on it. See "Touch" in
-		 * NOTES.md.
+		 * block's driver code would not work on it. See docs/touch.md.
 		 * Chip select is a GPIO, as the ADT's function-spi_cs0 says.
 		 * iBoot leaves pin 67 as an output driven high, which is the
 		 * idle state the SPI core sets when it claims it.

@@ -10,12 +10,10 @@ Nothing third party is vendored here. `make deps` clones the trees below into
 | Hoolock docs, 16K config, IM4M templates, empty trustcache | HoolockLinux/docs | MIT |
 | Test initramfs | HoolockLinux/HoolockRD | see that repo |
 | Jig firmware | Trussh/usbliter8ra1n-patch | MIT |
-| pico-sdk | raspberrypi/pico-sdk | BSD-3-Clause |
-| Arm GNU toolchain | developer.arm.com | GPL with runtime exception |
 
 ## Ours
 
-- `boards/pico2_w.cmake` and `tools/dfuboot.py`.
+- `tools/dfuboot.py`.
 - `tools/iboot-image4-patch.py`. It finds the callback by the `EKEY` literal,
   like hBootPatcher (MIT), but no code is copied from it.
 - `tools/mtfw.py`. Apple's touch firmware is converted at build time and never

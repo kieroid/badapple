@@ -54,7 +54,7 @@ index 000000000..778fa2947
 + * Still missing: power off on remove and suspend, and the force sensor on
 + * the second interface.
 + *
-+ * Where every number here comes from is in "Touch" in the project NOTES.md.
++ * Where every number here comes from is in docs/touch.md in the project.
 + */
 +
 +#include <linux/crc16.h>

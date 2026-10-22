@@ -1,22 +1,19 @@
 # Bad Apple
 
-Mainline Linux on the Apple A12 (T8020).
+Mainline Linux on the Apple A12 (T8020), tested on the iPhone XS Max.
 
 The boot is tethered and reads nothing off the NAND, so the NAND can hold ext4.
-Registers and dead ends are in [NOTES.md](NOTES.md).
+Hardware notes are in [docs](docs/README.md).
 
 ## Boot chain
 
 ```text
-SecureROM
-  -> usbliter8 on a Pico 2 W jig, leaves the phone in pwned DFU
-  -> iBSS, patched to skip signature checks, sent by tools/dfuboot.py
-  -> device tree and an empty trustcache, over Apple's recovery protocol
+SecureROM, pwned by usbliter8
+  -> patched iBSS
+  -> device tree and an empty trustcache
   -> m1n1, in place of a restore kernelcache
   -> Linux, 16K pages, initramfs
 ```
-
-iBSS stays in the chain. It brings up DRAM and the display.
 
 ## Dependencies
 
@@ -25,54 +22,42 @@ iBSS stays in the chain. It brings up DRAM and the display.
 | `clang`, `ld.lld` | kernel and m1n1 |
 | Rust with `rust-src` | m1n1 |
 | `dtc`, `cpp` | `make check` |
-| `python3` | `tools/`, m1n1's proxyclient |
+| `python3` | `tools/` |
 | `git`, `curl`, `unzip` | `make deps`, `make initramfs` |
 | `ipsw` | the IPSW and img4 |
 | `irecovery` | recovery mode |
-| [usbliter8ra1n-patch](https://github.com/Trussh/usbliter8ra1n-patch) | jig firmware, see [NOTES.md](NOTES.md#the-jig) |
+| [usbliter8ra1n-patch](https://github.com/Trussh/usbliter8ra1n-patch) | pwned DFU |
 
 And an iPhone11,6 IPSW.
 
 ## Build
 
 ```sh
-make deps     # clone m1n1, Linux, Hoolock's docs; apply patches/
+make deps     # clone the trees and apply patches/
 make images IPSW=/path/to/unpacked/ipsw IPSW_FILE=/path/to.ipsw
 make boot     # builds the rest and boots
 ```
 
-`make images` runs once. It patches iBSS, wraps the device tree and trustcache,
-and converts the touch, wifi and Bluetooth firmware. `IPSW_FILE` is the `.ipsw`
-itself, since the wifi firmware is in its root image. iOS 16.6.1's is not
-encrypted.
+`make images` runs once. `IPSW_FILE` is the `.ipsw` itself, since the wifi
+firmware is in its root image.
 
-`make check` builds only the device tree and works on a bare checkout.
-
-Optional, for the GPU coprocessor: with the phone in DFU, run
-`make ticket TICKET_IPSW=/path/to/signed.ipsw` before `make images`. It asks
-Apple for a ticket for your phone, which iBoot needs before it loads
-coprocessor firmware. Without it nothing changes.
+For the GPU coprocessor, run `make ticket TICKET_IPSW=/path/to/signed.ipsw`
+with the phone in DFU before `make images`. It fetches a ticket for your phone,
+which iBoot needs to load coprocessor firmware.
 
 ## Run
 
-Put the phone in DFU on the jig. The exploit fires in about a second. Move the
-cable to the PC and run `make boot`.
-
-The phone shows up as `05ac:4142` with telnet on `172.16.42.1`.
-`tools/tsh.py "cmd"` runs one command. The first USB attach often fails and the
-phone retries, so give it a minute.
-
-No `PWND:[usbliter8]` in the USB serial means the exploit did not fire. Unplug
-the jig for a few seconds and try again.
+Pwn the phone, then run `make boot`. It shows up as `05ac:4142` with telnet
+on `172.16.42.1`. `tools/tsh.py "cmd"` runs one command. The first USB attach
+often fails and the phone retries, so give it a minute.
 
 ## Status
 
-| Device | Display | Touch | USB | Storage | SMP | cpufreq | Wifi | Bluetooth | Audio | Cellular | GPU |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| iPhone XS Max (D331p) | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: |
+| Display | Touch | USB | Storage | SMP | cpufreq | Wifi | Bluetooth | Audio | Cellular | GPU |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: |
 
-Hoolock's initramfs has no `iw`, `wpa_supplicant` or BlueZ tools, so wifi
-and Bluetooth need them brought in. Details and the full list are in [NOTES.md](NOTES.md#status).
+Full list in [docs](docs/README.md#status).
 
 ## License
 
