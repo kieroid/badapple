@@ -13,6 +13,7 @@ restarted, so each run needs a fresh DFU boot. KTrace goes to
 build/gfx/ktrace.bin. Offsets name the firmware functions they come from.
 """
 
+import atexit
 import pathlib
 import struct
 import sys
@@ -163,6 +164,10 @@ m.put(hwdata_b + 0x988, "<I", 16000 * 24)
 m.put(hwdata_a + 4, "<I", 16000 * 24)
 # Highest pstate index; the DVFS loop in FUN_00020b44 walks down from it.
 m.put(hwdata_b + 0xa6c, "<I", len(mhz) - 1)
+# Per-engine unit masks (TA, 3D, CP), copied by FUN_000157b4 at power-up.
+# The kext writes (1 << n) - 1; at 0 the scheduler never finds a free unit.
+# These are the bits the firmware forces on.
+m.put(hwdata_b + 0x16d0, "<III", 3, 7, 1)
 for i in range(len(mhz)):
     m.put(hwdata_b + 0xa70 + 4 * i, "<I", mhz[i])
     m.put(hwdata_b + 0xab0 + 0x20 * i, "<8I", *[mv[i]] * 8)
@@ -194,6 +199,10 @@ for a, n in ((init, 0x4000), (table, 0x4000), (pa, CHUNK)):
 chans = [struct.unpack_from("<QQ", m.buf, B + i * 0x10) for i in range(17)]
 chans = [(pa + st - VA, pa + rg - VA) for st, rg in chans]
 ktrace = []
+@atexit.register
+def save_ktrace():
+    (OUT / "ktrace.bin").write_bytes(b"".join(ktrace))
+    print(f"{len(ktrace)} ktrace events in {OUT / 'ktrace.bin'}")
 def drain():
     # Event 13 (0x38 x 0x100), KTrace 15 (0x38 x 0x200). Channel state:
     # read index @0, write index @0x20.
@@ -284,29 +293,41 @@ if "job" in sys.argv[1:]:
 
 if "cpjob" in sys.argv[1:]:
     # Compute command (type 3) whose microsequence only uses firmware ops
-    # (trace, store, complete), so no shader or GPU VM. G11 command: +0x10
+    # (trace, store, finalize, end), so no shader or GPU VM. G11 command: +0x10
     # context id, +0x14 event control (m1n1 V12.3 layout), +0x1f0
-    # microsequence pointer and size, +0x288 stamp index (slot in bits
-    # 14:8), +0x28c event.
+    # microsequence pointer and size, +0x278 completion stamp, +0x290 its
+    # index in the event control.
     EV = 2
     cmd, evc, useq, scratch = m.alloc(0x300), m.alloc(0x100), m.alloc(0x100), m.alloc(0x100)
     def build():
         ops = struct.pack("<IQQQQ", 0x1a | 0x01ab << 16, 1, 2, 3, 4)        # trace 0x1ab
         ops += struct.pack("<IQI", 0x0e | 2 << 28, m.va_of(scratch), 0xcafe0001)  # store32
-        ops += struct.pack("<IQQI", 0x2b, 0, m.va_of(scratch + 8), 1).ljust(0x2c, b"\0")  # complete
+        # Finalize compute takes the stamp once its unit state entry is done
+        # (+0xc == 3) or the flag at +0x3c is set; end (FUN_0001a810) then
+        # writes the stamp, retires the slot and frees the engine unit.
+        m.put(scratch + 0x20, "<IIII", 0, 0, 0, 3)
+        m.put(scratch + 0x40, "<I", 1)
+        fin = bytearray(0x44)
+        struct.pack_into("<IQ", fin, 0, 0x2a, m.va_of(scratch + 0x20))
+        struct.pack_into("<QI", fin, 0x28, m.va_of(scratch + 8), 1)
+        struct.pack_into("<Q", fin, 0x3c, m.va_of(scratch + 0x40))
+        ops += fin
         ops += struct.pack("<I", 0x18 | 0x40 << 24)                         # end
         m.buf[useq:useq + len(ops)] = ops
         m.put(cmd, "<IQII", 3, 0, 0, 1)
         m.put(cmd + 0x14, "<Q", m.va_of(evc))
+        # Event control: +0 points at the event counter. Completion
+        # (FUN_0000f15c) bumps +0xc, and FUN_0000d704 retires it once that
+        # equals the counter. Use the stamp the end op writes.
+        m.put(evc, "<QII", m.va_of(scratch + 8), 0, 0)
         m.put(cmd + 0x1f0, "<QI", m.va_of(useq), len(ops))
-        m.put(cmd + 0x288, "<IB", 0, EV)
+        # Completion stamp {target, ?, value, event}: FUN_0000d704 writes the
+        # value to target and raises the event.
+        m.put(cmd + 0x278, "<QQII", m.va_of(scratch + 0x10), 0, 0xcafe0002, EV)
     submit(2, cmd, build, EV)
-    print(f"[cpjob] scratch {rd32(scratch):#x} stamp {rd32(scratch + 8):#x}")
+    print(f"[cpjob] scratch {rd32(scratch):#x} stamp {rd32(scratch + 8):#x} done {rd32(scratch + 0x10):#x}")
     # Scheduler state for offline reading; may be stale behind the ASC cache.
     (OUT / "data-cp.bin").write_bytes(iface.readmem(DATA_PA, DATA_SIZE))
+    (OUT / "chunk-cp.bin").write_bytes(iface.readmem(pa, m.off))
 
-try:
-    work_until(lambda: False, 5)
-finally:
-    (OUT / "ktrace.bin").write_bytes(b"".join(ktrace))
-    print(f"{len(ktrace)} ktrace events in {OUT / 'ktrace.bin'}")
+work_until(lambda: False, 5)
