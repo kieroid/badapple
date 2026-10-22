@@ -3,15 +3,15 @@
 # Copyright (c) 2026 kiki <kieran@lavato.net>
 """Drive the A12 GPU coprocessor from the m1n1 proxy.
 
-usage: M1N1DEVICE=/dev/ttyACM0 build/venv/bin/python tools/gfx-proxy.py [job] [cpjob | kick]
+usage: M1N1DEVICE=/dev/ttyACM0 build/venv/bin/python tools/gfx-proxy.py [job] [cpjob | kick | kernel]
 
 Boot the m1n1 proxy with the GPU firmware loaded (tools/iboot-boot.sh
 build/iboot/kernelcache-m1n1.img4). The script boots the firmware, sends the
 init block, powers the GPU with a device control message, then optionally
 submits a barrier (job) and a compute command that only runs firmware ops
-(cpjob) or kicks the GPU (kick). The firmware cannot be restarted, so each
-run needs a fresh DFU boot. KTrace goes to build/gfx/ktrace.bin. Offsets
-name the firmware functions they come from.
+(cpjob), kicks the GPU (kick) or runs a shader (kernel). The firmware
+cannot be restarted, so each run needs a fresh DFU boot. KTrace goes to
+build/gfx/ktrace.bin. Offsets name the firmware functions they come from.
 """
 
 import atexit
@@ -302,6 +302,7 @@ def submit(qtype, cmd, build_cmd, ev):
     m.put(info + 0x30, "<IIQIIIiIiQ", 0, 0, 0xffffffffffff0000, 1, 0, 1, -1, 0x1001, -1, 0)
     m.put(info + 0xa4, "<Q", m.va_of(ctx))
     build_cmd(m.va_of(info))
+    assert len(m.buf) == CHUNK, "a slice assignment changed the chunk size"
     iface.writemem(pa + lo, bytes(m.buf[lo:m.off]))
     p.dc_civac(pa + lo, m.off - lo)
     st, rg = chans[qtype]
@@ -368,9 +369,11 @@ if "cpjob" in sys.argv[1:]:
     (OUT / "data-cp.bin").write_bytes(iface.readmem(DATA_PA, DATA_SIZE))
     (OUT / "chunk-cp.bin").write_bytes(iface.readmem(pa, m.off))
 
-if "kick" in sys.argv[1:]:
-    # First GPU work: a compute command whose CDM control stream is only the
-    # terminate word, run in VM slot 1. Microsequence as the kext builds it
+KERNEL = "kernel" in sys.argv[1:]
+if "kick" in sys.argv[1:] or KERNEL:
+    # A compute command in MMU context SLOT. With "kick" its CDM control
+    # stream only terminates; with "kernel" it launches a shader that stores
+    # 0xcafe1234 to memory. Microsequence as the kext builds it
     # (FUN_fffffff0084d0f08): StartCompute, wait for the CDM interrupt,
     # finalize, end. StartCompute writes cmd+0x70/+0x78/+0x80 to RGX
     # 0x14020/0x14000/0x118d0 (+0x78 is the stream, like m1n1's G13
@@ -380,8 +383,31 @@ if "kick" in sys.argv[1:]:
     stats_cp = struct.unpack_from("<Q", m.buf, B + 0x180)[0]
     cmd, evc, useq, scratch = m.alloc(0x300), m.alloc(0x100), m.alloc(0x200), m.alloc(0x100)
     stream, args = m.alloc(0x4000, 0x4000), m.alloc(0x4000, 0x4000)
+    code, state, target = m.alloc(0x400, 0x4000), m.alloc(0x40, 0x40), m.alloc(0x100)
     def build(info):
-        m.put(stream, "<I", 0x80000000)                     # CDM stream terminate
+        if KERNEL:
+            # G11 code: the ISA is close to G13 (applegpu decodes G11 kernels
+            # from the iOS CoreImage binary archives, Mach-O cpusubtype 0x72),
+            # but stop is 0x0801. 32 threads store to target via r0_r1.
+            t = gva(target)
+            prog = (
+                bytes.fromhex("6201") + struct.pack("<I", t & 0xffffffff) +   # mov_imm r0, lo
+                bytes.fromhex("6205") + struct.pack("<I", t >> 32) +          # mov_imm r1, hi
+                bytes.fromhex("6209") + struct.pack("<I", 0xcafe1234) +       # mov_imm r2
+                bytes.fromhex("4511000500c01200") +                           # device_store r2
+                bytes.fromhex("3800") + bytes.fromhex("0801"))                # wait 0, stop
+            m.buf[code:code + len(prog)] = prog
+            # State-load program (ESLStateLoadEncoderGen1): the shader word
+            # (code >> 6 at bit 38, 0x9 at 31:28, register blocks 0x1f), then
+            # 0x0108 for "no preshader". Addresses are 32-bit offsets from the
+            # 0x11 << 32 base in RGX 0x10000.
+            m.put(state, "<QH", (gva(code) & 0xffffffff) >> 6 << 38 | 0x90000000 | 0x1f, 0x0108)
+            # CDM: launch (block type 0 in bits 31:30, direct), state block,
+            # global size in threads, threadgroup size; barrier; terminate.
+            m.put(stream, "<8III", 0, gva(state) & 0xffffffc0, 32, 1, 1, 32, 1, 1,
+                  0xc0000160, 0x80000000)
+        else:
+            m.put(stream, "<I", 0x80000000)                 # CDM stream terminate
         m.put(scratch + 0x20, "<Q", 1)                      # kick gate, > cmd+4
         st = bytearray(0x64)
         struct.pack_into("<IQQQQIIIIII", st, 0, 0x29, m.va_of(cmd + 0x1c), m.va_of(cmd + 0x70),
@@ -402,6 +428,8 @@ if "kick" in sys.argv[1:]:
         m.put(cmd + 0x278, "<QQII", m.va_of(scratch + 0x10), 0, 0xcafe0003, EV)
     submit(2, cmd, build, EV)
     print(f"[kick] stamp {rd32(scratch + 8):#x} done {rd32(scratch + 0x10):#x} stats_cp[0] {rd(stats_cp - VA, 0x20).hex()}")
+    if KERNEL:
+        print(f"[kernel] target {rd(target, 0x10).hex()}")
     (OUT / "data-kick.bin").write_bytes(iface.readmem(DATA_PA, DATA_SIZE))
     (OUT / "chunk-kick.bin").write_bytes(iface.readmem(pa, m.off))
     # MMU fault status, decoded like the kext (FUN_fffffff0084cf9c8). RGX
