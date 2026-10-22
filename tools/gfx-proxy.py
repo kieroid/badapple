@@ -3,14 +3,15 @@
 # Copyright (c) 2026 kiki <kieran@lavato.net>
 """Drive the A12 GPU coprocessor from the m1n1 proxy.
 
-usage: M1N1DEVICE=/dev/ttyACM0 build/venv/bin/python tools/gfx-proxy.py [job] [cpjob]
+usage: M1N1DEVICE=/dev/ttyACM0 build/venv/bin/python tools/gfx-proxy.py [job] [cpjob | kick]
 
 Boot the m1n1 proxy with the GPU firmware loaded (tools/iboot-boot.sh
 build/iboot/kernelcache-m1n1.img4). The script boots the firmware, sends the
 init block, powers the GPU with a device control message, then optionally
-submits a barrier (job) and a compute command (cpjob). The firmware cannot be
-restarted, so each run needs a fresh DFU boot. KTrace goes to
-build/gfx/ktrace.bin. Offsets name the firmware functions they come from.
+submits a barrier (job) and a compute command that only runs firmware ops
+(cpjob) or kicks the GPU (kick). The firmware cannot be restarted, so each
+run needs a fresh DFU boot. KTrace goes to build/gfx/ktrace.bin. Offsets
+name the firmware functions they come from.
 """
 
 import atexit
@@ -164,6 +165,10 @@ m.put(hwdata_b + 0x988, "<I", 16000 * 24)
 m.put(hwdata_a + 4, "<I", 16000 * 24)
 # Highest pstate index; the DVFS loop in FUN_00020b44 walks down from it.
 m.put(hwdata_b + 0xa6c, "<I", len(mhz) - 1)
+# GPU VA layout as the kext sets it (0x14 << 32 range, 0x11 << 32 bases).
+# Power-up loads +0x18 into RGX 0x10000; at 0 every CDM stream fetch faults
+# as "PM client access out of range".
+m.put(hwdata_b, "<QQQQQ", 0x1400000000, 0xffc00000, 0x1100000000, 0x1100000000, 0x18ffff8000)
 # Per-engine unit masks (TA, 3D, CP), copied by FUN_000157b4 at power-up.
 # The kext writes (1 << n) - 1; at 0 the scheduler never finds a free unit.
 # These are the bits the firmware forces on.
@@ -172,11 +177,35 @@ for i in range(len(mhz)):
     m.put(hwdata_b + 0xa70 + 4 * i, "<I", mhz[i])
     m.put(hwdata_b + 0xab0 + 0x20 * i, "<8I", *[mv[i]] * 8)
     m.put(hwdata_b + 0xcb0 + 0x20 * i, "<8I", *[mv_sram[i]] * 8)
-# UAT handoff: +0x9150 per-context TLB generation (u32), +0x9158 per-context
-# TTBR (u64, DevCtrl 3 loads it into RGX 0x17030/0x17038), +0x9160/+0x9164
-# active context masks.
+# GPU VM. The MMU is PowerVR Rogue style with 16K pages (AGXGartG11): a
+# page catalogue of u32 entries for VA[39:30], page directories of u64
+# entries for VA[29:21] and page tables of u64 entries for VA[20:14].
+# Entries per the kext: PC (pd >> 12) << 4 | 1, PD pt | 3 (valid, 16K
+# pages), PT page | 1. The VM maps the whole chunk at each GVA. The kext's
+# VA ranges are 0x11 (4G), 0x13 (4G), 0x14 (4G), 0x15 (16G) << 32. User VMs
+# get MMU contexts 16..63 (kext free list, acc+0x1e84..); lower ones are
+# reserved, and a CDM job in context 1 faults as "PM client access out of
+# range" (Rogue S7 treats contexts <= 8 as PM ones).
+GVAS, SLOT = (0x1100000000, 0x1300000000), 16
+pc = m.alloc(0x4000, 0x4000)
+for base in GVAS:
+    pd = m.alloc(0x4000, 0x4000)
+    m.put(pc + (base >> 30) * 4, "<I", (pa + pd) >> 12 << 4 | 1)
+    for i in range(CHUNK >> 14):
+        if i % 128 == 0:
+            pt = m.alloc(0x400, 0x400)
+            m.put(pd + ((base >> 21) & 0x1ff) * 8 + i // 128 * 8, "<Q", pa + pt | 3)
+        m.put(pt + i % 128 * 8, "<Q", pa + i * 0x4000 | 1)
+def gva(o, base=GVAS[0]):
+    return base + o
+# Per-context state: +0x9150 TLB generations (u32), +0x9158 page catalogue
+# PAs, +0x9160.. masks of slots whose PC FUN_00026338 loads into RGX
+# 0x17030/0x17038 at every power-up (slot 0 always).
 m.put(C + 0x9150, "<Q", m.va_of(m.alloc(0x100)))
-m.put(C + 0x9158, "<Q", m.va_of(m.alloc(0x4000, 0x4000)))
+ttbr = m.alloc(0x4000, 0x4000)
+m.put(C + 0x9158, "<Q", m.va_of(ttbr))
+m.put(ttbr + SLOT * 8, "<Q", pa + pc)
+m.put(C + 0x9160, "<I", 1 << SLOT)
 # Trace categories, copied to DAT_000cbc34 at power-up. AP writes to the
 # firmware's own __DATA are not seen, so this is the only way in.
 m.put(C, "<I", 0xff)
@@ -190,6 +219,15 @@ blk = bytearray(0x4000)
 struct.pack_into("<Q", blk, 3 * 8, m.va_of(B))
 struct.pack_into("<Q", blk, 4 * 8, m.va_of(C))
 struct.pack_into("<Q", blk, 5 * 8, m.va_of(ST))
+# init[6..0x12]: the MMU format for the firmware's own walks (FUN_00026744),
+# as the kext's MMU object sets it: page size, page bits, levels, then per
+# level entry size, PA shifts, index shift, entries, table size, valid mask,
+# PA mask, index mask.
+struct.pack_into("<HBB", blk, 0x30, 0x4000, 14, 3)
+for i, lv in enumerate(((4, 4, 12, 30, 0x1000, 1, 0xfffffff0, 0xffc0000000),
+                        (8, 10, 10, 21, 0x800, 1, 0xfffffffc00, 0x3fe00000),
+                        (8, 12, 12, 14, 0x200, 1, 0xfffffff000, 0x1fc000))):
+    struct.pack_into("<BBBBHHQQQ", blk, 0x34 + i * 0x20, *lv[:5], 0x4000, *lv[5:])
 struct.pack_into("<Q", blk, 0x13 * 8, table)
 struct.pack_into("<Q", blk, 0x14 * 8, 1)
 iface.writemem(init, bytes(blk))
@@ -263,7 +301,7 @@ def submit(qtype, cmd, build_cmd, ev):
     m.put(info, "<QQQQIIIi", m.va_of(ptrs), m.va_of(ring), m.va_of(jl), m.va_of(gbuf), 0, 0, 0, -1)
     m.put(info + 0x30, "<IIQIIIiIiQ", 0, 0, 0xffffffffffff0000, 1, 0, 1, -1, 0x1001, -1, 0)
     m.put(info + 0xa4, "<Q", m.va_of(ctx))
-    build_cmd()
+    build_cmd(m.va_of(info))
     iface.writemem(pa + lo, bytes(m.buf[lo:m.off]))
     p.dc_civac(pa + lo, m.off - lo)
     st, rg = chans[qtype]
@@ -289,7 +327,7 @@ def submit(qtype, cmd, build_cmd, ev):
 if "job" in sys.argv[1:]:
     # Barrier (type 4) whose wait is already met: no GPU work.
     stamp, bar = m.alloc(0x100), m.alloc(0x100)
-    submit(0, bar, lambda: m.put(bar, "<IQIIIII", 4, m.va_of(stamp), 0, 1, 0, 0, 0), 1)
+    submit(0, bar, lambda info: m.put(bar, "<IQIIIII", 4, m.va_of(stamp), 0, 1, 0, 0, 0), 1)
 
 if "cpjob" in sys.argv[1:]:
     # Compute command (type 3) whose microsequence only uses firmware ops
@@ -299,7 +337,7 @@ if "cpjob" in sys.argv[1:]:
     # index in the event control.
     EV = 2
     cmd, evc, useq, scratch = m.alloc(0x300), m.alloc(0x100), m.alloc(0x100), m.alloc(0x100)
-    def build():
+    def build(info):
         ops = struct.pack("<IQQQQ", 0x1a | 0x01ab << 16, 1, 2, 3, 4)        # trace 0x1ab
         ops += struct.pack("<IQI", 0x0e | 2 << 28, m.va_of(scratch), 0xcafe0001)  # store32
         # Finalize compute takes the stamp once its unit state entry is done
@@ -329,5 +367,54 @@ if "cpjob" in sys.argv[1:]:
     # Scheduler state for offline reading; may be stale behind the ASC cache.
     (OUT / "data-cp.bin").write_bytes(iface.readmem(DATA_PA, DATA_SIZE))
     (OUT / "chunk-cp.bin").write_bytes(iface.readmem(pa, m.off))
+
+if "kick" in sys.argv[1:]:
+    # First GPU work: a compute command whose CDM control stream is only the
+    # terminate word, run in VM slot 1. Microsequence as the kext builds it
+    # (FUN_fffffff0084d0f08): StartCompute, wait for the CDM interrupt,
+    # finalize, end. StartCompute writes cmd+0x70/+0x78/+0x80 to RGX
+    # 0x14020/0x14000/0x118d0 (+0x78 is the stream, like m1n1's G13
+    # ComputeInfo encoder), (slot | context << 8) to 0x10200, and kicks
+    # 0x10180. The unit state array is stats_cp.
+    EV = 3
+    stats_cp = struct.unpack_from("<Q", m.buf, B + 0x180)[0]
+    cmd, evc, useq, scratch = m.alloc(0x300), m.alloc(0x100), m.alloc(0x200), m.alloc(0x100)
+    stream, args = m.alloc(0x4000, 0x4000), m.alloc(0x4000, 0x4000)
+    def build(info):
+        m.put(stream, "<I", 0x80000000)                     # CDM stream terminate
+        m.put(scratch + 0x20, "<Q", 1)                      # kick gate, > cmd+4
+        st = bytearray(0x64)
+        struct.pack_into("<IQQQQIIIIII", st, 0, 0x29, m.va_of(cmd + 0x1c), m.va_of(cmd + 0x70),
+                         stats_cp, info, SLOT, 0, SLOT, 0, 0, 0)
+        struct.pack_into("<QQQQQ", st, 0x3c, m.va_of(cmd + 0x1fc), 0, m.va_of(cmd + 0x2d8), 0,
+                         m.va_of(scratch + 0x20))
+        fin = bytearray(0x44)
+        struct.pack_into("<IQQIQII", fin, 0, 0x2a, stats_cp, info, SLOT, m.va_of(cmd + 0x1fc), 0, 0)
+        struct.pack_into("<QIIiQ", fin, 0x28, m.va_of(scratch + 8), 1, 0, -(0x64 + 4),
+                         m.va_of(cmd + 0x2d8))
+        ops = bytes(st) + struct.pack("<I", 0x41) + bytes(fin) + struct.pack("<I", 0x18 | 0x40 << 24)
+        m.buf[useq:useq + len(ops)] = ops
+        m.put(cmd, "<IQII", 3, 0, 0, SLOT)
+        m.put(cmd + 0x14, "<Q", m.va_of(evc))
+        m.put(evc, "<QII", m.va_of(scratch + 8), 0, 0)
+        m.put(cmd + 0x70, "<QQQ", gva(args), gva(stream), 0)
+        m.put(cmd + 0x1f0, "<QI", m.va_of(useq), len(ops))
+        m.put(cmd + 0x278, "<QQII", m.va_of(scratch + 0x10), 0, 0xcafe0003, EV)
+    submit(2, cmd, build, EV)
+    print(f"[kick] stamp {rd32(scratch + 8):#x} done {rd32(scratch + 0x10):#x} stats_cp[0] {rd(stats_cp - VA, 0x20).hex()}")
+    (OUT / "data-kick.bin").write_bytes(iface.readmem(DATA_PA, DATA_SIZE))
+    (OUT / "chunk-kick.bin").write_bytes(iface.readmem(pa, m.off))
+    # MMU fault status, decoded like the kext (FUN_fffffff0084cf9c8). RGX
+    # reads from the AP hang while the GPU is off, so check Fender first.
+    if p.read32(0x204d01000) & 0x1f:
+        st = p.read64(0x204017040)
+        types = ("page invalid", "AF fault", "read-only", "PM protected", "PM read out of range",
+                 "PM write out of range", "PM client access out of range", "PM context not loaded")
+        print(f"[kick] mmu fault {st:#x}: valid {st & 1} va {st >> 24 & 0xffffffffc0:#x} "
+              f"type {types[st >> 1 & 7]} read {st >> 4 & 1} level {st >> 5 & 3} "
+              f"requestor {st >> 8 & 0xff} context {st >> 16 & 0x3f}")
+        for off in (0x10000, 0x10200, 0x11870, 0x11878, 0x118d0, 0x14000, 0x14020, 0x14040,
+                    0x17018, 0x17028, 0x17030, 0x17038, 0x17048):
+            print(f"[kick] rgx {off:#x} = {p.read64(0x204000000 + off):#x}")
 
 work_until(lambda: False, 5)
