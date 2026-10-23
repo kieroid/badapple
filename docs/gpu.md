@@ -1,8 +1,9 @@
 # GPU
 
-G11P. `linux-0020` boots the firmware, runs two test kernels at probe and
-registers a DRM render node for compute. `/bin/agx-test` runs the Mesa tests
-through it. `tools/gfx-proxy.py` does the same from the m1n1 proxy.
+G11P. `linux-0020` boots the firmware and registers a DRM render node for
+compute. `/bin/agx-test` runs the Mesa tests through it.
+`tools/gfx-proxy.py` boots the firmware from the m1n1 proxy, for poking at it
+without Linux.
 
 ## Firmware
 
@@ -179,7 +180,7 @@ completes. A store's register offset is scaled by the element size.
 
 `patches/mesa-0001-asahi-g11.patch` makes Mesa's Asahi compiler emit G11
 code. `make gfx-tests` builds its `asahi_clc` and compiles
-`tools/gfx-tests.cl`, and `tools/gfx-proxy.py clc` runs the result. Kernel
+`tools/gfx-tests.cl`, and `agx-test` runs the result. Kernel
 arguments go in uniforms from u0, and rodata is loaded from the binary into
 the uniforms Mesa asks for.
 
@@ -193,11 +194,11 @@ Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 
 | | |
 |---|---|
-| VMs | one MMU context each, 17 to 63; 16 is the kernel's |
+| VMs | one MMU context each, 16 to 63 |
 | VA | 0x10_0000_0000 to 0x80_0000_0000, 16K pages |
 | `usc_exec_base` | must be 0x11 << 32, the base the firmware loads |
 | submit | synchronous; in-syncs waited for, out-syncs signalled after |
-| not yet | render commands, samplers, helper programs, timestamps |
+| not yet | render commands, samplers, helper programs, timestamps, single-page binds |
 
 Every user context gets a page catalogue at init and is loaded by the
 firmware at every power-up, so a VM only fills its page tables. After a

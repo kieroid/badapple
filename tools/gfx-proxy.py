@@ -3,22 +3,19 @@
 # Copyright (c) 2026 kiki <kieran@lavato.net>
 """Drive the A12 GPU coprocessor from the m1n1 proxy.
 
-usage: M1N1DEVICE=/dev/ttyACM0 build/venv/bin/python tools/gfx-proxy.py [job] [cpjob | kick | kernel | clc[=FILE]]
+usage: M1N1DEVICE=/dev/ttyACM0 build/venv/bin/python tools/gfx-proxy.py
 
 Boot the m1n1 proxy with the GPU firmware loaded (tools/iboot-boot.sh
 build/iboot/kernelcache-m1n1.img4). The script boots the firmware, sends the
-init block, powers the GPU with a device control message, then optionally
-submits a barrier (job) and a compute command that only runs firmware ops
-(cpjob), kicks the GPU (kick), runs hand-written test shaders (kernel) or
-runs the OpenCL tests from "make gfx-tests" (clc). The firmware
-cannot be restarted, so each run needs a fresh DFU boot. KTrace goes to
-build/gfx/ktrace.bin. Offsets name the firmware functions they come from.
+init block and powers the GPU with a device control message, for poking at
+the firmware without Linux. Jobs go through the agx driver (linux-0020).
+The firmware cannot be restarted, so each run needs a fresh DFU boot.
+KTrace goes to build/gfx/ktrace.bin. Offsets name the firmware functions
+they come from.
 """
 
 import atexit
-import math
 import pathlib
-import re
 import struct
 import sys
 import time
@@ -102,7 +99,7 @@ work_until(lambda: False, 0.5)
 
 class Bump:
     def __init__(self, va, size):
-        self.va, self.off, self.synced = va, 0, 0
+        self.va, self.off = va, 0
         self.buf = bytearray(size)
     def alloc(self, n, align=0x100):
         self.off = (self.off + align - 1) & ~(align - 1)
@@ -199,8 +196,6 @@ for base in GVAS:
             pt = m.alloc(0x400, 0x400)
             m.put(pd + ((base >> 21) & 0x1ff) * 8 + i // 128 * 8, "<Q", pa + pt | 3)
         m.put(pt + i % 128 * 8, "<Q", pa + i * 0x4000 | 1)
-def gva(o, base=GVAS[0]):
-    return base + o
 # Per-context state: +0x9150 TLB generations (u32), +0x9158 page catalogue
 # PAs, +0x9160.. masks of slots whose PC FUN_00026338 loads into RGX
 # 0x17030/0x17038 at every power-up (slot 0 always).
@@ -217,7 +212,6 @@ m.put(C, "<I", 0xff)
 m.put(C + 0xb1cc, "<I", 1)
 
 iface.writemem(pa, bytes(m.buf))
-m.synced = m.off
 iface.writemem(table, struct.pack("<QIIHH", VA, pa >> 12, 0, CHUNK >> 14, 1))
 blk = bytearray(0x4000)
 struct.pack_into("<Q", blk, 3 * 8, m.va_of(B))
@@ -284,344 +278,5 @@ asc.send(0x83 << 48 | 0x11, R_INBOX1(EP=0x21))
 work_until(lambda: False, 3)
 g = struct.unpack("<Q", iface.readmem(DATA_PA + 0xcc410 - 0x44000, 8))[0]
 print(f"devctrl read ptr {struct.unpack('<I', iface.readmem(st, 4))[0]}, fw global {g:#x}")
-
-queues = {}
-def submit(qtype, cmd, build_cmd, qid):
-    # One command queue per run channel qtype (0 TA_0, 1 3D_0, 2 CL_0; the
-    # doorbell is the channel index). CommandQueueInfo is m1n1's with the
-    # context pointer at +0xa4. The run message is {type, info, head, queue
-    # index, flush}: FUN_000075fc stores head at info+0x28, FUN_0001fb60
-    # walks the ring up to it and stores the read index at +0x20,
-    # FUN_0001dbec clears has_commands (+0x84) when done. Later commands go
-    # in the same queue with the next head.
-    # Everything allocated since the last submit goes to the device below.
-    lo = m.synced
-    if qtype not in queues:
-        ptrs, ring, jl, gbuf = m.alloc(0x100), m.alloc(0x800), m.alloc(0x100), m.alloc(0x4000, 0x4000)
-        ctx, info = m.alloc(0x100), m.alloc(0x100)
-        m.put(ptrs + 0x50, "<I", 0x100)
-        # Job list is a TAILQ head {first, last = &first}.
-        m.put(jl, "<QQ", 0, m.va_of(jl))
-        m.put(ctx, "<BB", 0xff, 0xff)
-        m.put(ctx + 5, "<B", 1)
-        m.put(ctx + 0x1e, "<B", 0xff)
-        m.put(ctx + 0x23, "<B", 2)
-        m.put(info, "<QQQQIIIi", m.va_of(ptrs), m.va_of(ring), m.va_of(jl), m.va_of(gbuf), 0, 0, 0, -1)
-        m.put(info + 0x30, "<IIQIIIiIiQ", 0, 0, 0xffffffffffff0000, 1, 0, 1, -1, 0x1001, -1, 0)
-        m.put(info + 0xa4, "<Q", m.va_of(ctx))
-        queues[qtype] = [ring, ctx, gbuf, info, 0]
-    ring, ctx, gbuf, info, n = queues[qtype]
-    queues[qtype][4] = n + 1
-    # Ring entry n. The first command's ring is new, so it is in [lo, m.off).
-    m.put(ring + n * 8, "<Q", m.va_of(cmd))
-    iface.writemem(pa + ring + n * 8, struct.pack("<Q", m.va_of(cmd)))
-    p.dc_civac(pa + ring + n * 8, 8)
-    build_cmd(m.va_of(info))
-    assert len(m.buf) == CHUNK, "a slice assignment changed the chunk size"
-    iface.writemem(pa + lo, bytes(m.buf[lo:m.off]))
-    p.dc_civac(pa + lo, m.off - lo)
-    m.synced = m.off
-    st, rg = chans[qtype]
-    iface.writemem(rg + n * 0x30, struct.pack("<IQIIIQ", qtype, m.va_of(info), n + 1, qid, 1, 0).ljust(0x30, b"\0"))
-    iface.writemem(st + 0x20, struct.pack("<I", n + 1))
-    p.dc_civac(rg + n * 0x30, 0x30)
-    p.dc_civac(st, 0x40)
-    n0 = len(ktrace)
-    asc.send(0x83 << 48 | qtype, R_INBOX1(EP=0x21))
-    work_until(lambda: False, 2)
-    p.dc_civac(pa + lo, m.off - lo)
-    print(f"[job] channel {qtype} read ptr {struct.unpack('<I', iface.readmem(st, 4))[0]}")
-    print(f"[job] read/head {struct.unpack('<III', rd(info + 0x20, 12))} event {struct.unpack('<i', rd(info + 0x2c, 4))[0]}"
-          f" has_commands {rd32(info + 0x84):#x}")
-    print(f"[job] ctx {rd(ctx, 0x28).hex()}")
-    print(f"[job] slot0 {rd(gbuf, 0x48).hex()}")
-    # Skip the power thread and run-queue scan noise.
-    for e in ktrace[n0:]:
-        code = struct.unpack_from("<I", e, 0x2c)[0] & 0xffffff
-        if code not in (0x60f, 0x618, 0x112, 0x100, 0x101, 0x102, 0x103) and code & 0xf00 != 0x200:
-            print("  ", hex(code), [hex(x) for x in struct.unpack_from("<QQQQ", e, 0xc)])
-
-if "job" in sys.argv[1:]:
-    # Barrier (type 4) whose wait is already met: no GPU work.
-    stamp, bar = m.alloc(0x100), m.alloc(0x100)
-    submit(0, bar, lambda info: m.put(bar, "<IQIIIII", 4, m.va_of(stamp), 0, 1, 0, 0, 0), 1)
-
-if "cpjob" in sys.argv[1:]:
-    # Compute command (type 3) whose microsequence only uses firmware ops
-    # (trace, store, finalize, end), so no shader or GPU VM. G11 command: +0x10
-    # context id, +0x14 event control (m1n1 V12.3 layout), +0x1f0
-    # microsequence pointer and size, +0x278 completion stamp, +0x290 its
-    # index in the event control.
-    EV = 2
-    cmd, evc, useq, scratch = m.alloc(0x300), m.alloc(0x100), m.alloc(0x100), m.alloc(0x100)
-    def build(info):
-        ops = struct.pack("<IQQQQ", 0x1a | 0x01ab << 16, 1, 2, 3, 4)        # trace 0x1ab
-        ops += struct.pack("<IQI", 0x0e | 2 << 28, m.va_of(scratch), 0xcafe0001)  # store32
-        # Finalize compute takes the stamp once its unit state entry is done
-        # (+0xc == 3) or the flag at +0x3c is set; end (FUN_0001a810) then
-        # writes the stamp, retires the slot and frees the engine unit.
-        m.put(scratch + 0x20, "<IIII", 0, 0, 0, 3)
-        m.put(scratch + 0x40, "<I", 1)
-        fin = bytearray(0x44)
-        struct.pack_into("<IQ", fin, 0, 0x2a, m.va_of(scratch + 0x20))
-        struct.pack_into("<QI", fin, 0x28, m.va_of(scratch + 8), 1)
-        struct.pack_into("<Q", fin, 0x3c, m.va_of(scratch + 0x40))
-        ops += fin
-        ops += struct.pack("<I", 0x18 | 0x40 << 24)                         # end
-        m.buf[useq:useq + len(ops)] = ops
-        m.put(cmd, "<IQII", 3, 0, 0, 1)
-        m.put(cmd + 0x14, "<Q", m.va_of(evc))
-        # Event control: +0 points at the event counter. Completion
-        # (FUN_0000f15c) bumps +0xc, and FUN_0000d704 retires it once that
-        # equals the counter. Use the stamp the end op writes.
-        m.put(evc, "<QII", m.va_of(scratch + 8), 0, 0)
-        m.put(cmd + 0x1f0, "<QI", m.va_of(useq), len(ops))
-        # Completion stamp {target, ?, value, event}: FUN_0000d704 writes the
-        # value to target and raises the event.
-        m.put(cmd + 0x278, "<QQII", m.va_of(scratch + 0x10), 0, 0xcafe0002, EV)
-    submit(2, cmd, build, EV)
-    print(f"[cpjob] scratch {rd32(scratch):#x} stamp {rd32(scratch + 8):#x} done {rd32(scratch + 0x10):#x}")
-    # Scheduler state for offline reading; may be stale behind the ASC cache.
-    (OUT / "data-cp.bin").write_bytes(iface.readmem(DATA_PA, DATA_SIZE))
-    (OUT / "chunk-cp.bin").write_bytes(iface.readmem(pa, m.off))
-
-CLC = next((a[4:] or str(ROOT / "build/gfx/tests.c") for a in sys.argv[1:] if a.startswith("clc")), None)
-if "kick" in sys.argv[1:] or "kernel" in sys.argv[1:] or CLC:
-    # Compute commands in MMU context SLOT. Microsequence as the kext builds
-    # it (FUN_fffffff0084d0f08): StartCompute, wait for the CDM interrupt,
-    # finalize, end. StartCompute writes cmd+0x70/+0x78/+0x80 to RGX
-    # 0x14020/0x14000/0x118d0 (+0x78 is the stream, like m1n1's G13
-    # ComputeInfo encoder), (slot | context << 8) to 0x10200, and kicks
-    # 0x10180. The unit state array is stats_cp.
-    EV = 3
-    stats_cp = struct.unpack_from("<Q", m.buf, B + 0x180)[0]
-    def compute(name, build_stream):
-        cmd, evc, useq, scratch = m.alloc(0x300), m.alloc(0x100), m.alloc(0x200), m.alloc(0x100)
-        stream, args = m.alloc(0x4000, 0x4000), m.alloc(0x4000, 0x4000)
-        def build(info):
-            build_stream(stream)
-            m.put(scratch + 0x20, "<Q", 1)                      # kick gate, > cmd+4
-            st = bytearray(0x64)
-            struct.pack_into("<IQQQQIIIIII", st, 0, 0x29, m.va_of(cmd + 0x1c), m.va_of(cmd + 0x70),
-                             stats_cp, info, SLOT, 0, SLOT, 0, 0, 0)
-            struct.pack_into("<QQQQQ", st, 0x3c, m.va_of(cmd + 0x1fc), 0, m.va_of(cmd + 0x2d8), 0,
-                             m.va_of(scratch + 0x20))
-            fin = bytearray(0x44)
-            struct.pack_into("<IQQIQII", fin, 0, 0x2a, stats_cp, info, SLOT, m.va_of(cmd + 0x1fc), 0, 0)
-            struct.pack_into("<QIIiQ", fin, 0x28, m.va_of(scratch + 8), 1, 0, -(0x64 + 4),
-                             m.va_of(cmd + 0x2d8))
-            ops = bytes(st) + struct.pack("<I", 0x41) + bytes(fin) + struct.pack("<I", 0x18 | 0x40 << 24)
-            m.buf[useq:useq + len(ops)] = ops
-            m.put(cmd, "<IQII", 3, 0, 0, SLOT)
-            m.put(cmd + 0x14, "<Q", m.va_of(evc))
-            m.put(evc, "<QII", m.va_of(scratch + 8), 0, 0)
-            m.put(cmd + 0x70, "<QQQ", gva(args), gva(stream), 0)
-            m.put(cmd + 0x1f0, "<QI", m.va_of(useq), len(ops))
-            m.put(cmd + 0x278, "<QQII", m.va_of(scratch + 0x10), 0, 0xcafe0003, EV)
-        submit(2, cmd, build, EV)
-        print(f"[{name}] stamp {rd32(scratch + 8):#x} done {rd32(scratch + 0x10):#x}")
-        # MMU fault status, decoded like the kext (FUN_fffffff0084cf9c8). RGX
-        # reads from the AP hang while the GPU is off, so check Fender first.
-        if p.read32(0x204d01000) & 0x1f:
-            st = p.read64(0x204017040)
-            if not st & 1:      # also 0xacce5515abad1dea while the GPU powers down
-                return
-            types = ("page invalid", "AF fault", "read-only", "PM protected", "PM read out of range",
-                     "PM write out of range", "PM client access out of range", "PM context not loaded")
-            print(f"[{name}] mmu fault {st:#x}: valid {st & 1} va {st >> 24 & 0xffffffffc0:#x} "
-                  f"type {types[st >> 1 & 7]} read {st >> 4 & 1} level {st >> 5 & 3} "
-                  f"requestor {st >> 8 & 0xff} context {st >> 16 & 0x3f}")
-            for off in (0x10000, 0x10200, 0x11870, 0x11878, 0x118d0, 0x14000, 0x14020, 0x14040,
-                        0x17018, 0x17028, 0x17030, 0x17038, 0x17048):
-                print(f"[{name}] rgx {off:#x} = {p.read64(0x204000000 + off):#x}")
-
-    def shader(prog, uniforms=b""):
-        # G11 code: the ISA is close to G13 (applegpu decodes G11 kernels from
-        # the iOS CoreImage binary archives, Mach-O cpusubtype 0x72), but stop
-        # is 0x0801. The state block is an ESL program
-        # (ESLStateLoadEncoderGen1): uniform DMAs, the shader word (code >> 6
-        # at bit 38, 0x9 at 31:28, register blocks 0x1f), then 0x0108 for "no
-        # preshader". A uniform DMA (ComputeProgramVariant) is 3 | first
-        # register << 9 | count << 21 | address << 24, counted in 32-bit
-        # registers from u0, up to 31 per word. The code address is a 32-bit
-        # offset from the 0x11 << 32 base in RGX 0x10000.
-        code, state = m.alloc(0x400, 0x4000), m.alloc(0x40, 0x40)
-        m.buf[code:code + len(prog)] = prog
-        esl = b""
-        if uniforms:
-            assert len(uniforms) % 4 == 0 and len(uniforms) // 4 < 32
-            ubuf = m.alloc(len(uniforms))
-            m.buf[ubuf:ubuf + len(uniforms)] = uniforms
-            esl += struct.pack("<Q", gva(ubuf) << 24 | len(uniforms) // 4 << 21 | 3)
-        esl += struct.pack("<QH", (gva(code) & 0xffffffff) >> 6 << 38 | 0x90000000 | 0x1f, 0x0108)
-        m.buf[state:state + len(esl)] = esl
-        return state
-    def launch(state, grid, group, hdr=3, low=4):
-        # CDM: launch (block type 0 in bits 31:30, direct), state block, grid
-        # size in threads, threadgroup size; barrier; terminate. The driver
-        # (ComputeProgramVariant) computes the header and the state address'
-        # low 6 bits. Header: bit 0 always set, bits 3:1 uniform registers in
-        # blocks of 32 (mod 8), 8:4 texture and 11:9 sampler state counts.
-        # Low bits: 5:2 registers in blocks of 8 (16 is 0), 1:0 state block
-        # length in 64 bytes.
-        return lambda stream: m.put(stream, "<8III", hdr, gva(state) & 0xffffffc0 | low, grid,
-                                    1, 1, group, 1, 1, 0xc0000160, 0x80000000)
-    def out():
-        # Output buffer filled with a marker, big enough to catch a grid
-        # counted in threadgroups.
-        o = m.alloc(0x10000, 0x4000)
-        m.buf[o:o + 0x10000] = b"\xef\xbe\xad\xde" * 0x4000
-        return o
-    def show(name, o, n, want):
-        v = struct.unpack(f"<{n}I", rd(o, n * 4))
-        bad = [i for i in range(n) if v[i] != want[i]]
-        print(f"[{name}] {' '.join(f'{x:x}' for x in v[:8])} .. {v[-1]:x}, next {rd32(o + n * 4):#x}, "
-              f"{'ok' if not bad else f'{len(bad)} wrong, first {bad[0]}'}")
-
-    if "kick" in sys.argv[1:]:
-        compute("kick", lambda stream: m.put(stream, "<I", 0x80000000))    # terminate only
-    elif CLC:
-        # Kernels from Mesa's asahi_clc (OpenCL C) with patches/mesa-*.patch.
-        # Each blob is struct agx_precompiled_kernel_info, then
-        # the binary. Arguments sit in uniforms from u0 in 16-bit units;
-        # rodata is mapped at ro_base. Register counts are 16-bit units.
-        blobs = {}
-        for name, body in re.findall(r"static const uint32_t (\w+)\[\d+\] = \{(.*?)\};",
-                                     open(CLC).read(), re.S):
-            b = b"".join(struct.pack("<I", int(x, 16)) for x in re.findall(r"0x[0-9a-f]+", body))
-            blobs[name] = struct.unpack_from("<IIIIIHHHHH3HHH?", b), b[44:]
-        def mesa(name, args, grid, check):
-            (pre, main, _, size, ro, ro_base, ro16, gprs, pgprs, push,
-             wx, wy, wz, local, iblk, txf), binary = blobs[name.split("@")[0] + "_0_g13g"]
-            assert main % 64 == 0 and ro_base % 2 == 0 and not iblk and not txf
-            code, state = m.alloc(0x4000, 0x4000), m.alloc(0x100, 0x40)
-            m.buf[code:code + size] = binary[:size]
-            ubuf = m.alloc(len(args) + 4)
-            m.buf[ubuf:ubuf + len(args)] = args
-            esl = b""
-            for va, first, n in ((gva(ubuf), 0, (len(args) + 3) // 4),
-                                 (gva(code) + ro, ro_base // 2, (ro16 + 1) // 2)):
-                assert n < 32
-                if n:
-                    esl += struct.pack("<Q", va << 24 | n << 21 | first << 9 | 3)
-            regs = lambda halves: max(1, (halves + 15) // 16) % 16     # blocks of 8
-            word = (gva(code) + main & 0xffffffff) >> 6 << 38 | 0x90000000 | regs(gprs) << 4 | 0xf
-            # Threadgroup memory in 256 byte units; the driver adds 16 bytes
-            # (emitComputeProgramVariantAndArguments).
-            tg = 0x8000 if name.endswith("@32k") else local + 16 if local else 0
-            if tg:
-                word |= math.ceil(tg / 256) % 256 << 16 | 1 << 8
-            esl += struct.pack("<Q", word)
-            if pgprs:
-                # Preshader: 0x0038, then 0xc040 | code offset << 16, 48 bits.
-                pw = 0xc040 | ((gva(code) + pre) & 0xfffffffe) << 16
-                esl += struct.pack("<HIH", 0x0038, pw & 0xffffffff, pw >> 32)
-            else:
-                esl += struct.pack("<H", 0x0108)
-            m.buf[state:state + len(esl)] = esl
-            hdr = max(1, (push + 63) // 64) % 8 << 1 | 1
-            low = regs(max(gprs, pgprs)) << 2 | (len(esl) >> 6 & 3)
-            print(f"[{name}] gprs {gprs} preamble {pgprs} push {push} ro {ro16}@{ro_base} "
-                  f"local {local} tg {tg} wg {wx} hdr {hdr:#x} low {low:#x} esl {esl.hex()}")
-            compute(name, lambda stream: m.put(stream, "<8III", hdr, gva(state) & 0xffffffc0 | low,
-                                               grid, 1, 1, wx, wy, wz, 0xc0000160, 0x80000000))
-            check()
-        def buf(words):
-            o = m.alloc(max(0x4000, len(words) * 4), 0x4000)
-            m.buf[o:o + len(words) * 4] = struct.pack(f"<{len(words)}I", *words)
-            return o
-        def args(*v):
-            return b"".join(struct.pack("<Q" if x >= 1 << 32 else "<I", x) for x in v)
-        def expect(name, o, want):
-            got = struct.unpack(f"<{len(want)}I", rd(o, len(want) * 4))
-            bad = [i for i in range(len(want)) if got[i] != want[i]]
-            print(f"[{name}] {' '.join(f'{x:x}' for x in got[:8])} .. "
-                  f"{'ok' if not bad else f'{len(bad)} wrong, first {bad[0]}: {got[bad[0]]:#x} want {want[bad[0]]:#x}'}")
-        DEAD = [0xdeadbeef] * 256
-        def fcheck(name, o):
-            got = struct.unpack("<64f", rd(o, 256))
-            want = [(i / 4) ** 2 - 1 / (i / 4 + 1) for i in range(64)]
-            bad = [i for i in range(64) if abs(got[i] - want[i]) > 1e-5 * max(1, abs(want[i]))]
-            print(f"[{name}] {got[:4]} .. {'ok' if not bad else f'{len(bad)} wrong, first {bad[0]}: {got[bad[0]]} want {want[bad[0]]}'}")
-        def t_fill(name):       # out[i] = value + i
-            o = buf(DEAD)
-            mesa(name, args(gva(o), 0x1000), 256, lambda: expect(name, o, [0x1000 + i for i in range(256)]))
-        def t_float(name):      # x * x - 1 / (x + 1) with x = i * 0.25
-            o = buf(DEAD)
-            mesa(name, args(gva(o), struct.unpack("<I", struct.pack("<f", 0.25))[0]), 64, lambda: fcheck(name, o))
-        def t_loop(name):       # sum of 3j + (j odd ? 7 : 1) for j < i % 5, with a preamble
-            o = buf(DEAD)
-            mesa(name, args(gva(o), 5), 64,
-                 lambda: expect(name, o, [sum(3 * j + (7 if j & 1 else 1) for j in range(i % 5)) for i in range(64)]))
-        def t_shared(name):     # out[g] = sum of in[64g .. 64g + 63]
-            o, src = buf(DEAD), buf([i + 1 for i in range(256)])
-            mesa(name, args(gva(o), gva(src)), 256,
-                 lambda: expect(name, o, [sum(range(64 * g + 1, 64 * g + 65)) for g in range(4)]))
-        def t_atomic(name):     # counter = 1 + 2 + .. + 64
-            o = buf([0])
-            mesa(name, args(gva(o)), 64, lambda: expect(name, o, [64 * 65 // 2]))
-        def simple(want):       # one output buffer, 256 threads
-            def run(name):
-                o = buf(DEAD)
-                mesa(name, args(gva(o)), 256, lambda: expect(name, o, want))
-            return run
-        def k_atomic_noret(name):
-            c = buf(range(256))
-            mesa(name, args(gva(c)), 256, lambda: expect(name, c, [i + 5 for i in range(256)]))
-        def k_atomic_ret(name):
-            c, o = buf(range(256)), buf(DEAD)
-            mesa(name, args(gva(c), gva(o)), 256, lambda: (expect(name, o, range(256)),
-                                                           expect(name, c, [i + 5 for i in range(256)])))
-        def k_simd(name):
-            o = buf([0])
-            mesa(name, args(gva(o)), 256, lambda: expect(name, o, [256 * 257 // 2]))
-        def k_atomic_uniform(name):
-            o = buf([0])
-            mesa(name, args(gva(o)), 256, lambda: expect(name, o, [256]))
-        # Riskiest last: a GPU hang would hold up everything after it.
-        tests = {"t_fill": t_fill, "t_float": t_float, "t_loop": t_loop,
-                 "k_ids": simple([i % 64 | i // 64 << 16 for i in range(256)]),
-                 "k_barrier": simple(range(256)),
-                 "k_tgmem": simple([3 * i for i in range(256)]),
-                 "k_tgoff": simple([3 * i for i in range(256)]),
-                 "k_tgmem@32k": simple([3 * i for i in range(256)]),
-                 "k_tgswap": simple([i // 64 * 64 + 63 - i % 64 for i in range(256)]),
-                 "k_fence": simple([i + 7 for i in range(256)]),
-                 "t_shared": t_shared,
-                 "k_atomic_noret": k_atomic_noret, "k_atomic_ret": k_atomic_ret,
-                 "k_atomic_seqcst": k_atomic_noret, "k_simd": k_simd,
-                 "k_atomic_uniform": k_atomic_uniform, "t_atomic": t_atomic}
-        for name, run in tests.items():
-            if name.split("@")[0] + "_0_g13g" in blobs:
-                run(name)
-    else:
-        GET_TID = bytes.fromhex("f20d1004")             # get_sr r3, thread_position_in_grid.x
-        END = bytes.fromhex("3800") + bytes.fromhex("0801")    # wait 0, stop
-        def movs(*v):                                   # mov_imm r0, r1, ...
-            return b"".join(bytes((0x62, 1 + 4 * i)) + struct.pack("<I", x) for i, x in enumerate(v))
-        def tid(name, **kw):
-            # out[tid] = tid, 256 threads in groups of 32.
-            o = out()
-            t = gva(o)
-            s = shader(GET_TID + movs(t & 0xffffffff, t >> 32) +
-                       bytes.fromhex("4519600600c01200") + END)   # device_store r3, r0_r1, r3
-            compute(name, launch(s, 256, 32, **kw))
-            show(name, o, 256, range(256))
-        def uniform(name, **kw):
-            # u0_u1 = out, u2 = 0x5a000000; out[tid] = tid + u2, 64 threads.
-            o = out()
-            t = gva(o)
-            s = shader(GET_TID + bytes.fromhex("0e11464218000000") +    # iadd r4, r3, u2
-                       bytes.fromhex("4521600e00c01200") + END,         # device_store r4, u0_u1, r3
-                       struct.pack("<III", t & 0xffffffff, t >> 32, 0x5a000000))
-            compute(name, launch(s, 64, 32, **kw))
-            show(name, o, 64, range(0x5a000000, 0x5a000040))
-        tid("tid")
-        uniform("uniform")
-        # Which of the two fields dropped every other threadgroup in run34.
-        tid("tid-hdr0", hdr=0)
-        tid("tid-low0", low=0)
-    (OUT / "data-kick.bin").write_bytes(iface.readmem(DATA_PA, DATA_SIZE))
-    (OUT / "chunk-kick.bin").write_bytes(iface.readmem(pa, m.off))
 
 work_until(lambda: False, 5)

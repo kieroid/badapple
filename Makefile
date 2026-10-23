@@ -2,7 +2,8 @@
 # Copyright (c) 2026 kiki <kieran@lavato.net>
 # check      compile the device tree on its own, no kernel tree needed
 # deps       clone m1n1, the Hoolock kernel and the docs into build/, and patch them
-# patch      apply patches/ to build/m1n1 and build/linux, safe to re-run
+# patch      apply patches/ to build/m1n1, build/linux and, once cloned,
+#            build/mesa; safe to re-run
 # pmgr       regenerate dts/t8020-pmgr.dtsi, needs DT=<DeviceTree im4p>
 # m1n1       build the m1n1 chainload payload
 # kernel     build Image.gz with Hoolock's 16K config
@@ -16,7 +17,7 @@
 # m1n1cache  pack m1n1 on its own, for poking registers over its proxy
 # boot       build that and hand the whole chain to a phone in pwned DFU
 # gfx-tests  clone and patch Mesa, build its OpenCL compiler for the GPU and
-#            compile tools/gfx-tests.cl for "tools/gfx-proxy.py clc"
+#            compile tools/gfx-tests.cl for agx-test
 # agx-test   build tools/agx-test.c, which runs those tests on the GPU driver;
 #            the next kernelcache puts it in the initramfs as /bin/agx-test
 #
@@ -97,8 +98,13 @@ deps:
 # stops the build rather than being swallowed.
 patch:
 	@set -e; \
-	for p in $(CURDIR)/patches/m1n1-*.patch $(CURDIR)/patches/linux-*.patch; do \
-	    case $$p in *linux-*) d=$(KDIR);; *) d=$(M1N1_SRC);; esac; \
+	for p in $(CURDIR)/patches/m1n1-*.patch $(CURDIR)/patches/linux-*.patch \
+	         $(CURDIR)/patches/mesa-*.patch; do \
+	    case $$p in \
+	    *linux-*) d=$(KDIR);; \
+	    *mesa-*) d=$(MESA_SRC); test -d $$d || continue;; \
+	    *) d=$(M1N1_SRC);; \
+	    esac; \
 	    if git -C $$d apply --reverse --check $$p 2>/dev/null; then \
 	        echo "  already applied: $$(basename $$p)"; \
 	    else \
@@ -288,9 +294,7 @@ build/gfx/tests.c: tools/gfx-tests.cl $(wildcard patches/mesa-*.patch)
 	test -d $(MESA_SRC) || { git init -q $(MESA_SRC) && \
 	    git -C $(MESA_SRC) fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git $(MESA_REV) && \
 	    git -C $(MESA_SRC) checkout -q FETCH_HEAD; }
-	@set -e; for p in $(CURDIR)/patches/mesa-*.patch; do \
-	    git -C $(MESA_SRC) apply --reverse --check $$p 2>/dev/null || git -C $(MESA_SRC) apply $$p; \
-	done
+	$(MAKE) patch
 	test -d $(MESA_SRC)/build || PATH=$(LLVM_DIR)/bin:$$PATH \
 	    PKG_CONFIG_PATH=$(LLVM_DIR)/lib64/pkgconfig meson setup $(MESA_SRC)/build $(MESA_SRC) \
 	    -Dgallium-drivers= -Dvulkan-drivers= -Dplatforms= -Dglx=disabled -Degl=disabled \

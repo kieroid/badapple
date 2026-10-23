@@ -3,9 +3,8 @@
 //
 // Runs the Mesa-compiled kernels from tools/gfx-tests.cl on the GPU through
 // the agx DRM driver (linux-0020, Asahi uAPI) and checks what they wrote. The
-// same jobs as "tools/gfx-proxy.py clc", built in a buffer bound at the USC
-// base. "make agx-test" builds it static with the kernel's nolibc and puts it
-// in the initramfs.
+// jobs are built in a buffer bound at the USC base. "make agx-test" builds it
+// static with the kernel's nolibc and puts it in the initramfs.
 
 #include <drm/asahi_drm.h>
 

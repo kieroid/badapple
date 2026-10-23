@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0+ OR MIT
 // Copyright (c) 2026 kiki <kieran@lavato.net>
-// Test kernels for tools/gfx-proxy.py clc. "make gfx-tests" compiles them with
-// Mesa's asahi_clc into build/gfx/tests.c. The proxy runs each one it knows
-// and checks the output.
+// Test kernels for tools/agx-test.c. "make gfx-tests" compiles them with
+// Mesa's asahi_clc into build/gfx/tests.c, which agx-test builds in.
 #include "compiler/libcl/libcl.h"
 
 KERNEL(32)
