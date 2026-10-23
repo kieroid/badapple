@@ -17,7 +17,7 @@
 # boot       build that and hand the whole chain to a phone in pwned DFU
 # gfx-tests  clone and patch Mesa, build its OpenCL compiler for the GPU and
 #            compile tools/gfx-tests.cl for "tools/gfx-proxy.py clc"
-# agx-test   build tools/agx-test.c, which runs those tests through /dev/agx;
+# agx-test   build tools/agx-test.c, which runs those tests on the GPU driver;
 #            the next kernelcache puts it in the initramfs as /bin/agx-test
 #
 # "make check" is the only target that works on a bare checkout. The headers
