@@ -35,7 +35,7 @@ Registers, gotchas, and things that turned out wrong.
 | Boost, cpuidle | :x: |
 | PCIe, wifi, Bluetooth | :white_check_mark: |
 | Audio, cellular, camera | :x: |
-| GPU | compute shaders run from the m1n1 proxy, no driver |
+| GPU | OpenCL kernels from Mesa run from the m1n1 proxy, no driver |
 
 - Wifi joins WPA2 networks on 2.4 and 5 GHz, with Alpine's `iw` and
   `wpa_supplicant` brought in by hand.

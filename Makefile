@@ -15,6 +15,8 @@
 #            fake restore kernelcache that bootx will take
 # m1n1cache  pack m1n1 on its own, for poking registers over its proxy
 # boot       build that and hand the whole chain to a phone in pwned DFU
+# gfx-tests  clone and patch Mesa, build its OpenCL compiler for the GPU and
+#            compile tools/gfx-tests.cl for "tools/gfx-proxy.py clc"
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -64,7 +66,7 @@ IPSW_FILE ?=
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel cma=64M
 
 .PHONY: check deps patch pmgr m1n1 kernel initramfs images ticket kernelcache \
-	m1n1cache boot clean FORCE
+	m1n1cache boot gfx-tests clean FORCE
 FORCE:
 
 check: $(DTB)
@@ -269,6 +271,34 @@ $(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(BOOT_INITRAMFS) FORCE | $(IBOOT)
 # so this does not depend on them and never goes looking for an IPSW.
 boot: $(KERNELCACHE)
 	./tools/iboot-boot.sh $(KERNELCACHE)
+
+# Mesa's asahi_clc, pinned to the commit patches/mesa-*.patch was made on.
+# Needs clang, LLVM's SPIR-V translator and libclc; LLVM_DIR points at them.
+MESA_SRC ?= build/mesa
+MESA_REV := 24a0a3bddf5588d7f087e8f40658ba5e17af6094
+LLVM_DIR ?= /usr/lib/llvm/22
+MESA_BIN := $(MESA_SRC)/build/src
+
+gfx-tests: build/gfx/tests.c
+
+build/gfx/tests.c: tools/gfx-tests.cl $(wildcard patches/mesa-*.patch)
+	test -d $(MESA_SRC) || { git init -q $(MESA_SRC) && \
+	    git -C $(MESA_SRC) fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git $(MESA_REV) && \
+	    git -C $(MESA_SRC) checkout -q FETCH_HEAD; }
+	@set -e; for p in $(CURDIR)/patches/mesa-*.patch; do \
+	    git -C $(MESA_SRC) apply --reverse --check $$p 2>/dev/null || git -C $(MESA_SRC) apply $$p; \
+	done
+	test -d $(MESA_SRC)/build || PATH=$(LLVM_DIR)/bin:$$PATH \
+	    PKG_CONFIG_PATH=$(LLVM_DIR)/lib64/pkgconfig meson setup $(MESA_SRC)/build $(MESA_SRC) \
+	    -Dgallium-drivers= -Dvulkan-drivers= -Dplatforms= -Dglx=disabled -Degl=disabled \
+	    -Dgbm=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Dtools=asahi \
+	    -Dmesa-clc=enabled -Dprecomp-compiler=enabled -Dllvm=enabled -Dbuildtype=debugoptimized
+	PATH=$(LLVM_DIR)/bin:$$PATH ninja -C $(MESA_SRC)/build src/asahi/clc/asahi_clc
+	mkdir -p build/gfx
+	PATH=$(LLVM_DIR)/bin:$$PATH $(MESA_BIN)/compiler/clc/mesa_clc -o build/gfx/tests.spv $< -- \
+	    -I$(MESA_SRC)/include -I$(MESA_SRC)/src -I$(MESA_SRC)/src/compiler/libcl \
+	    -cl-std=cl2.0 -D__OPENCL_VERSION__=200
+	$(MESA_BIN)/asahi/clc/asahi_clc build/gfx/tests.spv build/gfx/tests.h $@
 
 clean:
 	rm -f $(DTB) $(PP) $(MACHO) $(KERNELCACHE)

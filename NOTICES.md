@@ -10,6 +10,7 @@ Nothing third party is vendored here. `make deps` clones the trees below into
 | Hoolock docs, 16K config, IM4M templates, empty trustcache | HoolockLinux/docs | MIT |
 | Test initramfs | HoolockLinux/HoolockRD | see that repo |
 | Jig firmware | Trussh/usbliter8ra1n-patch | MIT |
+| Mesa, cloned by `make gfx-tests` | mesa/mesa on freedesktop.org | MIT |
 
 ## Ours
 

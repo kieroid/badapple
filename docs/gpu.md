@@ -138,26 +138,51 @@ The state block is a list of words:
 
 ```text
 u64 3 | first << 9 | count << 21 | va << 24     uniform load, u0 on, up to 31
-u64 (code >> 6) << 38 | 0x90000000 | 0x1f       shader, 8 registers
+u64 shader word
 u16 0x0108                                      no preshader
+  or
+u16 0x0038, 48 bits 0xc040 | code << 16         preshader, even address
 ```
 
-The uniform address is the full GPU VA. The code address is a 32 bit offset
-from 0x11 << 32.
-
-The ISA is close to G13. The iOS CoreImage binary archives hold G11 kernels
-(GPU Mach-O, cpusubtype 0x72), and applegpu's G13 disassembler reads nearly all
-of them. Stop is `0x0801`.
-
-Kernels that ran:
-
-| kernel | what |
+| shader word bits | what |
 |---|---|
-| `mov_imm`, `device_store` | 0xcafe1234 to memory |
-| `get_sr` sr80, `device_store` at a register offset | `out[tid] = tid`, 256 threads |
-| `iadd` with `u2`, store based at `u0_u1` | uniforms |
+| 63:38 | code address >> 6 |
+| 31:28 | 9 |
+| 23:16 | threadgroup memory in 256 bytes, 0 is 64K |
+| 8 | uses threadgroup memory |
+| 7:4 | registers in blocks of 8, 0 is 16 |
+| 3:0 | 0xf |
 
-A store's register offset is scaled by the element size.
+The uniform address is the full GPU VA. Code addresses are 32 bit offsets from
+0x11 << 32. The driver adds 16 bytes to the threadgroup memory size.
+
+## ISA
+
+Close to G13. G11 kernels (GPU Mach-O, cpusubtype 0x72) are in the iOS 16
+CoreImage archives and, for iOS 18, also in QuartzCore, ImageIO and RenderBox.
+applegpu's G13 disassembler reads nearly all of them.
+
+| | G11 |
+|---|---|
+| stop | `0x0801` |
+| threadgroup load, store | device load, store (`0x05`, `0x45`) with bits 29:28 = 2, bit 26 and bits 46:45 clear, a 16-bit register base holding the byte address |
+| threadgroup barrier | `0x0068`, same as G13 |
+| memory barrier | only `0xf596` |
+| SIMD reductions (`simd_iadd`) | none |
+
+An instruction G11 lacks kills the thread without a fault, and the job still
+completes. A store's register offset is scaled by the element size.
+
+## Mesa
+
+`patches/mesa-0001-asahi-g11.patch` makes Mesa's Asahi compiler emit G11
+code. `make gfx-tests` builds its `asahi_clc` and compiles
+`tools/gfx-tests.cl`, and `tools/gfx-proxy.py clc` runs the result. Kernel
+arguments go in uniforms from u0, and rodata is loaded from the binary into
+the uniforms Mesa asks for.
+
+These pass: arithmetic, floats, loops, a preamble, thread and threadgroup ids,
+threadgroup memory with barriers, a reduction, fences and atomics.
 
 ## Queues
 

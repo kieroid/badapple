@@ -3,19 +3,22 @@
 # Copyright (c) 2026 kiki <kieran@lavato.net>
 """Drive the A12 GPU coprocessor from the m1n1 proxy.
 
-usage: M1N1DEVICE=/dev/ttyACM0 build/venv/bin/python tools/gfx-proxy.py [job] [cpjob | kick | kernel]
+usage: M1N1DEVICE=/dev/ttyACM0 build/venv/bin/python tools/gfx-proxy.py [job] [cpjob | kick | kernel | clc[=FILE]]
 
 Boot the m1n1 proxy with the GPU firmware loaded (tools/iboot-boot.sh
 build/iboot/kernelcache-m1n1.img4). The script boots the firmware, sends the
 init block, powers the GPU with a device control message, then optionally
 submits a barrier (job) and a compute command that only runs firmware ops
-(cpjob), kicks the GPU (kick) or runs test shaders (kernel). The firmware
+(cpjob), kicks the GPU (kick), runs hand-written test shaders (kernel) or
+runs the OpenCL tests from "make gfx-tests" (clc). The firmware
 cannot be restarted, so each run needs a fresh DFU boot. KTrace goes to
 build/gfx/ktrace.bin. Offsets name the firmware functions they come from.
 """
 
 import atexit
+import math
 import pathlib
+import re
 import struct
 import sys
 import time
@@ -116,7 +119,7 @@ class Bump:
 # where the G11 firmware matches it. Everything lives in one chunk that the
 # firmware maps at VA through the mem-desc table in init[0x13].
 VA = 0xffffffffc0000000
-CHUNK = 0x300000
+CHUNK = 0x600000
 init = u.memalign(0x4000, 0x4000)
 table = u.memalign(0x4000, 0x4000)
 pa = u.memalign(0x4000, CHUNK)
@@ -382,7 +385,8 @@ if "cpjob" in sys.argv[1:]:
     (OUT / "data-cp.bin").write_bytes(iface.readmem(DATA_PA, DATA_SIZE))
     (OUT / "chunk-cp.bin").write_bytes(iface.readmem(pa, m.off))
 
-if "kick" in sys.argv[1:] or "kernel" in sys.argv[1:]:
+CLC = next((a[4:] or str(ROOT / "build/gfx/tests.c") for a in sys.argv[1:] if a.startswith("clc")), None)
+if "kick" in sys.argv[1:] or "kernel" in sys.argv[1:] or CLC:
     # Compute commands in MMU context SLOT. Microsequence as the kext builds
     # it (FUN_fffffff0084d0f08): StartCompute, wait for the CDM interrupt,
     # finalize, end. StartCompute writes cmd+0x70/+0x78/+0x80 to RGX
@@ -476,6 +480,120 @@ if "kick" in sys.argv[1:] or "kernel" in sys.argv[1:]:
 
     if "kick" in sys.argv[1:]:
         compute("kick", lambda stream: m.put(stream, "<I", 0x80000000))    # terminate only
+    elif CLC:
+        # Kernels from Mesa's asahi_clc (OpenCL C) with patches/mesa-*.patch.
+        # Each blob is struct agx_precompiled_kernel_info, then
+        # the binary. Arguments sit in uniforms from u0 in 16-bit units;
+        # rodata is mapped at ro_base. Register counts are 16-bit units.
+        blobs = {}
+        for name, body in re.findall(r"static const uint32_t (\w+)\[\d+\] = \{(.*?)\};",
+                                     open(CLC).read(), re.S):
+            b = b"".join(struct.pack("<I", int(x, 16)) for x in re.findall(r"0x[0-9a-f]+", body))
+            blobs[name] = struct.unpack_from("<IIIIIHHHHH3HHH?", b), b[44:]
+        def mesa(name, args, grid, check):
+            (pre, main, _, size, ro, ro_base, ro16, gprs, pgprs, push,
+             wx, wy, wz, local, iblk, txf), binary = blobs[name.split("@")[0] + "_0_g13g"]
+            assert main % 64 == 0 and ro_base % 2 == 0 and not iblk and not txf
+            code, state = m.alloc(0x4000, 0x4000), m.alloc(0x100, 0x40)
+            m.buf[code:code + size] = binary[:size]
+            ubuf = m.alloc(len(args) + 4)
+            m.buf[ubuf:ubuf + len(args)] = args
+            esl = b""
+            for va, first, n in ((gva(ubuf), 0, (len(args) + 3) // 4),
+                                 (gva(code) + ro, ro_base // 2, (ro16 + 1) // 2)):
+                assert n < 32
+                if n:
+                    esl += struct.pack("<Q", va << 24 | n << 21 | first << 9 | 3)
+            regs = lambda halves: max(1, (halves + 15) // 16) % 16     # blocks of 8
+            word = (gva(code) + main & 0xffffffff) >> 6 << 38 | 0x90000000 | regs(gprs) << 4 | 0xf
+            # Threadgroup memory in 256 byte units; the driver adds 16 bytes
+            # (emitComputeProgramVariantAndArguments).
+            tg = 0x8000 if name.endswith("@32k") else local + 16 if local else 0
+            if tg:
+                word |= math.ceil(tg / 256) % 256 << 16 | 1 << 8
+            esl += struct.pack("<Q", word)
+            if pgprs:
+                # Preshader: 0x0038, then 0xc040 | code offset << 16, 48 bits.
+                pw = 0xc040 | ((gva(code) + pre) & 0xfffffffe) << 16
+                esl += struct.pack("<HIH", 0x0038, pw & 0xffffffff, pw >> 32)
+            else:
+                esl += struct.pack("<H", 0x0108)
+            m.buf[state:state + len(esl)] = esl
+            hdr = max(1, (push + 63) // 64) % 8 << 1 | 1
+            low = regs(max(gprs, pgprs)) << 2 | (len(esl) >> 6 & 3)
+            print(f"[{name}] gprs {gprs} preamble {pgprs} push {push} ro {ro16}@{ro_base} "
+                  f"local {local} tg {tg} wg {wx} hdr {hdr:#x} low {low:#x} esl {esl.hex()}")
+            compute(name, lambda stream: m.put(stream, "<8III", hdr, gva(state) & 0xffffffc0 | low,
+                                               grid, 1, 1, wx, wy, wz, 0xc0000160, 0x80000000))
+            check()
+        def buf(words):
+            o = m.alloc(max(0x4000, len(words) * 4), 0x4000)
+            m.buf[o:o + len(words) * 4] = struct.pack(f"<{len(words)}I", *words)
+            return o
+        def args(*v):
+            return b"".join(struct.pack("<Q" if x >= 1 << 32 else "<I", x) for x in v)
+        def expect(name, o, want):
+            got = struct.unpack(f"<{len(want)}I", rd(o, len(want) * 4))
+            bad = [i for i in range(len(want)) if got[i] != want[i]]
+            print(f"[{name}] {' '.join(f'{x:x}' for x in got[:8])} .. "
+                  f"{'ok' if not bad else f'{len(bad)} wrong, first {bad[0]}: {got[bad[0]]:#x} want {want[bad[0]]:#x}'}")
+        DEAD = [0xdeadbeef] * 256
+        def fcheck(name, o):
+            got = struct.unpack("<64f", rd(o, 256))
+            want = [(i / 4) ** 2 - 1 / (i / 4 + 1) for i in range(64)]
+            bad = [i for i in range(64) if abs(got[i] - want[i]) > 1e-5 * max(1, abs(want[i]))]
+            print(f"[{name}] {got[:4]} .. {'ok' if not bad else f'{len(bad)} wrong, first {bad[0]}: {got[bad[0]]} want {want[bad[0]]}'}")
+        def t_fill(name):       # out[i] = value + i
+            o = buf(DEAD)
+            mesa(name, args(gva(o), 0x1000), 256, lambda: expect(name, o, [0x1000 + i for i in range(256)]))
+        def t_float(name):      # x * x - 1 / (x + 1) with x = i * 0.25
+            o = buf(DEAD)
+            mesa(name, args(gva(o), struct.unpack("<I", struct.pack("<f", 0.25))[0]), 64, lambda: fcheck(name, o))
+        def t_loop(name):       # sum of 3j + (j odd ? 7 : 1) for j < i % 5, with a preamble
+            o = buf(DEAD)
+            mesa(name, args(gva(o), 5), 64,
+                 lambda: expect(name, o, [sum(3 * j + (7 if j & 1 else 1) for j in range(i % 5)) for i in range(64)]))
+        def t_shared(name):     # out[g] = sum of in[64g .. 64g + 63]
+            o, src = buf(DEAD), buf([i + 1 for i in range(256)])
+            mesa(name, args(gva(o), gva(src)), 256,
+                 lambda: expect(name, o, [sum(range(64 * g + 1, 64 * g + 65)) for g in range(4)]))
+        def t_atomic(name):     # counter = 1 + 2 + .. + 64
+            o = buf([0])
+            mesa(name, args(gva(o)), 64, lambda: expect(name, o, [64 * 65 // 2]))
+        def simple(want):       # one output buffer, 256 threads
+            def run(name):
+                o = buf(DEAD)
+                mesa(name, args(gva(o)), 256, lambda: expect(name, o, want))
+            return run
+        def k_atomic_noret(name):
+            c = buf(range(256))
+            mesa(name, args(gva(c)), 256, lambda: expect(name, c, [i + 5 for i in range(256)]))
+        def k_atomic_ret(name):
+            c, o = buf(range(256)), buf(DEAD)
+            mesa(name, args(gva(c), gva(o)), 256, lambda: (expect(name, o, range(256)),
+                                                           expect(name, c, [i + 5 for i in range(256)])))
+        def k_simd(name):
+            o = buf([0])
+            mesa(name, args(gva(o)), 256, lambda: expect(name, o, [256 * 257 // 2]))
+        def k_atomic_uniform(name):
+            o = buf([0])
+            mesa(name, args(gva(o)), 256, lambda: expect(name, o, [256]))
+        # Riskiest last: a GPU hang would hold up everything after it.
+        tests = {"t_fill": t_fill, "t_float": t_float, "t_loop": t_loop,
+                 "k_ids": simple([i % 64 | i // 64 << 16 for i in range(256)]),
+                 "k_barrier": simple(range(256)),
+                 "k_tgmem": simple([3 * i for i in range(256)]),
+                 "k_tgoff": simple([3 * i for i in range(256)]),
+                 "k_tgmem@32k": simple([3 * i for i in range(256)]),
+                 "k_tgswap": simple([i // 64 * 64 + 63 - i % 64 for i in range(256)]),
+                 "k_fence": simple([i + 7 for i in range(256)]),
+                 "t_shared": t_shared,
+                 "k_atomic_noret": k_atomic_noret, "k_atomic_ret": k_atomic_ret,
+                 "k_atomic_seqcst": k_atomic_noret, "k_simd": k_simd,
+                 "k_atomic_uniform": k_atomic_uniform, "t_atomic": t_atomic}
+        for name, run in tests.items():
+            if name.split("@")[0] + "_0_g13g" in blobs:
+                run(name)
     else:
         GET_TID = bytes.fromhex("f20d1004")             # get_sr r3, thread_position_in_grid.x
         END = bytes.fromhex("3800") + bytes.fromhex("0801")    # wait 0, stop
