@@ -1,0 +1,1741 @@
+diff --git a/drivers/gpu/drm/Kconfig b/drivers/gpu/drm/Kconfig
+index 323422861..a7f84dac4 100644
+--- a/drivers/gpu/drm/Kconfig
++++ b/drivers/gpu/drm/Kconfig
+@@ -350,6 +350,8 @@ source "drivers/gpu/drm/tegra/Kconfig"
+ source "drivers/gpu/drm/tidss/Kconfig"
+ source "drivers/gpu/drm/tilcdc/Kconfig"
+ source "drivers/gpu/drm/tiny/Kconfig"
++
++source "drivers/gpu/drm/agx/Kconfig"
+ source "drivers/gpu/drm/tve200/Kconfig"
+ source "drivers/gpu/drm/tyr/Kconfig"
+ source "drivers/gpu/drm/udl/Kconfig"
+diff --git a/drivers/gpu/drm/Makefile b/drivers/gpu/drm/Makefile
+index e635fcffd..13f74da08 100644
+--- a/drivers/gpu/drm/Makefile
++++ b/drivers/gpu/drm/Makefile
+@@ -217,6 +217,7 @@ obj-y			+= hisilicon/
+ obj-y			+= mxsfb/
+ obj-y			+= sysfb/
+ obj-y			+= tiny/
++obj-$(CONFIG_DRM_AGX)	+= agx/
+ obj-$(CONFIG_DRM_PL111) += pl111/
+ obj-$(CONFIG_DRM_TVE200) += tve200/
+ obj-$(CONFIG_DRM_ADP) += adp/
+diff --git a/drivers/gpu/drm/agx/Kconfig b/drivers/gpu/drm/agx/Kconfig
+new file mode 100644
+index 000000000..990978f4f
+--- /dev/null
++++ b/drivers/gpu/drm/agx/Kconfig
+@@ -0,0 +1,8 @@
++# SPDX-License-Identifier: GPL-2.0-only OR MIT
++config DRM_AGX
++	tristate "Apple A12 GPU (AGX G11P)"
++	depends on DRM && ARCH_APPLE && APPLE_RTKIT
++	select DRM_GEM_SHMEM_HELPER
++	help
++	  Compute-only DRM driver for the GPU in the Apple A12 (T8020). It
++	  boots the GPU firmware and runs compute jobs through the Asahi uAPI.
+diff --git a/drivers/gpu/drm/agx/Makefile b/drivers/gpu/drm/agx/Makefile
+new file mode 100644
+index 000000000..5b8b471d7
+--- /dev/null
++++ b/drivers/gpu/drm/agx/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0-only OR MIT
++obj-$(CONFIG_DRM_AGX) += agx.o
++agx-y := agx_drv.o agx_fw.o agx_vm.o
+diff --git a/drivers/gpu/drm/agx/agx.h b/drivers/gpu/drm/agx/agx.h
+new file mode 100644
+index 000000000..a3af4cea3
+--- /dev/null
++++ b/drivers/gpu/drm/agx/agx.h
+@@ -0,0 +1,83 @@
++/* SPDX-License-Identifier: GPL-2.0-only OR MIT */
++/*
++ * Apple A12 GPU (AGX G11P). The firmware's structures are described in the
++ * badapple docs/gpu.md; offsets in comments name the firmware functions they
++ * come from.
++ *
++ * Copyright (c) 2026 kiki <kieran@lavato.net>
++ */
++#ifndef __AGX_H__
++#define __AGX_H__
++
++#include <drm/drm_device.h>
++#include <linux/dmapool.h>
++#include <linux/mutex.h>
++#include <linux/types.h>
++
++/* The firmware's view of the chunk, through the mem-desc table. */
++#define AGX_CHUNK_VA		0xffffffffc0000000ULL
++#define AGX_CHUNK_SIZE		SZ_4M
++
++/*
++ * GPU VAs. USC (shader) addresses are 32-bit offsets from AGX_USC_BASE,
++ * which the firmware loads into RGX 0x10000 at power-up for every context.
++ * Context AGX_KERNEL_CTX maps the chunk at AGX_USC_BASE for the probe test
++ * kernels; userspace gets contexts above it.
++ */
++#define AGX_USC_BASE		0x1100000000ULL
++#define AGX_KERNEL_CTX		16
++#define AGX_FIRST_USER_CTX	17
++#define AGX_NR_CTX		64
++#define AGX_VM_START		0x1000000000ULL
++#define AGX_VM_END		0x8000000000ULL
++#define AGX_PAGE		SZ_16K
++
++struct agx_vm;
++struct apple_rtkit;
++struct asc_segment;
++struct drm_gem_object;
++
++struct agx_device {
++	struct drm_device drm;
++	struct device *dev;
++	struct apple_rtkit *rtk;
++	const struct asc_segment *segs;
++	int nsegs;
++	phys_addr_t sgx, fender;
++
++	/* Firmware structures, see agx_fw.c. */
++	void *buf;
++	dma_addr_t pa;
++	u32 off;
++	bool ready;
++	u32 B, C, stats_cp, gen, gen_fw;
++	u32 pc[AGX_NR_CTX];		/* page catalogue per context */
++	u32 chan_state[17], chan_ring[17];
++	u32 ring, info, nr_cmds;
++	struct { u32 cmd, evc, useq, scratch, args; } slot[4];
++	bool wedged;
++	struct mutex job_lock;		/* one job at a time */
++
++	struct mutex ctx_lock;
++	unsigned long ctx_used[BITS_TO_LONGS(AGX_NR_CTX)];
++	struct dma_pool *pd_pool, *pt_pool;
++};
++
++#define to_agx(d) container_of(d, struct agx_device, drm)
++
++/* agx_fw.c */
++int agx_fw_init(struct agx_device *agx, void __iomem *asc);
++int agx_fw_run(struct agx_device *agx, u32 ctx, u64 args, u64 stream, u32 timeout_ms);
++void agx_fw_flush_tlb(struct agx_device *agx, u32 ctx);
++void agx_fw_selftest(struct agx_device *agx);
++extern const struct apple_rtkit_ops agx_rtk_ops;
++
++/* agx_vm.c */
++struct agx_vm *agx_vm_create(struct agx_device *agx, u64 kernel_start, u64 kernel_end);
++void agx_vm_destroy(struct agx_vm *vm);
++int agx_vm_bind(struct agx_vm *vm, struct drm_gem_object *obj, u64 offset, u64 range,
++		u64 addr, bool write, bool single);
++int agx_vm_unbind(struct agx_vm *vm, u64 addr, u64 range);
++int agx_vm_run(struct agx_vm *vm, u64 stream, u32 timeout_ms);
++
++#endif
+diff --git a/drivers/gpu/drm/agx/agx_drv.c b/drivers/gpu/drm/agx/agx_drv.c
+new file mode 100644
+index 000000000..86a677026
+--- /dev/null
++++ b/drivers/gpu/drm/agx/agx_drv.c
+@@ -0,0 +1,552 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/*
++ * DRM driver for the Apple A12 GPU (AGX G11P), compute only. It speaks the
++ * Asahi uAPI (include/uapi/drm/asahi_drm.h) where the hardware allows:
++ *
++ *  - USC addresses are relative to AGX_USC_BASE, which the firmware loads
++ *    for every context, so queues must use it as usc_exec_base.
++ *  - No render commands, samplers, helper programs or timestamps yet.
++ *  - Submits run synchronously: in-syncs are waited for, the commands run
++ *    one after another, and out-syncs get a signalled fence.
++ *
++ * Copyright (c) 2026 kiki <kieran@lavato.net>
++ */
++
++#include <drm/asahi_drm.h>
++#include <drm/drm_drv.h>
++#include <drm/drm_file.h>
++#include <drm/drm_gem_shmem_helper.h>
++#include <drm/drm_ioctl.h>
++#include <drm/drm_syncobj.h>
++#include <linux/dma-fence-chain.h>
++#include <linux/dma-mapping.h>
++#include <linux/dmapool.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/xarray.h>
++
++#include "agx.h"
++
++#define MAX_COMMANDS	64
++#define MAX_SYNCS	64
++#define JOB_TIMEOUT_MS	5000
++
++struct agx_queue {
++	struct agx_vm *vm;
++	u32 vm_id;
++};
++
++struct agx_file {
++	struct xarray vms;
++	struct xarray queues;
++	struct mutex lock;	/* VMs against the queues that use them */
++};
++
++static int agx_open(struct drm_device *drm, struct drm_file *file)
++{
++	struct agx_file *af = kzalloc(sizeof(*af), GFP_KERNEL);
++
++	if (!af)
++		return -ENOMEM;
++	xa_init_flags(&af->vms, XA_FLAGS_ALLOC1);
++	xa_init_flags(&af->queues, XA_FLAGS_ALLOC1);
++	mutex_init(&af->lock);
++	file->driver_priv = af;
++	return 0;
++}
++
++static void agx_postclose(struct drm_device *drm, struct drm_file *file)
++{
++	struct agx_file *af = file->driver_priv;
++	struct agx_queue *q;
++	struct agx_vm *vm;
++	unsigned long id;
++
++	xa_for_each(&af->queues, id, q)
++		kfree(q);
++	xa_for_each(&af->vms, id, vm)
++		agx_vm_destroy(vm);
++	xa_destroy(&af->queues);
++	xa_destroy(&af->vms);
++	kfree(af);
++}
++
++static int agx_get_params(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_get_params *args = data;
++	struct drm_asahi_params_global p = {
++		.gpu_generation = 11,
++		.gpu_variant = 'P',
++		.gpu_revision = 0x11,
++		.chip_id = 0x8020,
++		.num_dies = 1,
++		.num_clusters_total = 1,
++		.num_cores_per_cluster = 4,
++		.max_frequency_khz = 1098000,
++		.core_masks = { 0xf },
++		.vm_start = AGX_VM_START,
++		.vm_end = AGX_VM_END,
++		.vm_kernel_min_size = AGX_PAGE,
++		.max_commands_per_submission = MAX_COMMANDS,
++		.command_timestamp_frequency_hz = 24000000,
++	};
++
++	if (args->param_group || args->pad)
++		return -EINVAL;
++	if (copy_to_user(u64_to_user_ptr(args->pointer), &p, min_t(u64, args->size, sizeof(p))))
++		return -EFAULT;
++	return 0;
++}
++
++static int agx_get_time(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_get_time *args = data;
++
++	if (args->flags)
++		return -EINVAL;
++	args->gpu_timestamp = ktime_get_ns();
++	return 0;
++}
++
++static int agx_vm_create_ioctl(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_vm_create *args = data;
++	struct agx_file *af = file->driver_priv;
++	struct agx_vm *vm;
++	int ret;
++
++	if (args->pad)
++		return -EINVAL;
++	vm = agx_vm_create(to_agx(drm), args->kernel_start, args->kernel_end);
++	if (IS_ERR(vm))
++		return PTR_ERR(vm);
++	ret = xa_alloc(&af->vms, &args->vm_id, vm, xa_limit_32b, GFP_KERNEL);
++	if (ret)
++		agx_vm_destroy(vm);
++	return ret;
++}
++
++static int agx_vm_destroy_ioctl(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_vm_destroy *args = data;
++	struct agx_file *af = file->driver_priv;
++	struct agx_queue *q;
++	struct agx_vm *vm;
++	unsigned long id;
++	int ret = 0;
++
++	if (args->pad)
++		return -EINVAL;
++	mutex_lock(&af->lock);
++	xa_for_each(&af->queues, id, q) {
++		if (q->vm_id == args->vm_id) {
++			ret = -EBUSY;
++			goto out;
++		}
++	}
++	vm = xa_erase(&af->vms, args->vm_id);
++	if (vm)
++		agx_vm_destroy(vm);
++	else
++		ret = -ENOENT;
++out:
++	mutex_unlock(&af->lock);
++	return ret;
++}
++
++static int agx_vm_bind_ioctl(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_vm_bind *args = data;
++	struct agx_file *af = file->driver_priv;
++	struct agx_vm *vm;
++	u32 i;
++	int ret = 0;
++
++	if (args->pad || args->stride < sizeof(struct drm_asahi_gem_bind_op) ||
++	    args->num_binds > 256)
++		return -EINVAL;
++
++	mutex_lock(&af->lock);
++	vm = xa_load(&af->vms, args->vm_id);
++	if (!vm) {
++		ret = -ENOENT;
++		goto out;
++	}
++	for (i = 0; i < args->num_binds && !ret; i++) {
++		struct drm_asahi_gem_bind_op op;
++		struct drm_gem_object *obj;
++
++		if (copy_from_user(&op, u64_to_user_ptr(args->userptr + (u64)i * args->stride),
++				   sizeof(op))) {
++			ret = -EFAULT;
++			break;
++		}
++		if (op.flags & ~(DRM_ASAHI_BIND_UNBIND | DRM_ASAHI_BIND_READ |
++				 DRM_ASAHI_BIND_WRITE | DRM_ASAHI_BIND_SINGLE_PAGE)) {
++			ret = -EINVAL;
++			break;
++		}
++		if (op.flags & DRM_ASAHI_BIND_UNBIND) {
++			ret = agx_vm_unbind(vm, op.addr, op.range);
++			continue;
++		}
++		if (!(op.flags & DRM_ASAHI_BIND_READ)) {
++			ret = -EINVAL;
++			break;
++		}
++		obj = drm_gem_object_lookup(file, op.handle);
++		if (!obj) {
++			ret = -ENOENT;
++			break;
++		}
++		ret = agx_vm_bind(vm, obj, op.offset, op.range, op.addr,
++				  op.flags & DRM_ASAHI_BIND_WRITE,
++				  op.flags & DRM_ASAHI_BIND_SINGLE_PAGE);
++		drm_gem_object_put(obj);
++	}
++out:
++	mutex_unlock(&af->lock);
++	return ret;
++}
++
++static int agx_gem_create(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_gem_create *args = data;
++	struct drm_gem_shmem_object *shmem;
++	int ret;
++
++	if (args->pad || !args->size ||
++	    (args->flags & ~(DRM_ASAHI_GEM_WRITEBACK | DRM_ASAHI_GEM_VM_PRIVATE)))
++		return -EINVAL;
++
++	shmem = drm_gem_shmem_create(drm, round_up(args->size, AGX_PAGE));
++	if (IS_ERR(shmem))
++		return PTR_ERR(shmem);
++	/*
++	 * The GPU does not snoop, so CPU mappings are always write-combined;
++	 * WRITEBACK is only a performance hint. Pin and map the pages now: that
++	 * cleans the cache lines left by zeroing them, which would otherwise
++	 * land on top of whatever userspace writes before the first bind.
++	 */
++	shmem->map_wc = true;
++	ret = PTR_ERR_OR_ZERO(drm_gem_shmem_get_pages_sgt(shmem));
++	if (!ret)
++		ret = drm_gem_handle_create(file, &shmem->base, &args->handle);
++	drm_gem_object_put(&shmem->base);
++	return ret;
++}
++
++static int agx_gem_mmap_offset(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_gem_mmap_offset *args = data;
++	struct drm_gem_object *obj;
++	int ret;
++
++	if (args->flags)
++		return -EINVAL;
++	obj = drm_gem_object_lookup(file, args->handle);
++	if (!obj)
++		return -ENOENT;
++	ret = drm_gem_create_mmap_offset(obj);
++	if (!ret)
++		args->offset = drm_vma_node_offset_addr(&obj->vma_node);
++	drm_gem_object_put(obj);
++	return ret;
++}
++
++static int agx_gem_bind_object(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	return -EOPNOTSUPP;
++}
++
++static int agx_queue_create(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_queue_create *args = data;
++	struct agx_file *af = file->driver_priv;
++	struct agx_queue *q;
++	int ret;
++
++	if (args->flags || args->priority > DRM_ASAHI_PRIORITY_MEDIUM ||
++	    args->usc_exec_base != AGX_USC_BASE)
++		return -EINVAL;
++
++	q = kzalloc(sizeof(*q), GFP_KERNEL);
++	if (!q)
++		return -ENOMEM;
++	mutex_lock(&af->lock);
++	q->vm = xa_load(&af->vms, args->vm_id);
++	q->vm_id = args->vm_id;
++	ret = q->vm ? xa_alloc(&af->queues, &args->queue_id, q, xa_limit_32b, GFP_KERNEL) : -ENOENT;
++	mutex_unlock(&af->lock);
++	if (ret)
++		kfree(q);
++	return ret;
++}
++
++static int agx_queue_destroy(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_queue_destroy *args = data;
++	struct agx_file *af = file->driver_priv;
++	struct agx_queue *q;
++
++	if (args->pad)
++		return -EINVAL;
++	mutex_lock(&af->lock);
++	q = xa_erase(&af->queues, args->queue_id);
++	mutex_unlock(&af->lock);
++	if (!q)
++		return -ENOENT;
++	kfree(q);
++	return 0;
++}
++
++static int agx_wait_syncs(struct drm_file *file, struct drm_asahi_sync *syncs, u32 n)
++{
++	u32 i;
++	int ret;
++
++	for (i = 0; i < n; i++) {
++		struct dma_fence *fence;
++
++		if (syncs[i].sync_type > DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ)
++			return -EINVAL;
++		ret = drm_syncobj_find_fence(file, syncs[i].handle, syncs[i].timeline_value, 0,
++					     &fence);
++		if (ret)
++			return ret;
++		ret = dma_fence_wait(fence, true);
++		dma_fence_put(fence);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++static int agx_signal_syncs(struct drm_file *file, struct drm_asahi_sync *syncs, u32 n)
++{
++	u32 i;
++
++	for (i = 0; i < n; i++) {
++		struct drm_syncobj *syncobj = drm_syncobj_find(file, syncs[i].handle);
++		struct dma_fence *fence = dma_fence_get_stub();
++
++		if (!syncobj) {
++			dma_fence_put(fence);
++			return -ENOENT;
++		}
++		if (syncs[i].sync_type == DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ) {
++			struct dma_fence_chain *chain = dma_fence_chain_alloc();
++
++			if (!chain) {
++				dma_fence_put(fence);
++				drm_syncobj_put(syncobj);
++				return -ENOMEM;
++			}
++			drm_syncobj_add_point(syncobj, chain, fence, syncs[i].timeline_value);
++		} else {
++			drm_syncobj_replace_fence(syncobj, fence);
++		}
++		dma_fence_put(fence);
++		drm_syncobj_put(syncobj);
++	}
++	return 0;
++}
++
++/*
++ * Walk the command buffer. With vm NULL only validate it; otherwise run its
++ * compute commands. Attachment commands are only hints and are skipped.
++ */
++static int agx_walk(const u8 *cmdbuf, u32 size, struct agx_vm *vm)
++{
++	u32 o = 0, nr_hw = 0;
++	int ret;
++
++	while (o < size) {
++		struct drm_asahi_cmd_header h;
++		struct drm_asahi_cmd_compute c = {};
++
++		if (size - o < sizeof(h))
++			return -EINVAL;
++		memcpy(&h, cmdbuf + o, sizeof(h));
++		o += sizeof(h);
++		if (h.size > size - o)
++			return -EINVAL;
++
++		switch (h.cmd_type) {
++		case DRM_ASAHI_CMD_COMPUTE:
++			memcpy(&c, cmdbuf + o, min_t(u32, h.size, sizeof(c)));
++			if (c.flags || c.sampler_count || c.sampler_heap || c.helper.binary ||
++			    c.ts.start.handle || c.ts.end.handle || !c.cdm_ctrl_stream_base)
++				return -EINVAL;
++			if (++nr_hw > MAX_COMMANDS)
++				return -EINVAL;
++			if (vm) {
++				ret = agx_vm_run(vm, c.cdm_ctrl_stream_base, JOB_TIMEOUT_MS);
++				if (ret)
++					return ret;
++			}
++			break;
++		case DRM_ASAHI_SET_VERTEX_ATTACHMENTS:
++		case DRM_ASAHI_SET_FRAGMENT_ATTACHMENTS:
++		case DRM_ASAHI_SET_COMPUTE_ATTACHMENTS:
++			break;
++		default:
++			return -EINVAL;
++		}
++		o += h.size;
++	}
++	return nr_hw ? 0 : -EINVAL;
++}
++
++static int agx_submit(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_submit *args = data;
++	struct agx_file *af = file->driver_priv;
++	struct drm_asahi_sync *syncs = NULL;
++	u32 nsyncs = args->in_sync_count + args->out_sync_count;
++	struct agx_queue *q;
++	u8 *cmdbuf;
++	int ret;
++
++	if (args->flags || args->pad || !args->cmdbuf_size || args->cmdbuf_size > SZ_64K ||
++	    args->in_sync_count > MAX_SYNCS || args->out_sync_count > MAX_SYNCS)
++		return -EINVAL;
++
++	cmdbuf = memdup_user(u64_to_user_ptr(args->cmdbuf), args->cmdbuf_size);
++	if (IS_ERR(cmdbuf))
++		return PTR_ERR(cmdbuf);
++	if (nsyncs) {
++		syncs = memdup_array_user(u64_to_user_ptr(args->syncs), nsyncs, sizeof(*syncs));
++		if (IS_ERR(syncs)) {
++			kfree(cmdbuf);
++			return PTR_ERR(syncs);
++		}
++	}
++
++	ret = agx_walk(cmdbuf, args->cmdbuf_size, NULL);
++	if (!ret)
++		ret = agx_wait_syncs(file, syncs, args->in_sync_count);
++	if (ret)
++		goto out;
++
++	mutex_lock(&af->lock);
++	q = xa_load(&af->queues, args->queue_id);
++	ret = q ? agx_walk(cmdbuf, args->cmdbuf_size, q->vm) : -ENOENT;
++	mutex_unlock(&af->lock);
++	if (!ret)
++		ret = agx_signal_syncs(file, syncs + args->in_sync_count, args->out_sync_count);
++out:
++	kfree(syncs);
++	kfree(cmdbuf);
++	return ret;
++}
++
++static const struct drm_ioctl_desc agx_ioctls[] = {
++	DRM_IOCTL_DEF_DRV(ASAHI_GET_PARAMS, agx_get_params, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_GET_TIME, agx_get_time, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_VM_CREATE, agx_vm_create_ioctl, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_VM_DESTROY, agx_vm_destroy_ioctl, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_VM_BIND, agx_vm_bind_ioctl, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_GEM_CREATE, agx_gem_create, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_GEM_MMAP_OFFSET, agx_gem_mmap_offset, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_GEM_BIND_OBJECT, agx_gem_bind_object, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_QUEUE_CREATE, agx_queue_create, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_QUEUE_DESTROY, agx_queue_destroy, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_SUBMIT, agx_submit, DRM_RENDER_ALLOW),
++};
++
++DEFINE_DRM_GEM_FOPS(agx_fops);
++
++static const struct drm_driver agx_drm_driver = {
++	.driver_features = DRIVER_GEM | DRIVER_RENDER | DRIVER_SYNCOBJ |
++			   DRIVER_SYNCOBJ_TIMELINE,
++	.open = agx_open,
++	.postclose = agx_postclose,
++	.ioctls = agx_ioctls,
++	.num_ioctls = ARRAY_SIZE(agx_ioctls),
++	.fops = &agx_fops,
++	DRM_GEM_SHMEM_DRIVER_OPS,
++	.name = "agx",
++	.desc = "Apple A12 GPU",
++	.major = 0,
++	.minor = 1,
++};
++
++static int agx_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct agx_device *agx;
++	struct resource *res;
++	void __iomem *asc;
++	int len, ret;
++
++	agx = devm_drm_dev_alloc(dev, &agx_drm_driver, struct agx_device, drm);
++	if (IS_ERR(agx))
++		return PTR_ERR(agx);
++	agx->dev = dev;
++	mutex_init(&agx->job_lock);
++	mutex_init(&agx->ctx_lock);
++	set_bit(AGX_KERNEL_CTX, agx->ctx_used);
++
++	agx->segs = of_get_property(dev->of_node, "apple,segment-ranges", &len);
++	agx->nsegs = agx->segs ? len / 32 : 0;
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sgx");
++	if (!res)
++		return dev_err_probe(dev, -EINVAL, "no sgx registers\n");
++	agx->sgx = res->start;
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "fender");
++	if (!res)
++		return dev_err_probe(dev, -EINVAL, "no fender registers\n");
++	agx->fender = res->start;
++
++	/* DRAM starts at 0x800000000, past the default 32 bit mask. */
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64));
++	if (ret)
++		return ret;
++	asc = devm_platform_ioremap_resource_byname(pdev, "asc");
++	if (IS_ERR(asc))
++		return PTR_ERR(asc);
++
++	/* Page directories hold 512 u64s, page tables 128. */
++	agx->pd_pool = dmam_pool_create("agx-pd", dev, 0x1000, 0x1000, 0);
++	agx->pt_pool = dmam_pool_create("agx-pt", dev, 0x400, 0x400, 0);
++	if (!agx->pd_pool || !agx->pt_pool)
++		return -ENOMEM;
++
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++
++	ret = agx_fw_init(agx, asc);
++	if (ret)
++		return ret;
++	agx_fw_selftest(agx);
++
++	return drm_dev_register(&agx->drm, 0);
++}
++
++static const struct of_device_id agx_of_match[] = {
++	{ .compatible = "apple,t8020-agx" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, agx_of_match);
++
++static struct platform_driver agx_driver = {
++	.driver = {
++		.name = "agx",
++		.of_match_table = agx_of_match,
++		/* The firmware cannot be restarted. */
++		.suppress_bind_attrs = true,
++	},
++	.probe = agx_probe,
++};
++module_platform_driver(agx_driver);
++
++MODULE_AUTHOR("kiki <kieran@lavato.net>");
++MODULE_DESCRIPTION("DRM driver for the Apple A12 GPU (AGX G11P)");
++MODULE_LICENSE("Dual MIT/GPL");
+diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
+new file mode 100644
+index 000000000..478a00d09
+--- /dev/null
++++ b/drivers/gpu/drm/agx/agx_fw.c
+@@ -0,0 +1,720 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/*
++ * AGX G11P firmware: boot, init block, the compute queue and jobs.
++ *
++ * The firmware's structures live in one physically contiguous chunk. The
++ * firmware maps it at AGX_CHUNK_VA through the mem-desc table. Every MMU
++ * context from AGX_KERNEL_CTX up gets a page catalogue in the chunk at init
++ * and is loaded by the firmware at every power-up; agx_vm.c fills them in.
++ * Context AGX_KERNEL_CTX maps the chunk itself at AGX_USC_BASE and
++ * AGX_USC_BASE_TWO for the probe test kernels.
++ *
++ * Copyright (c) 2026 kiki <kieran@lavato.net>
++ */
++
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/soc/apple/rtkit.h>
++#include <linux/unaligned.h>
++
++#include "agx.h"
++
++#define EP_MSGS			0x20
++#define EP_INTS			0x21
++#define MSG_INIT		(0x81ULL << 48)
++#define MSG_DOORBELL		(0x83ULL << 48)
++#define MSG_CHECK		(0x42ULL << 48)
++
++#define AGX_USC_BASE_TWO		0x1300000000ULL
++#define NR_SLOTS		4	/* job structures, reused in turn */
++#define RING_SIZE		0x100
++
++#define CH_CP			2
++#define CH_DEVCTRL		12
++#define CH_EVENT		13
++#define CH_KTRACE		15
++#define NR_CHANNELS		17
++
++#define ASC_CPU_CONTROL		0x44
++#define ASC_CPU_CONTROL_RUN	BIT(4)
++
++#define EV			3
++#define DONE_STAMP		0xcafe0003
++
++/* One entry of the ADT's segment-ranges. */
++struct asc_segment {
++	__le64 phys;
++	__le64 iova;
++	__le64 remap;
++	__le32 size;
++	__le32 flags;
++} __packed;
++
++static u32 agx_alloc(struct agx_device *agx, u32 n, u32 align)
++{
++	u32 o = ALIGN(agx->off, align);
++
++	if (WARN_ON(o + n > AGX_CHUNK_SIZE))
++		return 0;
++	agx->off = o + n;
++	return o;
++}
++
++static u64 fw_va(u32 o)
++{
++	return AGX_CHUNK_VA + o;
++}
++
++static u64 gpu_va(u32 o)
++{
++	return AGX_USC_BASE + o;
++}
++
++static void put32(struct agx_device *agx, u32 o, u32 v)
++{
++	put_unaligned_le32(v, agx->buf + o);
++}
++
++static void put64(struct agx_device *agx, u32 o, u64 v)
++{
++	put_unaligned_le64(v, agx->buf + o);
++}
++
++static u32 get32(struct agx_device *agx, u32 o)
++{
++	return get_unaligned_le32(agx->buf + o);
++}
++
++static u32 fw_off(u64 va)
++{
++	return va - AGX_CHUNK_VA;
++}
++
++/*
++ * Init block per FUN_00025954. Region layout follows m1n1's G13 InitData
++ * where the G11 firmware matches it.
++ */
++static void agx_build(struct agx_device *agx, void *init, void *table, dma_addr_t table_pa)
++{
++	static const u32 rings[NR_CHANNELS] = {
++		[0 ... 11] = 0x30 * 0x100,
++		[12] = 0x30 * 0x100, [13] = 0x38 * 0x100, [14] = 6 * 0xd8 * 0x100,
++		[15] = 0x70 * 0x200, [16] = 0x60 * 0x100,
++	};
++	static const struct { u32 off, size; } bufs[] = {
++		/* TA/3D/CP stats, hwdata A, fault info, TLB generations, ... */
++		{ 0x170, 0x1000 }, { 0x178, 0x1000 }, { 0x180, 0x1000 },
++		{ 0x188, 0x20000 }, { 0x190, 0x80 }, { 0x198, 0xc0 },
++		{ 0x1b0, 0x4000 }, { 0x1b8, 0x1000 }, { 0x1c0, 0x300 },
++		{ 0x1c8, 0x1000 }, { 0x220, 0x4000 },
++	};
++	static const u16 scratch_maps[] = {
++		0x680, 0x6e0, 0x700, 0x720, 0x740, 0x760, 0x780, 0x7c0, 0x7e0,
++		0x800, 0x820, 0x840, 0x880, 0x8a0, 0x8c0, 0x8e0, 0x900,
++	};
++	/* ADT sgx/perf-states */
++	static const u32 mhz[] = { 0, 316, 456, 612, 740, 900, 1098 };
++	static const u32 mv[] = { 400, 609, 675, 734, 790, 859, 965 };
++	static const u32 mv_sram[] = { 400, 728, 737, 787, 850, 925, 1046 };
++	/* page size, PA shift, index shift, entries, table size, valid, PA mask, index mask */
++	static const struct { u8 esz, pas, pas2, ish; u16 n; u16 valid; u64 pam, im; } lv[] = {
++		{ 4, 4, 12, 30, 0x1000, 1, 0xfffffff0, 0xffc0000000 },
++		{ 8, 10, 10, 21, 0x800, 1, 0xfffffffc00, 0x3fe00000 },
++		{ 8, 12, 12, 14, 0x200, 1, 0xfffffff000, 0x1fc000 },
++	};
++	static const u64 gvas[] = { AGX_USC_BASE, AGX_USC_BASE_TWO };
++	u32 B, C, st, hb, ha, pc, pd = 0, pt = 0, ttbr;
++	int i, j, k;
++
++	B = agx->B = agx_alloc(agx, 0x8000, 0x4000);	/* RegionB */
++	C = agx->C = agx_alloc(agx, 0x10000, 0x4000);	/* RegionC */
++	/* Firmware mem-desc ring: {state, 256 entries of 0x14}. */
++	st = agx_alloc(agx, 0x4000, 0x4000);
++	put64(agx, st, fw_va(agx_alloc(agx, 0x100, 0x100)));
++	put64(agx, st + 8, fw_va(agx_alloc(agx, 0x100 * 0x14, 0x4000)));
++	/* 12 run queues, DevCtrl, Event, FWLog, KTrace, Stats */
++	for (i = 0; i < NR_CHANNELS; i++) {
++		agx->chan_state[i] = agx_alloc(agx, 0x100, 0x100);
++		agx->chan_ring[i] = agx_alloc(agx, rings[i], 0x4000);
++		put64(agx, B + i * 0x10, fw_va(agx->chan_state[i]));
++		put64(agx, B + i * 0x10 + 8, fw_va(agx->chan_ring[i]));
++	}
++	hb = agx_alloc(agx, 0x4000, 0x4000);
++	for (i = 0; i < ARRAY_SIZE(bufs); i++)
++		put64(agx, B + bufs[i].off, fw_va(agx_alloc(agx, bufs[i].size, 0x4000)));
++	put64(agx, B + 0x1a0, fw_va(hb));
++	put64(agx, B + 0x1a8, fw_va(hb));
++	ha = fw_off(get_unaligned_le64(agx->buf + B + 0x188));
++	agx->stats_cp = fw_off(get_unaligned_le64(agx->buf + B + 0x180));
++	agx->gen_fw = fw_off(get_unaligned_le64(agx->buf + B + 0x1b0));
++
++	/* hwdata B IO maps, 0x20 each: phys, fw va (firmware fills it), size, rw */
++	put64(agx, hb + 0x640, agx->fender);
++	put64(agx, hb + 0x650, 0x20000);
++	put32(agx, hb + 0x658, 1);
++	put64(agx, hb + 0x6a0, agx->sgx);
++	put64(agx, hb + 0x6b0, 0x20000);
++	put32(agx, hb + 0x6b8, 1);
++	/*
++	 * The firmware maps the others only when the PA is set (FUN_00028ad0)
++	 * but uses them anyway, so point them at scratch RAM.
++	 */
++	for (i = 0; i < ARRAY_SIZE(scratch_maps); i++) {
++		put64(agx, hb + scratch_maps[i], agx->pa + agx_alloc(agx, 0x8000, 0x4000));
++		put64(agx, hb + scratch_maps[i] + 0x10, 0x8000);
++		put32(agx, hb + scratch_maps[i] + 0x18, 1);
++	}
++	/* Real power mode: the firmware asks Fender for a perf state. */
++	put32(agx, hb + 0x958, 1);
++	put32(agx, hb + 0x960, 1);
++	/*
++	 * Sample periods in 24 MHz ticks, 16 ms. At 0 the power thread's
++	 * timers fire back to back and starve agx_background.
++	 */
++	put32(agx, hb + 0x988, 16000 * 24);
++	put32(agx, ha + 4, 16000 * 24);
++	/* Highest pstate; the DVFS loop in FUN_00020b44 walks down from it. */
++	put32(agx, hb + 0xa6c, ARRAY_SIZE(mhz) - 1);
++	/* VA bases; power-up loads +0x18 into RGX 0x10000. */
++	put64(agx, hb, 0x1400000000);
++	put64(agx, hb + 8, 0xffc00000);
++	put64(agx, hb + 0x10, AGX_USC_BASE);
++	put64(agx, hb + 0x18, AGX_USC_BASE);
++	put64(agx, hb + 0x20, 0x18ffff8000);
++	/*
++	 * Unit masks for TA, 3D and CP, copied by FUN_000157b4. At 0 the
++	 * scheduler never finds a free unit.
++	 */
++	put32(agx, hb + 0x16d0, 3);
++	put32(agx, hb + 0x16d4, 7);
++	put32(agx, hb + 0x16d8, 1);
++	for (i = 0; i < ARRAY_SIZE(mhz); i++) {
++		put32(agx, hb + 0xa70 + 4 * i, mhz[i]);
++		for (j = 0; j < 8; j++) {
++			put32(agx, hb + 0xab0 + 0x20 * i + 4 * j, mv[i]);
++			put32(agx, hb + 0xcb0 + 0x20 * i + 4 * j, mv_sram[i]);
++		}
++	}
++
++	/*
++	 * GPU VM, a PowerVR Rogue S7 MMU with 16K pages. Page catalogue u32
++	 * (pd >> 12) << 4 | 1 for VA[39:30], page directory pt | 3 for
++	 * VA[29:21], page table page | 1 for VA[20:14]. Both bases map the
++	 * whole chunk.
++	 */
++	pc = agx_alloc(agx, 0x4000, 0x4000);
++	for (k = 0; k < ARRAY_SIZE(gvas); k++) {
++		pd = agx_alloc(agx, 0x4000, 0x4000);
++		put32(agx, pc + (gvas[k] >> 30) * 4, (agx->pa + pd) >> 12 << 4 | 1);
++		for (i = 0; i < AGX_CHUNK_SIZE >> 14; i++) {
++			if (i % 128 == 0) {
++				pt = agx_alloc(agx, 0x400, 0x400);
++				put64(agx, pd + ((gvas[k] >> 21) & 0x1ff) * 8 + i / 128 * 8,
++				      agx->pa + pt + 3);
++			}
++			put64(agx, pt + i % 128 * 8, agx->pa + i * 0x4000 + 1);
++		}
++	}
++	/*
++	 * Per-context TLB generations, page catalogues, and the contexts
++	 * FUN_00026338 loads at every power-up.
++	 */
++	agx->gen = agx_alloc(agx, 0x100, 0x100);
++	put64(agx, C + 0x9150, fw_va(agx->gen));
++	ttbr = agx_alloc(agx, 0x4000, 0x4000);
++	put64(agx, C + 0x9158, fw_va(ttbr));
++	agx->pc[AGX_KERNEL_CTX] = pc;
++	/*
++	 * Every user context gets an empty page catalogue now and is loaded at
++	 * every power-up (32 contexts per mask word), so a new VM only fills
++	 * one in and bumps its TLB generation.
++	 */
++	for (i = AGX_FIRST_USER_CTX; i < AGX_NR_CTX; i++)
++		agx->pc[i] = agx_alloc(agx, 0x1000, 0x1000);
++	for (i = AGX_KERNEL_CTX; i < AGX_NR_CTX; i++) {
++		put64(agx, ttbr + i * 8, agx->pa + agx->pc[i]);
++		put32(agx, C + 0x9160 + i / 32 * 4, get32(agx, C + 0x9160 + i / 32 * 4) | BIT(i % 32));
++	}
++	/* All trace categories, drained in agx_drain(). */
++	put32(agx, C, 0xff);
++	/* The first power-up installs the job handlers only when set. */
++	put32(agx, C + 0xb1cc, 1);
++
++	/* Mem-desc table: va, pa >> 12, 0, 16K pages, flags */
++	put_unaligned_le64(AGX_CHUNK_VA, table);
++	put_unaligned_le32(agx->pa >> 12, table + 8);
++	put_unaligned_le16(AGX_CHUNK_SIZE >> 14, table + 0x10);
++	put_unaligned_le16(1, table + 0x12);
++
++	put_unaligned_le64(fw_va(B), init + 3 * 8);
++	put_unaligned_le64(fw_va(C), init + 4 * 8);
++	put_unaligned_le64(fw_va(st), init + 5 * 8);
++	/* MMU format for the firmware's own walks (FUN_00026744) */
++	put_unaligned_le16(0x4000, init + 0x30);
++	*(u8 *)(init + 0x32) = 14;
++	*(u8 *)(init + 0x33) = ARRAY_SIZE(lv);
++	for (i = 0; i < ARRAY_SIZE(lv); i++) {
++		void *p = init + 0x34 + i * 0x20;
++
++		*(u8 *)p = lv[i].esz;
++		*(u8 *)(p + 1) = lv[i].pas;
++		*(u8 *)(p + 2) = lv[i].pas2;
++		*(u8 *)(p + 3) = lv[i].ish;
++		put_unaligned_le16(lv[i].n, p + 4);
++		put_unaligned_le16(0x4000, p + 6);
++		put_unaligned_le64(lv[i].valid, p + 8);
++		put_unaligned_le64(lv[i].pam, p + 0x10);
++		put_unaligned_le64(lv[i].im, p + 0x18);
++	}
++	put_unaligned_le64(table_pa, init + 0x13 * 8);
++	put_unaligned_le64(1, init + 0x14 * 8);
++}
++
++/* Event and KTrace: mark everything read, so the rings never fill. */
++static void agx_drain(struct agx_device *agx)
++{
++	static const struct { int ch; u32 count; } rings[] = {
++		{ CH_EVENT, 0x100 }, { CH_KTRACE, 0x200 },
++	};
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(rings); i++) {
++		u32 st = agx->chan_state[rings[i].ch];
++		u32 w = READ_ONCE(*(u32 *)(agx->buf + st + 0x20));
++
++		if (w < rings[i].count)
++			WRITE_ONCE(*(u32 *)(agx->buf + st), w);
++	}
++}
++
++static void agx_doorbell(struct agx_device *agx, u32 ch)
++{
++	wmb();
++	apple_rtkit_send_message(agx->rtk, EP_INTS, MSG_DOORBELL | ch, NULL, false);
++}
++
++/*
++ * One command queue on the CP channel, CommandQueueInfo as in m1n1 with the
++ * context pointer at +0xa4.
++ */
++static void agx_queue(struct agx_device *agx)
++{
++	u32 ptrs, jl, gbuf, ctx, info;
++	int i;
++
++	ptrs = agx_alloc(agx, 0x100, 0x100);
++	agx->ring = agx_alloc(agx, 0x800, 0x100);
++	jl = agx_alloc(agx, 0x100, 0x100);
++	gbuf = agx_alloc(agx, 0x4000, 0x4000);
++	ctx = agx_alloc(agx, 0x100, 0x100);
++	info = agx->info = agx_alloc(agx, 0x100, 0x100);
++
++	put32(agx, ptrs + 0x50, 0x100);
++	/* job list, a TAILQ head {first, last = &first} */
++	put64(agx, jl + 8, fw_va(jl));
++	*(u8 *)(agx->buf + ctx) = 0xff;
++	*(u8 *)(agx->buf + ctx + 1) = 0xff;
++	*(u8 *)(agx->buf + ctx + 5) = 1;
++	*(u8 *)(agx->buf + ctx + 0x1e) = 0xff;
++	*(u8 *)(agx->buf + ctx + 0x23) = 2;
++	put64(agx, info, fw_va(ptrs));
++	put64(agx, info + 8, fw_va(agx->ring));
++	put64(agx, info + 0x10, fw_va(jl));
++	put64(agx, info + 0x18, fw_va(gbuf));
++	put32(agx, info + 0x2c, -1);
++	put64(agx, info + 0x38, 0xffffffffffff0000);
++	put32(agx, info + 0x40, 1);
++	put32(agx, info + 0x48, 1);
++	put32(agx, info + 0x4c, -1);
++	put32(agx, info + 0x50, 0x1001);
++	put32(agx, info + 0x54, -1);
++	put64(agx, info + 0xa4, fw_va(ctx));
++
++	for (i = 0; i < NR_SLOTS; i++) {
++		agx->slot[i].cmd = agx_alloc(agx, 0x300, 0x100);
++		agx->slot[i].evc = agx_alloc(agx, 0x100, 0x100);
++		agx->slot[i].useq = agx_alloc(agx, 0x200, 0x100);
++		agx->slot[i].scratch = agx_alloc(agx, 0x100, 0x100);
++		agx->slot[i].args = agx_alloc(agx, 0x4000, 0x4000);
++	}
++}
++
++/*
++ * The run message is {type, info, head, queue index, flush}: FUN_000075fc
++ * stores head at info+0x28 and FUN_0001fb60 runs the ring up to it. Later
++ * commands go in the same queue with the next head. Both rings hold
++ * RING_SIZE entries.
++ */
++static void agx_submit(struct agx_device *agx, u32 cmd, u32 n)
++{
++	u32 st = agx->chan_state[CH_CP];
++	u32 idx = n % RING_SIZE, head = (n + 1) % RING_SIZE;
++	u32 msg = agx->chan_ring[CH_CP] + idx * 0x30;
++
++	put64(agx, agx->ring + idx * 8, fw_va(cmd));
++	memset(agx->buf + msg, 0, 0x30);
++	put32(agx, msg, CH_CP);
++	put64(agx, msg + 4, fw_va(agx->info));
++	put32(agx, msg + 0xc, head);
++	put32(agx, msg + 0x10, EV);
++	put32(agx, msg + 0x14, 1);
++	put32(agx, st + 0x20, head);
++	agx_doorbell(agx, CH_CP);
++}
++
++/*
++ * A compute command in MMU context ctx that runs the CDM control stream at
++ * GPU VA stream. args is a zeroed scratch page mapped in that context, for
++ * RGX 0x14020. Microsequence as the kext builds it (FUN_fffffff0084d0f08):
++ * StartCompute, wait for the CDM interrupt, finalize, end. Returns the
++ * offset of the stamp that reads DONE_STAMP once the job is done.
++ */
++static u32 agx_run(struct agx_device *agx, u32 ctx, u64 args, u64 stream)
++{
++	u32 n = agx->nr_cmds++;
++	u32 cmd = agx->slot[n % NR_SLOTS].cmd, evc = agx->slot[n % NR_SLOTS].evc;
++	u32 useq = agx->slot[n % NR_SLOTS].useq;
++	u32 scratch = agx->slot[n % NR_SLOTS].scratch;
++	u32 fin = useq + 0x64 + 4;
++
++	memset(agx->buf + cmd, 0, 0x300);
++	memset(agx->buf + evc, 0, 0x100);
++	memset(agx->buf + useq, 0, 0x200);
++	memset(agx->buf + scratch, 0, 0x100);
++	put64(agx, scratch + 0x20, 1);			/* kick gate */
++
++	/* StartCompute, 0x64 bytes */
++	put32(agx, useq, 0x29);
++	put64(agx, useq + 4, fw_va(cmd + 0x1c));
++	put64(agx, useq + 0xc, fw_va(cmd + 0x70));
++	put64(agx, useq + 0x14, fw_va(agx->stats_cp));
++	put64(agx, useq + 0x1c, fw_va(agx->info));
++	put32(agx, useq + 0x24, ctx);
++	put32(agx, useq + 0x2c, ctx);
++	put64(agx, useq + 0x3c, fw_va(cmd + 0x1fc));
++	put64(agx, useq + 0x4c, fw_va(cmd + 0x2d8));
++	put64(agx, useq + 0x5c, fw_va(scratch + 0x20));
++	/* wait for the CDM interrupt */
++	put32(agx, useq + 0x64, 0x41);
++	/* finalize, 0x44 bytes */
++	put32(agx, fin, 0x2a);
++	put64(agx, fin + 4, fw_va(agx->stats_cp));
++	put64(agx, fin + 0xc, fw_va(agx->info));
++	put32(agx, fin + 0x14, ctx);
++	put64(agx, fin + 0x18, fw_va(cmd + 0x1fc));
++	put64(agx, fin + 0x28, fw_va(scratch + 8));
++	put32(agx, fin + 0x30, 1);
++	put32(agx, fin + 0x38, -(0x64 + 4));
++	put64(agx, fin + 0x3c, fw_va(cmd + 0x2d8));
++	/* end */
++	put32(agx, fin + 0x44, 0x18 | 0x40 << 24);
++
++	put32(agx, cmd, 3);
++	put32(agx, cmd + 0x10, ctx);
++	put64(agx, cmd + 0x14, fw_va(evc));
++	/* event control: +0 points at the counter finalize bumps */
++	put64(agx, evc, fw_va(scratch + 8));
++	put64(agx, cmd + 0x70, args);
++	put64(agx, cmd + 0x78, stream);
++	put64(agx, cmd + 0x1f0, fw_va(useq));
++	put32(agx, cmd + 0x1f8, fin + 0x48 - useq);
++	/* completion stamp {target, ?, value, event} */
++	put64(agx, cmd + 0x278, fw_va(scratch + 0x10));
++	put32(agx, cmd + 0x288, DONE_STAMP);
++	put32(agx, cmd + 0x28c, EV);
++
++	agx_submit(agx, cmd, n);
++	return scratch + 0x10;
++}
++
++/*
++ * CDM: launch with header 3 (bit 0 always set, one uniform block), the
++ * state block with its low bits 4 (one block of 8 registers), grid and
++ * threadgroup size; barrier; terminate.
++ */
++static u32 agx_compute(struct agx_device *agx, u32 state, u32 grid, u32 group)
++{
++	u32 stream = agx_alloc(agx, 0x4000, 0x4000);
++	const u32 words[] = { 3, (gpu_va(state) & 0xffffffc0) | 4, grid, 1, 1,
++			      group, 1, 1, 0xc0000160, 0x80000000 };
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(words); i++)
++		put32(agx, stream + 4 * i, words[i]);
++	return agx_run(agx, AGX_KERNEL_CTX, gpu_va(agx->slot[0].args), gpu_va(stream));
++}
++
++/*
++ * Code and state block. The state block is uniform DMAs (3 | first << 9 |
++ * count << 21 | VA << 24, 32-bit registers from u0), the shader word (code
++ * >> 6 at bit 38, 0x9 at 31:28, one block of 8 registers), then 0x0108 for
++ * no preshader. G11 stop is 0x0801.
++ */
++static u32 agx_shader(struct agx_device *agx, const u8 *prog, size_t len,
++		      const u32 *uniforms, int nr_uniforms)
++{
++	u32 code = agx_alloc(agx, 0x400, 0x4000);
++	u32 state = agx_alloc(agx, 0x40, 0x40);
++	u32 o = state;
++	int i;
++
++	memcpy(agx->buf + code, prog, len);
++	if (nr_uniforms) {
++		u32 ubuf = agx_alloc(agx, nr_uniforms * 4, 0x100);
++
++		for (i = 0; i < nr_uniforms; i++)
++			put32(agx, ubuf + 4 * i, uniforms[i]);
++		put64(agx, o, gpu_va(ubuf) << 24 | (u64)nr_uniforms << 21 | 3);
++		o += 8;
++	}
++	put64(agx, o, (gpu_va(code) & 0xffffffff) >> 6 << 38 | 0x90000000 | 0x1f);
++	put_unaligned_le16(0x0108, agx->buf + o + 8);
++	return state;
++}
++
++static u32 agx_out(struct agx_device *agx, int n)
++{
++	u32 o = agx_alloc(agx, n * 4, 0x4000);
++	int i;
++
++	for (i = 0; i < n; i++)
++		put32(agx, o + 4 * i, 0xdeadbeef);
++	return o;
++}
++
++static int agx_wait(struct agx_device *agx, u32 stamp, u32 timeout_ms)
++{
++	u32 v;
++	int ret;
++
++	ret = readx_poll_timeout(READ_ONCE, *(u32 *)(agx->buf + stamp), v,
++				 v == DONE_STAMP, 100, timeout_ms * 1000ULL);
++	if (ret)
++		agx->wedged = true;
++	return ret;
++}
++
++static void agx_check(struct agx_device *agx, const char *name, u32 stamp, u32 o,
++		      int n, u32 base)
++{
++	int i, bad = 0, first = -1;
++
++	if (agx_wait(agx, stamp, 2000)) {
++		dev_err(agx->dev, "%s: job did not complete\n", name);
++		return;
++	}
++	for (i = 0; i < n; i++) {
++		if (get32(agx, o + 4 * i) != base + i) {
++			bad++;
++			if (first < 0)
++				first = i;
++		}
++	}
++	if (bad)
++		dev_err(agx->dev, "%s: %d of %d wrong, first [%d] = %#x\n", name, bad,
++			n, first, get32(agx, o + 4 * first));
++	else
++		dev_info(agx->dev, "%s: ok\n", name);
++}
++
++/*
++ * get_sr r3, thread_position_in_grid.x; mov_imm r0, r1 = out; device_store
++ * r3 to r0_r1 + r3 * 4; wait; stop.
++ */
++static void agx_test_tid(struct agx_device *agx)
++{
++	u8 prog[] = {
++		0xf2, 0x0d, 0x10, 0x04,
++		0x62, 0x01, 0, 0, 0, 0,
++		0x62, 0x05, 0, 0, 0, 0,
++		0x45, 0x19, 0x60, 0x06, 0x00, 0xc0, 0x12, 0x00,
++		0x38, 0x00, 0x08, 0x01,
++	};
++	u32 o = agx_out(agx, 256);
++
++	put_unaligned_le32(lower_32_bits(gpu_va(o)), prog + 6);
++	put_unaligned_le32(upper_32_bits(gpu_va(o)), prog + 12);
++	agx_check(agx, "tid", agx_compute(agx, agx_shader(agx, prog, sizeof(prog), NULL, 0),
++					  256, 32), o, 256, 0);
++}
++
++/*
++ * u0_u1 = out, u2 = 0x5a000000. get_sr r3; iadd r4 = r3 + u2; device_store
++ * r4 to u0_u1 + r3 * 4; wait; stop.
++ */
++static void agx_test_uniform(struct agx_device *agx)
++{
++	static const u8 prog[] = {
++		0xf2, 0x0d, 0x10, 0x04,
++		0x0e, 0x11, 0x46, 0x42, 0x18, 0x00, 0x00, 0x00,
++		0x45, 0x21, 0x60, 0x0e, 0x00, 0xc0, 0x12, 0x00,
++		0x38, 0x00, 0x08, 0x01,
++	};
++	u32 o = agx_out(agx, 64);
++	u32 u[] = { lower_32_bits(gpu_va(o)), upper_32_bits(gpu_va(o)), 0x5a000000 };
++
++	agx_check(agx, "uniform", agx_compute(agx, agx_shader(agx, prog, sizeof(prog), u, 3),
++					      64, 32), o, 64, 0x5a000000);
++}
++
++static int agx_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
++{
++	struct agx_device *agx = cookie;
++	int i;
++
++	/* Address 0 asks the host to pick one. */
++	if (!bfr->iova) {
++		bfr->buffer = dmam_alloc_coherent(agx->dev, bfr->size, &bfr->iova,
++						  GFP_KERNEL);
++		return bfr->buffer ? 0 : -ENOMEM;
++	}
++
++	for (i = 0; i < agx->nsegs; i++) {
++		u64 iova = le64_to_cpu(agx->segs[i].iova);
++		u32 size = le32_to_cpu(agx->segs[i].size);
++
++		if (bfr->iova < iova || bfr->iova + bfr->size > iova + size)
++			continue;
++
++		bfr->buffer = devm_memremap(agx->dev, le64_to_cpu(agx->segs[i].phys) +
++					    bfr->iova - iova, bfr->size, MEMREMAP_WB);
++		return PTR_ERR_OR_ZERO(bfr->buffer);
++	}
++
++	dev_warn(agx->dev, "refusing buffer of %#zx bytes at %pad\n", bfr->size,
++		 &bfr->iova);
++	return -ENOMEM;
++}
++
++/* devm frees and unmaps the buffers with the device. */
++static void agx_shmem_destroy(void *cookie, struct apple_rtkit_shmem *bfr)
++{
++}
++
++static void agx_recv(void *cookie, u8 ep, u64 msg)
++{
++	struct agx_device *agx = cookie;
++
++	/* 0x42 only says "check the channels". */
++	if (msg == MSG_CHECK && READ_ONCE(agx->ready))
++		agx_drain(agx);
++	else if (msg != MSG_CHECK)
++		dev_info(agx->dev, "ep %#x: %#018llx\n", ep, msg);
++}
++
++static void agx_crashed(void *cookie, const void *log, size_t size)
++{
++	struct agx_device *agx = cookie;
++
++	dev_err(agx->dev, "firmware crashed\n");
++}
++
++const struct apple_rtkit_ops agx_rtk_ops = {
++	.crashed = agx_crashed,
++	.recv_message = agx_recv,
++	.shmem_setup = agx_shmem_setup,
++	.shmem_destroy = agx_shmem_destroy,
++};
++
++
++/*
++ * Boot the firmware, hand it the init block and bring the GPU up. The
++ * firmware cannot be restarted, so this runs once per boot.
++ */
++int agx_fw_init(struct agx_device *agx, void __iomem *asc)
++{
++	struct device *dev = agx->dev;
++	dma_addr_t init_pa, table_pa;
++	void *init, *table, *buf;
++	u32 v;
++	int ret;
++
++	agx->rtk = devm_apple_rtkit_init(dev, agx, NULL, 0, &agx_rtk_ops);
++	if (IS_ERR(agx->rtk))
++		return dev_err_probe(dev, PTR_ERR(agx->rtk), "RTKit init failed\n");
++
++	writel(ASC_CPU_CONTROL_RUN, asc + ASC_CPU_CONTROL);
++
++	ret = apple_rtkit_boot(agx->rtk);
++	if (ret)
++		return dev_err_probe(dev, ret, "firmware did not boot\n");
++	ret = apple_rtkit_start_ep(agx->rtk, EP_MSGS);
++	if (!ret)
++		ret = apple_rtkit_start_ep(agx->rtk, EP_INTS);
++	if (ret)
++		return dev_err_probe(dev, ret, "endpoints did not start\n");
++	msleep(500);
++
++	init = dmam_alloc_coherent(dev, SZ_16K, &init_pa, GFP_KERNEL);
++	table = dmam_alloc_coherent(dev, SZ_16K, &table_pa, GFP_KERNEL);
++	buf = dmam_alloc_coherent(dev, AGX_CHUNK_SIZE, &agx->pa, GFP_KERNEL);
++	if (!init || !table || !buf)
++		return -ENOMEM;
++	agx->buf = buf;
++	agx_build(agx, init, table, table_pa);
++	wmb();
++	WRITE_ONCE(agx->ready, true);
++
++	apple_rtkit_send_message(agx->rtk, EP_MSGS, MSG_INIT | init_pa, NULL, false);
++	ret = readx_poll_timeout(READ_ONCE, *(u32 *)(buf + agx->C + 0xb198), v, v,
++				 10000, 2000000);
++	if (ret)
++		return dev_err_probe(dev, ret, "firmware did not take the init block\n");
++
++	/*
++	 * Device control type 0x1b only stores its argument, but it also
++	 * brings the GPU up, which sets up the scheduler state jobs need and
++	 * loads every context's page catalogue.
++	 */
++	put32(agx, agx->chan_ring[CH_DEVCTRL], 0x1b);
++	put64(agx, agx->chan_ring[CH_DEVCTRL] + 4, 0x1122334455667788);
++	put32(agx, agx->chan_state[CH_DEVCTRL] + 0x20, 1);
++	agx_doorbell(agx, 0x11);
++	ret = readx_poll_timeout(READ_ONCE, *(u32 *)(buf + agx->chan_state[CH_DEVCTRL]), v,
++				 v == 1, 10000, 3000000);
++	if (ret)
++		return dev_err_probe(dev, ret, "device control message not taken\n");
++	msleep(1000);
++
++	agx_queue(agx);
++	dev_info(dev, "firmware up, chunk at %pad\n", &agx->pa);
++	return 0;
++}
++
++int agx_fw_run(struct agx_device *agx, u32 ctx, u64 args, u64 stream, u32 timeout_ms)
++{
++	int ret;
++
++	mutex_lock(&agx->job_lock);
++	/* After a timeout the firmware may still own a job slot. */
++	if (agx->wedged)
++		ret = -EIO;
++	else
++		ret = agx_wait(agx, agx_run(agx, ctx, args, stream), timeout_ms);
++	mutex_unlock(&agx->job_lock);
++	return ret;
++}
++
++/*
++ * After a page table change. FUN_00026514 compares each context's
++ * generation with its own copy (RegionB+0x1b0) before the context's next
++ * job, flushes the TLB if they differ and copies ours over; bits 31:22 ask
++ * for the full flush. Starting from its copy keeps them different however
++ * many changes come before that job.
++ */
++void agx_fw_flush_tlb(struct agx_device *agx, u32 ctx)
++{
++	wmb();
++	WRITE_ONCE(*(u32 *)(agx->buf + agx->gen + ctx * 4),
++		   READ_ONCE(*(u32 *)(agx->buf + agx->gen_fw + ctx * 4)) + BIT(22));
++}
++
++void agx_fw_selftest(struct agx_device *agx)
++{
++	mutex_lock(&agx->job_lock);
++	agx_test_tid(agx);
++	agx_test_uniform(agx);
++	mutex_unlock(&agx->job_lock);
++}
+diff --git a/drivers/gpu/drm/agx/agx_vm.c b/drivers/gpu/drm/agx/agx_vm.c
+new file mode 100644
+index 000000000..d49f0c54e
+--- /dev/null
++++ b/drivers/gpu/drm/agx/agx_vm.c
+@@ -0,0 +1,314 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/*
++ * GPU VMs. The MMU is a PowerVR Rogue S7 with 16K pages: a page catalogue
++ * of u32 entries (pd >> 12) << 4 | 1 for VA[39:30], page directories of u64
++ * entries pt | 3 for VA[29:21] and page tables of u64 entries page | 1 for
++ * VA[20:14], bit 1 marking a page read-only.
++ *
++ * Each VM owns one MMU context. Its page catalogue sits in the firmware
++ * chunk and is loaded by the firmware at every power-up; page directories
++ * and tables come from DMA pools. After a change the context's TLB
++ * generation is bumped and the firmware flushes before its next job.
++ *
++ * Copyright (c) 2026 kiki <kieran@lavato.net>
++ */
++
++#include <drm/drm_gem.h>
++#include <drm/drm_gem_shmem_helper.h>
++#include <linux/dma-mapping.h>
++#include <linux/dmapool.h>
++#include <linux/list.h>
++#include <linux/scatterlist.h>
++#include <linux/slab.h>
++
++#include "agx.h"
++
++#define PC_ENTRIES	1024
++#define PD_ENTRIES	512
++#define PT_ENTRIES	128
++#define AGX_PTE_VALID	BIT(0)
++#define AGX_PTE_RO	BIT(1)
++
++struct agx_pt {
++	u64 *cpu;
++	dma_addr_t dma;
++};
++
++struct agx_pd {
++	u64 *cpu;
++	dma_addr_t dma;
++	struct agx_pt pt[PD_ENTRIES];
++};
++
++struct agx_mapping {
++	struct list_head node;
++	u64 addr, range;
++	struct drm_gem_object *obj;
++};
++
++struct agx_vm {
++	struct agx_device *agx;
++	u32 ctx;
++	struct mutex lock;
++	struct list_head mappings;
++	u64 kernel_start, kernel_end;
++	void *scratch;		/* for RGX 0x14020, at kernel_start */
++	dma_addr_t scratch_dma;
++	struct agx_pd *pd[PC_ENTRIES];
++};
++
++static u32 *pc_entry(struct agx_vm *vm, u32 i)
++{
++	return vm->agx->buf + vm->agx->pc[vm->ctx] + i * 4;
++}
++
++static int agx_set_pte(struct agx_vm *vm, u64 va, u64 pte)
++{
++	struct agx_device *agx = vm->agx;
++	u32 i0 = (va >> 30) & (PC_ENTRIES - 1);
++	u32 i1 = (va >> 21) & (PD_ENTRIES - 1);
++	u32 i2 = (va >> 14) & (PT_ENTRIES - 1);
++	struct agx_pd *pd = vm->pd[i0];
++	struct agx_pt *pt;
++
++	if (!pd) {
++		if (!pte)
++			return 0;
++		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
++		if (!pd)
++			return -ENOMEM;
++		pd->cpu = dma_pool_zalloc(agx->pd_pool, GFP_KERNEL, &pd->dma);
++		if (!pd->cpu) {
++			kfree(pd);
++			return -ENOMEM;
++		}
++		vm->pd[i0] = pd;
++		WRITE_ONCE(*pc_entry(vm, i0), (pd->dma >> 12) << 4 | 1);
++	}
++	pt = &pd->pt[i1];
++	if (!pt->cpu) {
++		if (!pte)
++			return 0;
++		pt->cpu = dma_pool_zalloc(agx->pt_pool, GFP_KERNEL, &pt->dma);
++		if (!pt->cpu)
++			return -ENOMEM;
++		WRITE_ONCE(pd->cpu[i1], pt->dma | 3);
++	}
++	WRITE_ONCE(pt->cpu[i2], pte);
++	return 0;
++}
++
++static void clear_range(struct agx_vm *vm, u64 addr, u64 range)
++{
++	u64 va;
++
++	for (va = addr; va < addr + range; va += AGX_PAGE)
++		agx_set_pte(vm, va, 0);
++}
++
++static bool in_vm(u64 addr, u64 range)
++{
++	return addr >= AGX_VM_START && range <= AGX_VM_END - addr;
++}
++
++struct agx_vm *agx_vm_create(struct agx_device *agx, u64 kernel_start, u64 kernel_end)
++{
++	struct agx_vm *vm;
++	int ctx, ret;
++
++	if (!IS_ALIGNED(kernel_start | kernel_end, AGX_PAGE) || kernel_end < kernel_start + AGX_PAGE ||
++	    !in_vm(kernel_start, kernel_end - kernel_start))
++		return ERR_PTR(-EINVAL);
++
++	vm = kzalloc(sizeof(*vm), GFP_KERNEL);
++	if (!vm)
++		return ERR_PTR(-ENOMEM);
++	vm->agx = agx;
++	vm->kernel_start = kernel_start;
++	vm->kernel_end = kernel_end;
++	mutex_init(&vm->lock);
++	INIT_LIST_HEAD(&vm->mappings);
++
++	mutex_lock(&agx->ctx_lock);
++	ctx = find_next_zero_bit(agx->ctx_used, AGX_NR_CTX, AGX_FIRST_USER_CTX);
++	if (ctx < AGX_NR_CTX)
++		set_bit(ctx, agx->ctx_used);
++	mutex_unlock(&agx->ctx_lock);
++	if (ctx >= AGX_NR_CTX) {
++		kfree(vm);
++		return ERR_PTR(-EBUSY);
++	}
++	vm->ctx = ctx;
++
++	vm->scratch = dma_alloc_coherent(agx->dev, AGX_PAGE, &vm->scratch_dma, GFP_KERNEL);
++	ret = vm->scratch ? agx_set_pte(vm, kernel_start, vm->scratch_dma | AGX_PTE_VALID) : -ENOMEM;
++	if (ret) {
++		agx_vm_destroy(vm);
++		return ERR_PTR(ret);
++	}
++	agx_fw_flush_tlb(agx, ctx);
++	return vm;
++}
++
++void agx_vm_destroy(struct agx_vm *vm)
++{
++	struct agx_device *agx = vm->agx;
++	struct agx_mapping *m, *tmp;
++	int i, j;
++
++	list_for_each_entry_safe(m, tmp, &vm->mappings, node) {
++		drm_gem_object_put(m->obj);
++		kfree(m);
++	}
++	for (i = 0; i < PC_ENTRIES; i++) {
++		struct agx_pd *pd = vm->pd[i];
++
++		WRITE_ONCE(*pc_entry(vm, i), 0);
++		if (!pd)
++			continue;
++		for (j = 0; j < PD_ENTRIES; j++)
++			if (pd->pt[j].cpu)
++				dma_pool_free(agx->pt_pool, pd->pt[j].cpu, pd->pt[j].dma);
++		dma_pool_free(agx->pd_pool, pd->cpu, pd->dma);
++		kfree(pd);
++	}
++	agx_fw_flush_tlb(agx, vm->ctx);
++	if (vm->scratch)
++		dma_free_coherent(agx->dev, AGX_PAGE, vm->scratch, vm->scratch_dma);
++
++	mutex_lock(&agx->ctx_lock);
++	clear_bit(vm->ctx, agx->ctx_used);
++	mutex_unlock(&agx->ctx_lock);
++	kfree(vm);
++}
++
++static bool overlaps(struct agx_vm *vm, u64 addr, u64 range)
++{
++	struct agx_mapping *m;
++
++	if (addr < vm->kernel_end && vm->kernel_start < addr + range)
++		return true;
++	list_for_each_entry(m, &vm->mappings, node)
++		if (addr < m->addr + m->range && m->addr < addr + range)
++			return true;
++	return false;
++}
++
++/*
++ * Map range bytes of obj from offset at addr. With single, map the page at
++ * offset over the whole range. Binds may not overlap existing ones.
++ */
++int agx_vm_bind(struct agx_vm *vm, struct drm_gem_object *obj, u64 offset, u64 range,
++		u64 addr, bool write, bool single)
++{
++	struct sg_table *sgt;
++	struct scatterlist *sg;
++	struct agx_mapping *m;
++	u64 pte_flags = AGX_PTE_VALID | (write ? 0 : AGX_PTE_RO);
++	u64 va = addr, skip = offset;
++	int i, ret;
++
++	if (!range || !IS_ALIGNED(offset | range | addr, AGX_PAGE) || !in_vm(addr, range) ||
++	    offset >= obj->size || (!single && range > obj->size - offset))
++		return -EINVAL;
++
++	sgt = drm_gem_shmem_get_pages_sgt(to_drm_gem_shmem_obj(obj));
++	if (IS_ERR(sgt))
++		return PTR_ERR(sgt);
++
++	m = kzalloc(sizeof(*m), GFP_KERNEL);
++	if (!m)
++		return -ENOMEM;
++
++	mutex_lock(&vm->lock);
++	ret = -EBUSY;
++	if (overlaps(vm, addr, range))
++		goto err;
++
++	for_each_sgtable_dma_sg(sgt, sg, i) {
++		dma_addr_t dma = sg_dma_address(sg);
++		u64 len = sg_dma_len(sg);
++
++		if (skip >= len) {
++			skip -= len;
++			continue;
++		}
++		dma += skip;
++		len -= skip;
++		skip = 0;
++		if (single) {
++			for (; va < addr + range; va += AGX_PAGE) {
++				ret = agx_set_pte(vm, va, dma | pte_flags);
++				if (ret)
++					goto err_clear;
++			}
++			break;
++		}
++		for (; len && va < addr + range; len -= AGX_PAGE, dma += AGX_PAGE, va += AGX_PAGE) {
++			ret = agx_set_pte(vm, va, dma | pte_flags);
++			if (ret)
++				goto err_clear;
++		}
++		if (va == addr + range)
++			break;
++	}
++	ret = -EINVAL;
++	if (va != addr + range)
++		goto err_clear;
++
++	drm_gem_object_get(obj);
++	m->obj = obj;
++	m->addr = addr;
++	m->range = range;
++	list_add(&m->node, &vm->mappings);
++	agx_fw_flush_tlb(vm->agx, vm->ctx);
++	mutex_unlock(&vm->lock);
++	return 0;
++
++err_clear:
++	clear_range(vm, addr, va - addr);
++	agx_fw_flush_tlb(vm->agx, vm->ctx);
++err:
++	mutex_unlock(&vm->lock);
++	kfree(m);
++	return ret;
++}
++
++/* Unmap every binding inside [addr, addr + range); partial ones fail. */
++int agx_vm_unbind(struct agx_vm *vm, u64 addr, u64 range)
++{
++	struct agx_mapping *m, *tmp;
++	int ret = 0;
++
++	mutex_lock(&vm->lock);
++	list_for_each_entry(m, &vm->mappings, node) {
++		if (m->addr < addr + range && addr < m->addr + m->range &&
++		    (m->addr < addr || m->addr + m->range > addr + range)) {
++			ret = -EINVAL;
++			goto out;
++		}
++	}
++	list_for_each_entry_safe(m, tmp, &vm->mappings, node) {
++		if (m->addr < addr || m->addr + m->range > addr + range)
++			continue;
++		clear_range(vm, m->addr, m->range);
++		list_del(&m->node);
++		drm_gem_object_put(m->obj);
++		kfree(m);
++	}
++	agx_fw_flush_tlb(vm->agx, vm->ctx);
++out:
++	mutex_unlock(&vm->lock);
++	return ret;
++}
++
++/* Run a CDM control stream in this VM and wait. Binds wait for it. */
++int agx_vm_run(struct agx_vm *vm, u64 stream, u32 timeout_ms)
++{
++	int ret;
++
++	mutex_lock(&vm->lock);
++	ret = agx_fw_run(vm->agx, vm->ctx, vm->kernel_start, stream, timeout_ms);
++	mutex_unlock(&vm->lock);
++	return ret;
++}

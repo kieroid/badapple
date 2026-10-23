@@ -1,9 +1,8 @@
 # GPU
 
 G11P. `linux-0020` boots the firmware, runs two test kernels at probe and
-gives userspace `/dev/agx` to run compute jobs. `/bin/agx-test` runs the
-Mesa tests through it. `tools/gfx-proxy.py` does the same from the m1n1
-proxy.
+registers a DRM render node for compute. `/bin/agx-test` runs the Mesa tests
+through it. `tools/gfx-proxy.py` does the same from the m1n1 proxy.
 
 ## Firmware
 
@@ -187,23 +186,29 @@ the uniforms Mesa asks for.
 These pass: arithmetic, floats, loops, a preamble, thread and threadgroup ids,
 threadgroup memory with barriers, a reduction, fences and atomics.
 
-## /dev/agx
+## DRM
 
-Root only: every job shares one VM, which also maps the firmware's
-structures.
+`linux-0020` is `drivers/gpu/drm/agx`, a compute-only render node with the
+Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 
-| call | what |
+| | |
 |---|---|
-| `mmap` | the 4 MB heap, at GPU VA 0x1100800000 |
-| `AGX_IOC_INFO` | `{heap_gva, heap_size}` |
-| `AGX_IOC_RUN` | `{stream, timeout_ms}`: run the CDM stream at `stream` in the heap and wait |
+| VMs | one MMU context each, 17 to 63; 16 is the kernel's |
+| VA | 0x10_0000_0000 to 0x80_0000_0000, 16K pages |
+| `usc_exec_base` | must be 0x11 << 32, the base the firmware loads |
+| submit | synchronous; in-syncs waited for, out-syncs signalled after |
+| not yet | render commands, samplers, helper programs, timestamps |
 
-Userspace puts code, the state block, buffers and the CDM stream in the heap.
-The driver reuses four sets of job structures in turn. After a timeout it
-refuses more jobs, since the firmware may still own one.
+Every user context gets a page catalogue at init and is loaded by the
+firmware at every power-up, so a VM only fills its page tables. After a
+change the driver sets the context's TLB generation to the firmware's copy
+plus 1 << 22, and the firmware flushes before that context's next job.
+
+The kernel range each VM reserves holds a zeroed page for RGX 0x14020.
 
 `make agx-test` builds `tools/agx-test.c` static with the kernel's nolibc,
-and the next kernelcache puts it in the initramfs.
+and the next kernelcache puts it in the initramfs. It runs the Mesa tests
+in one VM, then `t_fill` in a second.
 
 ## Queues
 

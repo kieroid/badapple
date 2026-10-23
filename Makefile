@@ -153,7 +153,8 @@ $(IMAGE): FORCE
 	    --disable CONFIG_FW_LOADER_USER_HELPER \
 	    --enable CONFIG_DRM_APPLE_H11P \
 	    --enable CONFIG_INPUT_TOUCHSCREEN \
-	    --enable CONFIG_TOUCHSCREEN_APPLE_MT_SPI $(KCONFIG_EXTRA)
+	    --enable CONFIG_TOUCHSCREEN_APPLE_MT_SPI \
+	    --enable CONFIG_DRM_AGX $(KCONFIG_EXTRA)
 	$(MAKE) -C $(KDIR) $(KBUILD) olddefconfig
 	$(MAKE) -C $(KDIR) $(KBUILD) -j$$(nproc) Image.gz
 

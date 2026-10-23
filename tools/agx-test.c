@@ -2,28 +2,84 @@
 // Copyright (c) 2026 kiki <kieran@lavato.net>
 //
 // Runs the Mesa-compiled kernels from tools/gfx-tests.cl on the GPU through
-// /dev/agx (linux-0020) and checks what they wrote. The same jobs as
-// "tools/gfx-proxy.py clc", built in the heap the driver maps. "make agx-test"
-// builds it static with the kernel's nolibc and puts it in the initramfs.
+// the agx DRM driver (linux-0020, Asahi uAPI) and checks what they wrote. The
+// same jobs as "tools/gfx-proxy.py clc", built in a buffer bound at the USC
+// base. "make agx-test" builds it static with the kernel's nolibc and puts it
+// in the initramfs.
+
+#include <drm/asahi_drm.h>
 
 #include "tests.c"
 
-struct agx_info {
-	uint64_t heap_gva, heap_size;
-};
-
-struct agx_run {
-	uint64_t stream;
-	uint32_t timeout_ms, pad;
-};
-
-#define AGX_IOC_INFO	_IOR('A', 0, struct agx_info)
-#define AGX_IOC_RUN	_IOW('A', 1, struct agx_run)
+#define USC_BASE	0x1100000000ULL
+#define HEAP_SIZE	0x400000
 
 static int fd;
 static uint8_t *heap;
 static uint64_t heap_gva, heap_size, heap_off;
+static uint32_t queue_id, syncobj;
 static int failed;
+
+/* A VM with a heap bound at the USC base and a queue on it. */
+static int setup(const struct drm_asahi_params_global *p)
+{
+	struct drm_asahi_vm_create vm = {
+		.kernel_start = p->vm_start, .kernel_end = p->vm_start + p->vm_kernel_min_size,
+	};
+	struct drm_asahi_gem_create gem = { .size = HEAP_SIZE };
+	struct drm_asahi_gem_mmap_offset mo = { 0 };
+	struct drm_asahi_gem_bind_op op = {
+		.flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE,
+		.range = HEAP_SIZE, .addr = USC_BASE,
+	};
+	struct drm_asahi_vm_bind bind = { .num_binds = 1, .stride = sizeof(op) };
+	struct drm_asahi_queue_create q = { .usc_exec_base = USC_BASE };
+
+	if (ioctl(fd, DRM_IOCTL_ASAHI_VM_CREATE, &vm) ||
+	    ioctl(fd, DRM_IOCTL_ASAHI_GEM_CREATE, &gem))
+		return -1;
+	mo.handle = op.handle = gem.handle;
+	bind.vm_id = q.vm_id = vm.vm_id;
+	bind.userptr = (uintptr_t)&op;
+	if (ioctl(fd, DRM_IOCTL_ASAHI_GEM_MMAP_OFFSET, &mo) ||
+	    ioctl(fd, DRM_IOCTL_ASAHI_VM_BIND, &bind) ||
+	    ioctl(fd, DRM_IOCTL_ASAHI_QUEUE_CREATE, &q))
+		return -1;
+	heap = mmap(NULL, HEAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mo.offset);
+	if (heap == MAP_FAILED)
+		return -1;
+	heap_gva = USC_BASE;
+	heap_size = HEAP_SIZE;
+	heap_off = 0;
+	queue_id = q.queue_id;
+	printf("vm %u queue %u\n", vm.vm_id, q.queue_id);
+	return 0;
+}
+
+/* One compute command, signalling syncobj, then wait on it. */
+static int submit(uint64_t stream)
+{
+	struct {
+		struct drm_asahi_cmd_header h;
+		struct drm_asahi_cmd_compute c;
+	} cmd = {
+		.h = { .cmd_type = DRM_ASAHI_CMD_COMPUTE, .size = sizeof(cmd.c),
+		       .vdm_barrier = DRM_ASAHI_BARRIER_NONE, .cdm_barrier = 0 },
+		.c = { .cdm_ctrl_stream_base = stream, .cdm_ctrl_stream_end = stream + 0x40 },
+	};
+	struct drm_asahi_sync out = { .sync_type = DRM_ASAHI_SYNC_SYNCOBJ, .handle = syncobj };
+	struct drm_asahi_submit sub = {
+		.syncs = (uintptr_t)&out, .cmdbuf = (uintptr_t)&cmd, .queue_id = queue_id,
+		.out_sync_count = 1, .cmdbuf_size = sizeof(cmd),
+	};
+	struct drm_syncobj_wait w = {
+		.handles = (uintptr_t)&syncobj, .count_handles = 1, .timeout_nsec = INT64_MAX,
+	};
+
+	if (ioctl(fd, DRM_IOCTL_ASAHI_SUBMIT, &sub))
+		return -1;
+	return ioctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &w);
+}
 
 static uint32_t alloc(uint32_t n, uint32_t align)
 {
@@ -87,7 +143,6 @@ static int run(const char *name, const uint32_t *blob, const void *args, uint32_
 	const uint8_t *binary = (const uint8_t *)blob + 44;
 	uint32_t code, state, ubuf, stream, o, n, hdr, low, word_lo;
 	uint64_t word;
-	struct agx_run r = { .timeout_ms = 2000 };
 
 	memcpy(&in, blob, 4 * 5);
 	memcpy(&in.ro_base, (const uint8_t *)blob + 20, 2 * 10);
@@ -149,8 +204,7 @@ static int run(const char *name, const uint32_t *blob, const void *args, uint32_
 	put32(stream + 32, 0xc0000160);
 	put32(stream + 36, 0x80000000);
 
-	r.stream = gva(stream);
-	if (ioctl(fd, AGX_IOC_RUN, &r)) {
+	if (submit(gva(stream))) {
 		printf("[%s] run failed: %d\n", name, errno);
 		failed++;
 		return -1;
@@ -200,6 +254,7 @@ struct args3 {
 } __attribute__((packed));
 
 static uint32_t w_fill(uint32_t i) { return 0x1000 + i; }
+static uint32_t w_fill2(uint32_t i) { return 0x2000 + i; }
 static uint32_t w_loop(uint32_t i)
 {
 	uint32_t s = 0, j;
@@ -257,19 +312,22 @@ static void t_float(void)
 
 int main(void)
 {
-	struct agx_info info;
+	struct drm_asahi_params_global p = { 0 };
+	struct drm_asahi_get_params gp = { .pointer = (uintptr_t)&p, .size = sizeof(p) };
+	struct drm_syncobj_create sc = { 0 };
 	uint32_t o, c;
 
-	fd = open("/dev/agx", O_RDWR);
-	if (fd < 0 || ioctl(fd, AGX_IOC_INFO, &info)) {
-		printf("no /dev/agx: %d\n", errno);
+	fd = open("/dev/dri/renderD128", O_RDWR);
+	if (fd < 0 || ioctl(fd, DRM_IOCTL_ASAHI_GET_PARAMS, &gp) ||
+	    ioctl(fd, DRM_IOCTL_SYNCOBJ_CREATE, &sc)) {
+		printf("no GPU: %d\n", errno);
 		return 1;
 	}
-	heap_gva = info.heap_gva;
-	heap_size = info.heap_size;
-	heap = mmap(NULL, heap_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-	if (heap == MAP_FAILED) {
-		printf("mmap failed: %d\n", errno);
+	syncobj = sc.handle;
+	printf("G%u%c chip %x, VA %llx..%llx\n", p.gpu_generation, p.gpu_variant, p.chip_id,
+	       (unsigned long long)p.vm_start, (unsigned long long)p.vm_end);
+	if (setup(&p)) {
+		printf("setup failed: %d\n", errno);
 		return 1;
 	}
 
@@ -337,6 +395,32 @@ int main(void)
 
 		if (!run("t_atomic", t_atomic_0_g13g, &a, sizeof(a), 64, 0))
 			expect("t_atomic", c, 1, w_atomic);
+	}
+
+	/*
+	 * A second VM, same addresses, its own heap: t_fill must land there
+	 * and leave the first VM's heap alone.
+	 */
+	{
+		uint8_t *first = heap;
+		uint32_t before = get32(0);
+		struct args2 a;
+
+		if (setup(&p)) {
+			printf("second VM failed: %d\n", errno);
+			return 1;
+		}
+		a.a = gva(o = buf(256, 0xdeadbeef, 0));
+		a.b = 0x2000;
+		if (!run("t_fill vm2", t_fill_0_g13g, &a, sizeof(a), 256, 0))
+			expect("t_fill vm2", o, 256, w_fill2);
+		heap = first;
+		if (get32(0) != before) {
+			printf("[vm isolation] first heap changed\n");
+			failed++;
+		} else {
+			printf("[vm isolation] ok\n");
+		}
 	}
 
 	printf("%d failed\n", failed);
