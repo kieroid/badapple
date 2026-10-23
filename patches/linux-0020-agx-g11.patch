@@ -9,10 +9,10 @@ index cad33f1cc..5cc6bec0d 100644
 +obj-$(CONFIG_APPLE_RTKIT) += agx-g11.o
 diff --git a/drivers/soc/apple/agx-g11.c b/drivers/soc/apple/agx-g11.c
 new file mode 100644
-index 000000000..35e613122
+index 000000000..215101c43
 --- /dev/null
 +++ b/drivers/soc/apple/agx-g11.c
-@@ -0,0 +1,727 @@
+@@ -0,0 +1,849 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * Boots the A12 GPU (AGX G11P) firmware and runs compute jobs on it.
@@ -22,23 +22,47 @@ index 000000000..35e613122
 + * should. docs/gpu.md describes the structures. Offsets in comments name the
 + * firmware functions they come from.
 + *
-+ * Everything the firmware and GPU see lives in one physically contiguous
-+ * chunk. The firmware maps it at CHUNK_VA through the mem-desc table, and the
-+ * GPU VM maps it at GVA_BASE and GVA_BASE2 in MMU context SLOT.
++ * The firmware's structures live in one physically contiguous chunk. The
++ * firmware maps it at CHUNK_VA through the mem-desc table, and the GPU VM
++ * maps it at GVA_BASE and GVA_BASE2 in MMU context SLOT. A second chunk,
++ * the heap, is mapped at GVA_HEAP and handed to userspace through /dev/agx:
++ * mmap it, put code, state, buffers and a CDM control stream in it, and
++ * AGX_IOC_RUN runs the stream and waits for it.
++ *
++ * Every job shares one VM that also maps the firmware's structures, so the
++ * device is root only.
 + *
 + * Copyright (c) 2026 kiki <kieran@lavato.net>
 + */
 +
 +#include <linux/delay.h>
 +#include <linux/dma-mapping.h>
++#include <linux/fs.h>
 +#include <linux/io.h>
 +#include <linux/iopoll.h>
++#include <linux/miscdevice.h>
 +#include <linux/module.h>
++#include <linux/mutex.h>
 +#include <linux/of.h>
 +#include <linux/platform_device.h>
 +#include <linux/pm_runtime.h>
 +#include <linux/soc/apple/rtkit.h>
++#include <linux/uaccess.h>
 +#include <linux/unaligned.h>
++
++struct agx_info {
++	__u64 heap_gva;
++	__u64 heap_size;
++};
++
++struct agx_run {
++	__u64 stream;		/* GPU VA of a CDM control stream in the heap */
++	__u32 timeout_ms;
++	__u32 pad;
++};
++
++#define AGX_IOC_INFO		_IOR('A', 0, struct agx_info)
++#define AGX_IOC_RUN		_IOW('A', 1, struct agx_run)
 +
 +#define ASC_CPU_CONTROL		0x44
 +#define ASC_CPU_CONTROL_RUN	BIT(4)
@@ -54,6 +78,10 @@ index 000000000..35e613122
 +#define GVA_BASE		0x1100000000ULL
 +#define GVA_BASE2		0x1300000000ULL
 +#define SLOT			16
++#define HEAP_SIZE		SZ_4M
++#define GVA_HEAP		(GVA_BASE + 0x800000)
++#define NR_SLOTS		4	/* job structures, reused in turn */
++#define RING_SIZE		0x100
 +
 +#define CH_CP			2
 +#define CH_DEVCTRL		12
@@ -87,6 +115,13 @@ index 000000000..35e613122
 +	u32 B, C, stats_cp;
 +	u32 chan_state[NR_CHANNELS], chan_ring[NR_CHANNELS];
 +	u32 ring, info, nr_cmds;	/* the CP command queue */
++	struct { u32 cmd, evc, useq, scratch, args; } slot[NR_SLOTS];
++	bool wedged;			/* a job timed out */
++
++	void *heap;
++	dma_addr_t heap_pa;
++	struct miscdevice misc;
++	struct mutex lock;		/* serialises jobs */
 +};
 +
 +static u32 agx_alloc(struct agx *agx, u32 n, u32 align)
@@ -162,7 +197,7 @@ index 000000000..35e613122
 +		{ 8, 12, 12, 14, 0x200, 1, 0xfffffff000, 0x1fc000 },
 +	};
 +	static const u64 gvas[] = { GVA_BASE, GVA_BASE2 };
-+	u32 B, C, st, hb, ha, pc, pd = 0, pt = 0, ttbr;
++	u32 B, C, st, hb, ha, pc, pd = 0, pd0 = 0, pt = 0, ttbr;
 +	int i, j, k;
 +
 +	B = agx->B = agx_alloc(agx, 0x8000, 0x4000);	/* RegionB */
@@ -243,6 +278,8 @@ index 000000000..35e613122
 +	pc = agx_alloc(agx, 0x4000, 0x4000);
 +	for (k = 0; k < ARRAY_SIZE(gvas); k++) {
 +		pd = agx_alloc(agx, 0x4000, 0x4000);
++		if (!k)
++			pd0 = pd;
 +		put32(agx, pc + (gvas[k] >> 30) * 4, (agx->pa + pd) >> 12 << 4 | 1);
 +		for (i = 0; i < CHUNK_SIZE >> 14; i++) {
 +			if (i % 128 == 0) {
@@ -262,6 +299,15 @@ index 000000000..35e613122
 +	put64(agx, C + 0x9158, fw_va(ttbr));
 +	put64(agx, ttbr + SLOT * 8, agx->pa + pc);
 +	put32(agx, C + 0x9160, BIT(SLOT));
++	/* The heap, at GVA_HEAP in the same page directory as GVA_BASE. */
++	for (i = 0; i < HEAP_SIZE >> 14; i++) {
++		if (i % 128 == 0) {
++			pt = agx_alloc(agx, 0x400, 0x400);
++			put64(agx, pd0 + ((GVA_HEAP >> 21) & 0x1ff) * 8 + i / 128 * 8,
++			      agx->pa + pt + 3);
++		}
++		put64(agx, pt + i % 128 * 8, agx->heap_pa + i * 0x4000 + 1);
++	}
 +	/* All trace categories, drained in agx_drain(). */
 +	put32(agx, C, 0xff);
 +	/* The first power-up installs the job handlers only when set. */
@@ -327,9 +373,8 @@ index 000000000..35e613122
 +static void agx_queue(struct agx *agx)
 +{
 +	u32 ptrs, jl, gbuf, ctx, info;
++	int i;
 +
-+	if (agx->info)
-+		return;
 +	ptrs = agx_alloc(agx, 0x100, 0x100);
 +	agx->ring = agx_alloc(agx, 0x800, 0x100);
 +	jl = agx_alloc(agx, 0x100, 0x100);
@@ -357,62 +402,58 @@ index 000000000..35e613122
 +	put32(agx, info + 0x50, 0x1001);
 +	put32(agx, info + 0x54, -1);
 +	put64(agx, info + 0xa4, fw_va(ctx));
++
++	for (i = 0; i < NR_SLOTS; i++) {
++		agx->slot[i].cmd = agx_alloc(agx, 0x300, 0x100);
++		agx->slot[i].evc = agx_alloc(agx, 0x100, 0x100);
++		agx->slot[i].useq = agx_alloc(agx, 0x200, 0x100);
++		agx->slot[i].scratch = agx_alloc(agx, 0x100, 0x100);
++		agx->slot[i].args = agx_alloc(agx, 0x4000, 0x4000);
++	}
 +}
 +
 +/*
 + * The run message is {type, info, head, queue index, flush}: FUN_000075fc
 + * stores head at info+0x28 and FUN_0001fb60 runs the ring up to it. Later
-+ * commands go in the same queue with the next head.
++ * commands go in the same queue with the next head. Both rings hold
++ * RING_SIZE entries.
 + */
-+static void agx_submit(struct agx *agx, u32 cmd)
++static void agx_submit(struct agx *agx, u32 cmd, u32 n)
 +{
 +	u32 st = agx->chan_state[CH_CP];
-+	u32 n = agx->nr_cmds++;
-+	u32 msg = agx->chan_ring[CH_CP] + n * 0x30;
++	u32 idx = n % RING_SIZE, head = (n + 1) % RING_SIZE;
++	u32 msg = agx->chan_ring[CH_CP] + idx * 0x30;
 +
-+	put64(agx, agx->ring + n * 8, fw_va(cmd));
++	put64(agx, agx->ring + idx * 8, fw_va(cmd));
 +	memset(agx->buf + msg, 0, 0x30);
 +	put32(agx, msg, CH_CP);
 +	put64(agx, msg + 4, fw_va(agx->info));
-+	put32(agx, msg + 0xc, n + 1);
++	put32(agx, msg + 0xc, head);
 +	put32(agx, msg + 0x10, EV);
 +	put32(agx, msg + 0x14, 1);
-+	put32(agx, st + 0x20, n + 1);
++	put32(agx, st + 0x20, head);
 +	agx_doorbell(agx, CH_CP);
 +}
 +
 +/*
-+ * A compute command in MMU context SLOT that launches the state block at
-+ * state over grid threads in groups of group. Microsequence as the kext
-+ * builds it (FUN_fffffff0084d0f08): StartCompute, wait for the CDM
-+ * interrupt, finalize, end. Returns the offset of the stamp that reads
-+ * DONE_STAMP once the job is done.
++ * A compute command in MMU context SLOT that runs the CDM control stream at
++ * GPU VA stream. Microsequence as the kext builds it (FUN_fffffff0084d0f08):
++ * StartCompute, wait for the CDM interrupt, finalize, end. Returns the
++ * offset of the stamp that reads DONE_STAMP once the job is done.
 + */
-+static u32 agx_compute(struct agx *agx, u32 state, u32 grid, u32 group)
++static u32 agx_run(struct agx *agx, u64 stream)
 +{
-+	u32 cmd = agx_alloc(agx, 0x300, 0x100);
-+	u32 evc = agx_alloc(agx, 0x100, 0x100);
-+	u32 useq = agx_alloc(agx, 0x200, 0x100);
-+	u32 scratch = agx_alloc(agx, 0x100, 0x100);
-+	u32 stream = agx_alloc(agx, 0x4000, 0x4000);
-+	u32 args = agx_alloc(agx, 0x4000, 0x4000);
++	u32 n = agx->nr_cmds++;
++	u32 cmd = agx->slot[n % NR_SLOTS].cmd, evc = agx->slot[n % NR_SLOTS].evc;
++	u32 useq = agx->slot[n % NR_SLOTS].useq;
++	u32 scratch = agx->slot[n % NR_SLOTS].scratch;
++	u32 args = agx->slot[n % NR_SLOTS].args;
 +	u32 fin = useq + 0x64 + 4;
-+	static const u32 launch_tail[] = { 1, 1, 0, 1, 1, 0xc0000160, 0x80000000 };
-+	int i;
 +
-+	agx_queue(agx);
-+
-+	/*
-+	 * CDM: launch with header 3 (bit 0 always set, one uniform block),
-+	 * the state block with its low bits 4 (one block of 8 registers),
-+	 * grid and threadgroup size; barrier; terminate.
-+	 */
-+	put32(agx, stream, 3);
-+	put32(agx, stream + 4, (gpu_va(state) & 0xffffffc0) | 4);
-+	put32(agx, stream + 8, grid);
-+	for (i = 0; i < ARRAY_SIZE(launch_tail); i++)
-+		put32(agx, stream + 0xc + 4 * i, i == 2 ? group : launch_tail[i]);
-+
++	memset(agx->buf + cmd, 0, 0x300);
++	memset(agx->buf + evc, 0, 0x100);
++	memset(agx->buf + useq, 0, 0x200);
++	memset(agx->buf + scratch, 0, 0x100);
 +	put64(agx, scratch + 0x20, 1);			/* kick gate */
 +
 +	/* StartCompute, 0x64 bytes */
@@ -447,7 +488,7 @@ index 000000000..35e613122
 +	/* event control: +0 points at the counter finalize bumps */
 +	put64(agx, evc, fw_va(scratch + 8));
 +	put64(agx, cmd + 0x70, gpu_va(args));
-+	put64(agx, cmd + 0x78, gpu_va(stream));
++	put64(agx, cmd + 0x78, stream);
 +	put64(agx, cmd + 0x1f0, fw_va(useq));
 +	put32(agx, cmd + 0x1f8, fin + 0x48 - useq);
 +	/* completion stamp {target, ?, value, event} */
@@ -455,8 +496,25 @@ index 000000000..35e613122
 +	put32(agx, cmd + 0x288, DONE_STAMP);
 +	put32(agx, cmd + 0x28c, EV);
 +
-+	agx_submit(agx, cmd);
++	agx_submit(agx, cmd, n);
 +	return scratch + 0x10;
++}
++
++/*
++ * CDM: launch with header 3 (bit 0 always set, one uniform block), the
++ * state block with its low bits 4 (one block of 8 registers), grid and
++ * threadgroup size; barrier; terminate.
++ */
++static u32 agx_compute(struct agx *agx, u32 state, u32 grid, u32 group)
++{
++	u32 stream = agx_alloc(agx, 0x4000, 0x4000);
++	const u32 words[] = { 3, (gpu_va(state) & 0xffffffc0) | 4, grid, 1, 1,
++			      group, 1, 1, 0xc0000160, 0x80000000 };
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(words); i++)
++		put32(agx, stream + 4 * i, words[i]);
++	return agx_run(agx, gpu_va(stream));
 +}
 +
 +/*
@@ -497,12 +555,16 @@ index 000000000..35e613122
 +	return o;
 +}
 +
-+static int agx_wait(struct agx *agx, u32 stamp)
++static int agx_wait(struct agx *agx, u32 stamp, u32 timeout_ms)
 +{
 +	u32 v;
++	int ret;
 +
-+	return readx_poll_timeout(READ_ONCE, *(u32 *)(agx->buf + stamp), v,
-+				  v == DONE_STAMP, 1000, 2000000);
++	ret = readx_poll_timeout(READ_ONCE, *(u32 *)(agx->buf + stamp), v,
++				 v == DONE_STAMP, 100, timeout_ms * 1000ULL);
++	if (ret)
++		agx->wedged = true;
++	return ret;
 +}
 +
 +static void agx_check(struct agx *agx, const char *name, u32 stamp, u32 o,
@@ -510,7 +572,7 @@ index 000000000..35e613122
 +{
 +	int i, bad = 0, first = -1;
 +
-+	if (agx_wait(agx, stamp)) {
++	if (agx_wait(agx, stamp, 2000)) {
 +		dev_err(agx->dev, "%s: job did not complete\n", name);
 +		return;
 +	}
@@ -620,6 +682,55 @@ index 000000000..35e613122
 +	dev_err(agx->dev, "firmware crashed\n");
 +}
 +
++static struct agx *agx_from_file(struct file *f)
++{
++	return container_of(f->private_data, struct agx, misc);
++}
++
++static int agx_mmap(struct file *f, struct vm_area_struct *vma)
++{
++	struct agx *agx = agx_from_file(f);
++	unsigned long size = vma->vm_end - vma->vm_start;
++
++	if (vma->vm_pgoff || size > HEAP_SIZE)
++		return -EINVAL;
++	return dma_mmap_coherent(agx->dev, vma, agx->heap, agx->heap_pa, size);
++}
++
++static long agx_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
++{
++	struct agx *agx = agx_from_file(f);
++	struct agx_info info = { .heap_gva = GVA_HEAP, .heap_size = HEAP_SIZE };
++	struct agx_run run;
++	int ret;
++
++	switch (cmd) {
++	case AGX_IOC_INFO:
++		return copy_to_user((void __user *)arg, &info, sizeof(info)) ? -EFAULT : 0;
++	case AGX_IOC_RUN:
++		if (copy_from_user(&run, (void __user *)arg, sizeof(run)))
++			return -EFAULT;
++		if (run.stream < GVA_HEAP || run.stream >= GVA_HEAP + HEAP_SIZE ||
++		    run.pad || run.timeout_ms > 60000)
++			return -EINVAL;
++		mutex_lock(&agx->lock);
++		/* After a timeout the firmware may still own a job slot. */
++		if (agx->wedged)
++			ret = -EIO;
++		else
++			ret = agx_wait(agx, agx_run(agx, run.stream), run.timeout_ms ?: 2000);
++		mutex_unlock(&agx->lock);
++		return ret;
++	}
++	return -ENOTTY;
++}
++
++static const struct file_operations agx_fops = {
++	.owner = THIS_MODULE,
++	.mmap = agx_mmap,
++	.unlocked_ioctl = agx_ioctl,
++};
++
 +static const struct apple_rtkit_ops agx_rtk_ops = {
 +	.crashed = agx_crashed,
 +	.recv_message = agx_recv,
@@ -689,7 +800,8 @@ index 000000000..35e613122
 +	init = dmam_alloc_coherent(dev, SZ_16K, &init_pa, GFP_KERNEL);
 +	table = dmam_alloc_coherent(dev, SZ_16K, &table_pa, GFP_KERNEL);
 +	buf = dmam_alloc_coherent(dev, CHUNK_SIZE, &agx->pa, GFP_KERNEL);
-+	if (!init || !table || !buf)
++	agx->heap = dmam_alloc_coherent(dev, HEAP_SIZE, &agx->heap_pa, GFP_KERNEL);
++	if (!init || !table || !buf || !agx->heap)
 +		return -ENOMEM;
 +	agx->buf = buf;
 +	agx_build(agx, init, table, table_pa);
@@ -717,9 +829,17 @@ index 000000000..35e613122
 +	msleep(1000);
 +	dev_info(dev, "firmware up, chunk at %pad\n", &agx->pa);
 +
++	agx_queue(agx);
 +	agx_test_tid(agx);
 +	agx_test_uniform(agx);
-+	return 0;
++
++	mutex_init(&agx->lock);
++	agx->misc.minor = MISC_DYNAMIC_MINOR;
++	agx->misc.name = "agx";
++	agx->misc.fops = &agx_fops;
++	agx->misc.mode = 0600;
++	agx->misc.parent = dev;
++	return misc_register(&agx->misc);
 +}
 +
 +static const struct of_device_id agx_of_match[] = {
@@ -732,6 +852,8 @@ index 000000000..35e613122
 +	.driver = {
 +		.name = "apple-agx-g11",
 +		.of_match_table = agx_of_match,
++		/* The firmware cannot be restarted. */
++		.suppress_bind_attrs = true,
 +	},
 +	.probe = agx_probe,
 +};

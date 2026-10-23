@@ -1,8 +1,9 @@
 # GPU
 
-G11P. `linux-0020` boots the firmware and runs two test kernels at probe.
-`tools/gfx-proxy.py` does the same from the m1n1 proxy and runs the Mesa
-tests.
+G11P. `linux-0020` boots the firmware, runs two test kernels at probe and
+gives userspace `/dev/agx` to run compute jobs. `/bin/agx-test` runs the
+Mesa tests through it. `tools/gfx-proxy.py` does the same from the m1n1
+proxy.
 
 ## Firmware
 
@@ -185,6 +186,24 @@ the uniforms Mesa asks for.
 
 These pass: arithmetic, floats, loops, a preamble, thread and threadgroup ids,
 threadgroup memory with barriers, a reduction, fences and atomics.
+
+## /dev/agx
+
+Root only: every job shares one VM, which also maps the firmware's
+structures.
+
+| call | what |
+|---|---|
+| `mmap` | the 4 MB heap, at GPU VA 0x1100800000 |
+| `AGX_IOC_INFO` | `{heap_gva, heap_size}` |
+| `AGX_IOC_RUN` | `{stream, timeout_ms}`: run the CDM stream at `stream` in the heap and wait |
+
+Userspace puts code, the state block, buffers and the CDM stream in the heap.
+The driver reuses four sets of job structures in turn. After a timeout it
+refuses more jobs, since the firmware may still own one.
+
+`make agx-test` builds `tools/agx-test.c` static with the kernel's nolibc,
+and the next kernelcache puts it in the initramfs.
 
 ## Queues
 

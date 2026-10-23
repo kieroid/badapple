@@ -17,6 +17,8 @@
 # boot       build that and hand the whole chain to a phone in pwned DFU
 # gfx-tests  clone and patch Mesa, build its OpenCL compiler for the GPU and
 #            compile tools/gfx-tests.cl for "tools/gfx-proxy.py clc"
+# agx-test   build tools/agx-test.c, which runs those tests through /dev/agx;
+#            the next kernelcache puts it in the initramfs as /bin/agx-test
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -66,7 +68,7 @@ IPSW_FILE ?=
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel cma=64M
 
 .PHONY: check deps patch pmgr m1n1 kernel initramfs images ticket kernelcache \
-	m1n1cache boot gfx-tests clean FORCE
+	m1n1cache boot gfx-tests agx-test clean FORCE
 FORCE:
 
 check: $(DTB)
@@ -252,7 +254,7 @@ $(IBOOT)/kernelcache-m1n1.img4: $(M1N1) FORCE | $(IBOOT)
 # m1n1 keeps only the last initramfs it finds, so firmware cannot be a second
 # payload. Linux reads cpio archives back to back in one stream, though, so the
 # firmware cpios go on the end of Hoolock's, inside the same gzip.
-FW_CPIOS = $(wildcard $(IBOOT)/mtfw.cpio $(IBOOT)/bcmfw.cpio)
+FW_CPIOS = $(wildcard $(IBOOT)/mtfw.cpio $(IBOOT)/bcmfw.cpio build/gfx/agx-test.cpio)
 BOOT_INITRAMFS = $(if $(FW_CPIOS),$(IBOOT)/initramfs-fw.gz,$(INITRAMFS))
 
 $(IBOOT)/initramfs-fw.gz: $(INITRAMFS) $(FW_CPIOS)
@@ -299,6 +301,21 @@ build/gfx/tests.c: tools/gfx-tests.cl $(wildcard patches/mesa-*.patch)
 	    -I$(MESA_SRC)/include -I$(MESA_SRC)/src -I$(MESA_SRC)/src/compiler/libcl \
 	    -cl-std=cl2.0 -D__OPENCL_VERSION__=200
 	$(MESA_BIN)/asahi/clc/asahi_clc build/gfx/tests.spv build/gfx/tests.h $@
+
+# Static, with the kernel's nolibc, so it needs no aarch64 libc.
+AGX_TEST := build/gfx/agx-test.cpio
+
+agx-test: $(AGX_TEST)
+
+$(AGX_TEST): tools/agx-test.c build/gfx/tests.c
+	$(MAKE) -C $(KDIR) $(KBUILD) headers
+	sed -n '/^enum libagx_program/,/^};/p' build/gfx/tests.h > build/gfx/libagx_shaders.h
+	mkdir -p build/gfx/agx-root/bin
+	clang --target=aarch64-linux-gnu -static -nostdlib -nostdinc -fuse-ld=lld -Os \
+	    -fno-stack-protector -fno-builtin -isystem $(KDIR)/tools/include/nolibc \
+	    -isystem $(KDIR)/usr/include -include nolibc.h -Ibuild/gfx \
+	    -o build/gfx/agx-root/bin/agx-test $<
+	cd build/gfx/agx-root && find . | cpio -o -H newc -R 0:0 > ../agx-test.cpio
 
 clean:
 	rm -f $(DTB) $(PP) $(MACHO) $(KERNELCACHE)
