@@ -118,22 +118,50 @@ CDM block types in bits 31:30: 0 launch, 2 terminate (0x80000000), 3 barrier
 (0xc0000160). A direct launch is 8 words:
 
 ```text
-header, 0 without uniforms or textures
-state block address, 64 byte aligned
+header
+state block address | low bits
 global size x, y, z, in threads
 threadgroup size x, y, z
 ```
 
-Minimal state block:
+| header bits | what |
+|---|---|
+| 0 | always set; at 0 every odd threadgroup is dropped |
+| 3:1 | uniform registers, blocks of 32, mod 8 |
+| 8:4 | texture states |
+| 11:9 | sampler states |
+
+The state block is 64 byte aligned. Its low bits: 5:2 registers in blocks of
+8 (0 is 16), 1:0 state block length in 64 bytes.
+
+The state block is a list of words:
 
 ```text
-u64 (code >> 6) << 38 | 0x90000000 | 0x1f    shader, 8 registers
-u16 0x0108                                   no preshader
+u64 3 | first << 9 | count << 21 | va << 24     uniform load, u0 on, up to 31
+u64 (code >> 6) << 38 | 0x90000000 | 0x1f       shader, 8 registers
+u16 0x0108                                      no preshader
 ```
 
-Addresses are 32 bit offsets from 0x11 << 32.
+The uniform address is the full GPU VA. The code address is a 32 bit offset
+from 0x11 << 32.
 
 The ISA is close to G13. The iOS CoreImage binary archives hold G11 kernels
 (GPU Mach-O, cpusubtype 0x72), and applegpu's G13 disassembler reads nearly all
-of them. Stop is `0x0801`. A kernel of `mov_imm`, `device_store` and `wait`
-wrote 0xcafe1234 to memory.
+of them. Stop is `0x0801`.
+
+Kernels that ran:
+
+| kernel | what |
+|---|---|
+| `mov_imm`, `device_store` | 0xcafe1234 to memory |
+| `get_sr` sr80, `device_store` at a register offset | `out[tid] = tid`, 256 threads |
+| `iadd` with `u2`, store based at `u0_u1` | uniforms |
+
+A store's register offset is scaled by the element size.
+
+## Queues
+
+Several commands can go through one queue in one firmware session. The run
+message is `{type, info, head, queue index, flush}`. The firmware stores head
+at info+0x28 and runs the ring from its read index up to it. The next command
+goes in the next ring entry with head + 1.
