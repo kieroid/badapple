@@ -5,7 +5,7 @@
  }
  
 +/*
-+ * Coprocessors driven by apple,asc-rtk for bring-up. Their nodes stay disabled
++ * Coprocessors whose firmware iBoot loads on request, like the GPU's. Their nodes stay disabled
 + * unless iBoot preloaded the firmware, which shows as segment-ranges in the
 + * ADT. The driver reads the firmware's buffers through those ranges.
 + */

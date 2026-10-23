@@ -1,10 +1,11 @@
 diff --git a/drivers/soc/apple/Makefile b/drivers/soc/apple/Makefile
+index cad33f1cc..5cc6bec0d 100644
 --- a/drivers/soc/apple/Makefile
 +++ b/drivers/soc/apple/Makefile
-@@ -16,3 +16,4 @@
+@@ -15,3 +15,4 @@ obj-$(CONFIG_APPLE_TUNABLE) += apple-tunable.o
+ apple-tunable-y = tunable.o
  
  obj-$(CONFIG_APPLE_PMP_T8015_V1) += pmp_t8015_v1.o
- obj-$(CONFIG_APPLE_RTKIT) += asc-rtk.o
 +obj-$(CONFIG_APPLE_RTKIT) += agx-g11.o
 diff --git a/drivers/soc/apple/agx-g11.c b/drivers/soc/apple/agx-g11.c
 new file mode 100644
