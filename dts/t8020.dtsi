@@ -701,8 +701,9 @@
 		/*
 		 * The GPU's coprocessor. iBoot loads its firmware when sent one,
 		 * and only then does m1n1 enable these two, so a boot without it
-		 * is unchanged. apple,asc-rtk only starts it and logs what it
-		 * says; there is no GPU driver yet.
+		 * is unchanged. agx-g11 boots the firmware and runs test kernels.
+		 * The sgx (RGX) and fender ranges are only handed to the
+		 * firmware, which maps them itself.
 		 *
 		 * The ADT lists the mailbox interrupts as 348, 347, 350, 349, the
 		 * same descending pairs as ANS. ps_gfx is the one PMGR domain;
@@ -725,8 +726,11 @@
 		};
 
 		gfx_asc: coprocessor@206400000 {
-			compatible = "apple,t8020-gfx-asc", "apple,asc-rtk";
-			reg = <0x2 0x06400000 0x0 0x8000>;
+			compatible = "apple,t8020-agx";
+			reg = <0x2 0x06400000 0x0 0x8000>,
+			      <0x2 0x04000000 0x0 0x20000>,
+			      <0x2 0x04d00000 0x0 0x20000>;
+			reg-names = "asc", "sgx", "fender";
 			mboxes = <&gfx_asc_mbox>;
 			power-domains = <&ps_gfx>;
 			status = "disabled";

@@ -35,7 +35,7 @@ Registers, gotchas, and things that turned out wrong.
 | Boost, cpuidle | :x: |
 | PCIe, wifi, Bluetooth | :white_check_mark: |
 | Audio, cellular, camera | :x: |
-| GPU | OpenCL kernels from Mesa run from the m1n1 proxy, no driver |
+| GPU | test kernels run at boot; OpenCL kernels from Mesa run from the m1n1 proxy |
 
 - Wifi joins WPA2 networks on 2.4 and 5 GHz, with Alpine's `iw` and
   `wpa_supplicant` brought in by hand.
@@ -50,4 +50,4 @@ Registers, gotchas, and things that turned out wrong.
 4. Touch has no power off and no force sensor.
 5. Wifi and Bluetooth need their tools brought in. Bluetooth pairing is
    untested, it needs `bluetoothd`.
-6. GPU: everything runs from `tools/gfx-proxy.py`. No kernel driver yet.
+6. GPU: the driver only runs its own test kernels. No userspace interface yet.

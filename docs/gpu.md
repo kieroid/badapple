@@ -1,7 +1,8 @@
 # GPU
 
-G11P. Compute shaders run from the m1n1 proxy with `tools/gfx-proxy.py`. No
-kernel driver yet.
+G11P. `linux-0020` boots the firmware and runs two test kernels at probe.
+`tools/gfx-proxy.py` does the same from the m1n1 proxy and runs the Mesa
+tests.
 
 ## Firmware
 
@@ -15,8 +16,9 @@ only with a manifest that lists it, so `make ticket` fetches one and
 | `__TEXT` | 0x800160000 | 0x44000 | 0 |
 | `__DATA` | 0x8001a4000 | 0x8c000 | 0x44000 |
 
-`linux-0019` adds `apple,asc-rtk`, which powers `ps_gfx`, sets RUN and runs the
-RTKit handshake. The ASC has no DART.
+`linux-0020` (`apple,t8020-agx`) powers `ps_gfx`, sets RUN, runs the RTKit
+handshake and starts endpoints 0x20 and 0x21. The ASC has no DART. The node
+also carries the RGX and Fender ranges, which only the firmware maps.
 
 The firmware cannot be restarted. Each proxy run needs a fresh DFU boot.
 
