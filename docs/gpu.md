@@ -187,6 +187,38 @@ the uniforms Mesa asks for.
 These pass: arithmetic, floats, loops, a preamble, thread and threadgroup ids,
 threadgroup memory with barriers, a reduction, fences and atomics.
 
+The same patch makes the Gallium driver emit G11 command streams, so OpenCL
+runs through Rusticl. `cmdbuf.xml` holds the G11 encodings, with `AGX_G11`
+in `agx_pack_header.h`:
+
+| word | G11 |
+|---|---|
+| uniform | tag 0x03, otherwise as G13 |
+| shader | one word for shader, registers and threadgroup memory |
+| no preshader | 0x0108 |
+| preshader | 0x38, then 0xc04000, then the code address |
+| CDM header | bit 0 set; only the uniform count is filled in |
+| CDM block type | bits 31:30: launch 0, terminate 2, barrier 3 |
+
+Texture and sampler words are left out, so kernels using images or samplers
+do not work yet, and neither do kernels that spill (no helper program).
+
+`make rootfs` cross-builds that Mesa for the phone. `apk.static` makes an
+Alpine aarch64 sysroot and a runtime rootfs without root, rustup goes in
+`build/rust`, and the host Mesa build from `make gfx-tests` supplies the
+build-time compilers. The tarball holds Rusticl and `tools/cl-test.c`.
+`tools/rootfs-push.sh` copies it over USB into a tmpfs on a booted phone:
+
+```sh
+make rootfs
+./tools/rootfs-push.sh
+build/venv/bin/python tools/tsh.py "chroot /mnt/a env RUSTICL_ENABLE=asahi cl-test"
+```
+
+To check command streams without the phone, build Mesa for the PC with
+`-Dtools=drm-shim` and run under `LD_PRELOAD=libasahi_noop_drm_shim.so` with
+`ASAHI_MESA_DEBUG=trace`. The shim reports the A12's parameters.
+
 ## DRM
 
 `linux-0020` is `drivers/gpu/drm/agx`, a compute-only render node with the
@@ -195,10 +227,12 @@ Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 | | |
 |---|---|
 | VMs | one MMU context each, 16 to 63 |
-| VA | 0x10_0000_0000 to 0x80_0000_0000, 16K pages |
+| VA | 16K to 0x80_0000_0000, 16K pages |
 | `usc_exec_base` | must be 0x11 << 32, the base the firmware loads |
 | submit | async, one `drm_sched` job per compute command |
-| not yet | render commands, samplers, helper programs, timestamps, single-page binds |
+| name | `asahi`, so Mesa picks it up |
+| ignored | sampler heaps, timestamps |
+| not yet | render commands, helper programs, single-page binds |
 
 Every user context gets a page catalogue at init and is loaded by the
 firmware at every power-up, so a VM only fills its page tables. After a

@@ -50,4 +50,4 @@ Registers, gotchas, and things that turned out wrong.
 4. Touch has no power off and no force sensor.
 5. Wifi and Bluetooth need their tools brought in. Bluetooth pairing is
    untested, it needs `bluetoothd`.
-6. GPU: compute only, no graphics.
+6. GPU: compute only (OpenCL through Rusticl), no images or graphics.

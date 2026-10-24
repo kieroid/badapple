@@ -20,6 +20,9 @@
 #            compile tools/gfx-tests.cl for agx-test
 # agx-test   build tools/agx-test.c, which runs those tests on the GPU driver;
 #            the next kernelcache puts it in the initramfs as /bin/agx-test
+# rootfs     cross-build Mesa's Rusticl for the phone against an Alpine aarch64
+#            sysroot and pack it with tools/cl-test.c into a rootfs tarball;
+#            tools/rootfs-push.sh copies that to a booted phone
 #
 # "make check" is the only target that works on a bare checkout. The headers
 # under include/ are copies of the kernel ones so it needs no kernel tree.
@@ -69,7 +72,7 @@ IPSW_FILE ?=
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel cma=64M
 
 .PHONY: check deps patch pmgr m1n1 kernel initramfs images ticket kernelcache \
-	m1n1cache boot gfx-tests agx-test clean FORCE
+	m1n1cache boot gfx-tests agx-test rootfs clean FORCE
 FORCE:
 
 check: $(DTB)
@@ -321,6 +324,65 @@ $(AGX_TEST): tools/agx-test.c build/gfx/tests.c
 	    -isystem $(KDIR)/usr/include -include nolibc.h -Ibuild/gfx \
 	    -o build/gfx/agx-root/bin/agx-test $<
 	cd build/gfx/agx-root && find . | cpio -o -H newc -R 0:0 > ../agx-test.cpio
+
+# Rusticl for the phone. apk.static builds two Alpine aarch64 trees without
+# root: a sysroot with the -dev packages to build against, and the runtime
+# rootfs. Mesa's build-time compilers come from the host build above.
+ALPINE     := build/alpine
+ALPINE_URL := https://dl-cdn.alpinelinux.org/alpine/v3.23
+APK = $(ALPINE)/sbin/apk.static --arch aarch64 --usermode --allow-untrusted --no-scripts \
+	-X $(ALPINE_URL)/main -X $(ALPINE_URL)/community
+SYSROOT_PKGS := musl-dev gcc g++ libdrm-dev llvm21-dev clang21-dev clang21-libclang \
+	spirv-llvm-translator-dev spirv-tools-dev libclc-dev expat-dev zlib-dev zstd-dev \
+	elfutils-dev opencl-headers opencl-icd-loader-dev
+ROOTFS_PKGS := alpine-baselayout busybox musl libdrm zlib zstd-libs expat spirv-tools \
+	llvm21-libs clang21-libs spirv-llvm-translator-libs libstdc++ libgcc opencl-icd-loader
+RUST_DIR  := build/rust
+RUST_VER  := 1.98.1
+RUSTC     := $(RUST_DIR)/rustup/toolchains/$(RUST_VER)-x86_64-unknown-linux-gnu/bin/rustc
+MESA_A12  := $(MESA_SRC)/build-a12
+A12_CC    := clang --target=aarch64-alpine-linux-musl --sysroot=$(ALPINE)/root -fuse-ld=lld
+HOST_PATH := PATH=$(abspath $(MESA_BIN))/compiler/clc:$(abspath $(MESA_BIN))/asahi/clc:$(abspath $(MESA_BIN))/compiler/spirv:$(LLVM_DIR)/bin:$$PATH
+
+rootfs: $(ALPINE)/rootfs.tar
+
+$(ALPINE)/sbin/apk.static:
+	mkdir -p $(ALPINE)
+	curl -s $(ALPINE_URL)/main/x86_64/ | grep -o 'apk-tools-static-[^"]*\.apk' | head -1 | \
+	    xargs -I{} curl -s -o $(ALPINE)/apk-tools-static.apk $(ALPINE_URL)/main/x86_64/{}
+	tar xzf $(ALPINE)/apk-tools-static.apk -C $(ALPINE) sbin/apk.static
+
+$(ALPINE)/root $(ALPINE)/rootfs: | $(ALPINE)/sbin/apk.static
+	$(APK) --root $(abspath $@) --initdb --update-cache add \
+	    $(if $(filter %/root,$@),$(SYSROOT_PKGS),$(ROOTFS_PKGS))
+
+$(RUSTC):
+	mkdir -p $(RUST_DIR)
+	curl -s -o $(RUST_DIR)/rustup-init \
+	    https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init
+	chmod +x $(RUST_DIR)/rustup-init
+	RUSTUP_HOME=$(abspath $(RUST_DIR))/rustup CARGO_HOME=$(abspath $(RUST_DIR))/cargo \
+	    $(RUST_DIR)/rustup-init -y --no-modify-path --profile minimal \
+	    --default-toolchain $(RUST_VER) -t aarch64-unknown-linux-musl
+
+$(ALPINE)/cross.ini: tools/alpine-cross.ini | $(ALPINE)/root
+	sed -e 's|@SYSROOT@|$(abspath $(ALPINE)/root)|g' -e 's|@RUSTC@|$(abspath $(RUSTC))|g' \
+	    -e 's|@TOOLS@|$(abspath tools)|g' $< > $@
+
+$(ALPINE)/rootfs.tar: build/gfx/tests.c $(ALPINE)/cross.ini $(RUSTC) tools/cl-test.c FORCE | $(ALPINE)/rootfs
+	$(HOST_PATH) ninja -C $(MESA_SRC)/build src/compiler/clc/mesa_clc src/asahi/clc/asahi_clc \
+	    src/compiler/spirv/vtn_bindgen2
+	test -d $(MESA_A12) || $(HOST_PATH) meson setup $(MESA_A12) $(MESA_SRC) \
+	    --cross-file $(ALPINE)/cross.ini -Dgallium-drivers=asahi -Dvulkan-drivers= \
+	    -Dgallium-rusticl=true -Dllvm=enabled -Dshared-llvm=enabled -Dplatforms= \
+	    -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled -Dopengl=false \
+	    -Dmesa-clc=system -Dprecomp-compiler=system -Dmesa-clc-bundle-headers=enabled \
+	    -Dstatic-libclc=all -Dbuildtype=release -Dprefix=/usr -Dlibdir=lib
+	$(HOST_PATH) ninja -C $(MESA_A12)
+	DESTDIR=$(abspath $(ALPINE)/rootfs) meson install -C $(MESA_A12) --no-rebuild --quiet --strip
+	PATH=$(LLVM_DIR)/bin:$$PATH $(A12_CC) -O2 -Wall -o $(ALPINE)/rootfs/usr/bin/cl-test \
+	    tools/cl-test.c -lOpenCL
+	tar -C $(ALPINE)/rootfs --owner=0 --group=0 -cf $@ .
 
 clean:
 	rm -f $(DTB) $(PP) $(MACHO) $(KERNELCACHE)

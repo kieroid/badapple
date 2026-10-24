@@ -44,18 +44,14 @@ index e131bcf..5ce13aa 100644
     bool selftest = false;
  #endif
 diff --git a/src/asahi/compiler/agx_compiler.h b/src/asahi/compiler/agx_compiler.h
-index 4546093..8ce04ba 100644
+index 4546093..e19f3f9 100644
 --- a/src/asahi/compiler/agx_compiler.h
 +++ b/src/asahi/compiler/agx_compiler.h
-@@ -6,6 +6,11 @@
+@@ -6,6 +6,7 @@
  
  #pragma once
  
-+/* Target the A12 GPU (G11): the stop instruction is 0x0801, threadgroup
-+ * memory goes through the device load/store encoding, and there are no SIMD
-+ * reductions or G13 cache barriers. */
-+#define AGX_G11 1
-+
++#include "asahi/genxml/agx_pack_header.h" /* AGX_G11 */
  #include "asahi/isa/agx_minifloat.h"
  #include "compiler/nir/nir.h"
  #include "util/bitset.h"
@@ -119,6 +115,138 @@ index 6236c3c..305d307 100644
        uint64_t raw =
           agx_opcodes_info[I->op].encoding.exact | (Rt ? BITFIELD64_BIT(8) : 0) |
           ((R & BITFIELD_MASK(6)) << 9) | (L ? BITFIELD64_BIT(15) : 0) |
+diff --git a/src/asahi/drm-shim/asahi_noop.c b/src/asahi/drm-shim/asahi_noop.c
+index bfbd9c0..a37d9d8 100644
+--- a/src/asahi/drm-shim/asahi_noop.c
++++ b/src/asahi/drm-shim/asahi_noop.c
+@@ -9,13 +9,21 @@
+ #include "drm-shim/drm_shim.h"
+ #include "drm-uapi/asahi_drm.h"
+ 
++/* What the A12's agx kernel driver reports. */
+ static const struct drm_asahi_params_global params = {
+-   .gpu_generation = 13,
+-   .gpu_variant = 'G',
+-   .gpu_revision = 0,
++   .gpu_generation = 11,
++   .gpu_variant = 'P',
++   .gpu_revision = 0x11,
++   .chip_id = 0x8020,
++   .num_dies = 1,
++   .num_clusters_total = 1,
++   .num_cores_per_cluster = 4,
++   .core_masks = {0xf},
+    .vm_start = 0x4000,
+-   .vm_end = 0x7fffff8000ull,
+-   .command_timestamp_frequency_hz = 1000000000,
++   .vm_end = 0x8000000000ull,
++   .vm_kernel_min_size = 0x4000,
++   .max_commands_per_submission = 64,
++   .command_timestamp_frequency_hz = 24000000,
+ };
+ 
+ struct asahi_bo {
+diff --git a/src/asahi/genxml/agx_pack_header.h b/src/asahi/genxml/agx_pack_header.h
+index 2f238f2..7ca60ab 100644
+--- a/src/asahi/genxml/agx_pack_header.h
++++ b/src/asahi/genxml/agx_pack_header.h
+@@ -8,6 +8,15 @@
+ 
+ #pragma once
+ 
++/*
++ * Target the A12 GPU (G11). In the compiler: the stop instruction is 0x0801,
++ * threadgroup memory goes through the device load/store encoding, and there
++ * are no SIMD reductions or G13 cache barriers. In command streams: CDM
++ * block types sit in bits 31:30, and the USC shader, register and shared
++ * memory words are one word. cmdbuf.xml has the G11 encodings.
++ */
++#define AGX_G11 1
++
+ #include "compiler/libcl/libcl.h"
+ #include "util/bitpack_helpers.h"
+ 
+diff --git a/src/asahi/genxml/cmdbuf.xml b/src/asahi/genxml/cmdbuf.xml
+index c2979f9..9f28d7e 100644
+--- a/src/asahi/genxml/cmdbuf.xml
++++ b/src/asahi/genxml/cmdbuf.xml
+@@ -637,12 +637,14 @@
+   <!-- PPP state ends -->
+ 
+   <!-- USC state starts -->
++  <!-- G11 (AGX_G11) tags: uniform 0x03, no preshader 0x08, and the shader
++       word below. The others are G13's and unknown on G11. -->
+   <enum name="USC Control">
+     <value name="Preshader" value="0x38"/>
+     <value name="Fragment properties" value="0x58"/>
+-    <value name="No preshader" value="0x88"/>
++    <value name="No preshader" value="0x08"/>
+     <value name="Shader" value="0x0d"/>
+-    <value name="Uniform" value="0x1d"/>
++    <value name="Uniform" value="0x03"/>
+     <value name="Uniform high" value="0x3d"/>
+     <value name="Shared" value="0x4d"/>
+     <value name="Registers" value="0x8d"/>
+@@ -705,6 +707,17 @@
+     <field name="Code" size="32" start="16" type="address"/>
+   </struct>
+ 
++  <!-- G11: Shader, Registers and Shared in one word. The driver adds 16
++       bytes to the threadgroup memory size. -->
++  <struct name="USC Shader G11" size="8">
++    <field name="Tag" size="4" start="0" type="hex" exact="0xf"/>
++    <field name="Register count" size="4" start="4" type="uint" modifier="groups(16)"/>
++    <field name="Uses shared memory" size="1" start="8" type="bool"/>
++    <field name="Bytes per threadgroup" size="8" start="16" type="uint" modifier="groups(256)"/>
++    <field name="Unk" size="4" start="28" type="hex" exact="0x9"/>
++    <field name="Code" size="26" start="38" type="address" modifier="shr(6)"/>
++  </struct>
++
+   <struct name="USC Registers" size="4">
+     <field name="Tag" size="8" start="0" type="USC Control" exact="Registers"/>
+     <field name="Register count" size="5" start="8" type="uint" modifier="groups(8)"/>
+@@ -715,11 +728,12 @@
+ 
+   <struct name="USC No Preshader" size="2">
+     <field name="Tag" size="8" start="0" type="USC Control" exact="No preshader"/>
++    <field name="Unk" size="8" start="8" type="hex" exact="0x1"/>
+   </struct>
+ 
+   <struct name="USC Preshader" size="8">
+     <field name="Tag" size="8" start="0" type="USC Control" exact="Preshader"/>
+-    <field name="Unk" size="24" start="8" type="hex" exact="0xc08000"/>
++    <field name="Unk" size="24" start="8" type="hex" exact="0xc04000"/>
+     <field name="Code" size="32" start="32" type="address"/>
+   </struct>
+ 
+@@ -996,12 +1010,15 @@
+   <!-- VDM commands end -->
+ 
+   <!-- CDM commands start -->
++  <!-- G11 has the block type in bits 31:30: launch 0, terminate 2,
++       barrier 3. Here they are as bits 31:29. Link and return are unknown
++       on G11. -->
+   <enum name="CDM Block Type">
+     <value name="Launch" value="0"/>
+     <value name="Stream Link" value="1"/>
+-    <value name="Stream Terminate" value="2"/>
+-    <value name="Barrier" value="3"/>
+-    <value name="Stream Return" value="4"/>
++    <value name="Stream Terminate" value="4"/>
++    <value name="Barrier" value="6"/>
++    <value name="Stream Return" value="7"/>
+   </enum>
+ 
+   <enum name="CDM Mode">
+@@ -1020,6 +1037,8 @@
+   </enum>
+ 
+   <struct name="CDM Launch Word 0" size="4">
++    <!-- G11: without it every other threadgroup is dropped. -->
++    <field name="G11 always" size="1" start="0" type="bool" exact="true"/>
+     <field name="Uniform register count" size="3" start="1" type="uint" modifier="groups(64)"/>
+     <field name="Texture state register count" size="5" start="4" type="uint" modifier="groups(8)"/>
+     <field name="Sampler state register count" size="3" start="9" type="Sampler states"/>
 diff --git a/src/asahi/isa/AGX2.xml b/src/asahi/isa/AGX2.xml
 index f3e6733..2fd210d 100644
 --- a/src/asahi/isa/AGX2.xml
@@ -132,3 +260,250 @@ index f3e6733..2fd210d 100644
    </ins>
  
    <ins name="trap" length="2">
+diff --git a/src/asahi/lib/agx_bg_eot.c b/src/asahi/lib/agx_bg_eot.c
+index 1cb8fab..736568f 100644
+--- a/src/asahi/lib/agx_bg_eot.c
++++ b/src/asahi/lib/agx_bg_eot.c
+@@ -269,9 +269,13 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
+ 
+    agx_usc_immediates(&b, &info->rodata, p->ptr);
+ 
+-   if (info->uses_txf)
++   if (info->uses_txf && !AGX_G11)
+       agx_usc_push_packed(&b, SAMPLER, cache->dev->txf_sampler);
+ 
++#if AGX_G11
++   agx_usc_shader_g11(&b, agx_usc_addr(cache->dev, p->ptr + info->main_offset),
++                      info->nr_gprs, info->local_size);
++#else
+    agx_usc_shared(&b, info->local_size, info->imageblock_stride, 0);
+ 
+    agx_usc_pack(&b, SHADER, cfg) {
+@@ -283,6 +287,7 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
+       cfg.register_count = info->nr_gprs;
+       cfg.spill_size = 0;
+    }
++#endif
+ 
+    if (info->nr_preamble_gprs) {
+       agx_usc_pack(&b, PRESHADER, cfg) {
+diff --git a/src/asahi/lib/agx_device.c b/src/asahi/lib/agx_device.c
+index f158e0e..2de2c2a 100644
+--- a/src/asahi/lib/agx_device.c
++++ b/src/asahi/lib/agx_device.c
+@@ -541,7 +541,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
+    }
+    assert(params_size >= sizeof(dev->params));
+ 
+-   assert(dev->params.gpu_generation >= 13);
++   assert(dev->params.gpu_generation >= (AGX_G11 ? 11 : 13));
+    const char *variant = " Unknown";
+    switch (dev->params.gpu_variant) {
+    case 'G':
+@@ -557,10 +557,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
+       variant = " Ultra";
+       break;
+    }
+-   snprintf(dev->name, sizeof(dev->name), "Apple M%d%s (G%d%c %02X)",
+-            dev->params.gpu_generation - 12, variant,
+-            dev->params.gpu_generation, dev->params.gpu_variant,
+-            dev->params.gpu_revision + 0xA0);
++   if (dev->params.gpu_generation == 11) {
++      snprintf(dev->name, sizeof(dev->name), "Apple A12 (G11%c %02X)",
++               dev->params.gpu_variant, dev->params.gpu_revision);
++   } else {
++      snprintf(dev->name, sizeof(dev->name), "Apple M%d%s (G%d%c %02X)",
++               dev->params.gpu_generation - 12, variant,
++               dev->params.gpu_generation, dev->params.gpu_variant,
++               dev->params.gpu_revision + 0xA0);
++   }
+ 
+    /* We need a large chunk of VA space carved out for robustness. Hardware
+     * loads can shift an i32 by up to 2, for a total shift of 4. If the base
+diff --git a/src/asahi/lib/agx_usc.h b/src/asahi/lib/agx_usc.h
+index 123208a..9db4b49 100644
+--- a/src/asahi/lib/agx_usc.h
++++ b/src/asahi/lib/agx_usc.h
+@@ -65,6 +65,21 @@ agx_usc_shared(struct agx_usc_builder *b, uint16_t local_size,
+    }
+ }
+ 
++#if AGX_G11
++/* G11: the shader with its registers and threadgroup memory, in one word. */
++static inline void
++agx_usc_shader_g11(struct agx_usc_builder *b, uint32_t code, unsigned nr_gprs,
++                   unsigned shared_size)
++{
++   agx_usc_pack(b, SHADER_G11, cfg) {
++      cfg.code = code;
++      cfg.register_count = nr_gprs;
++      cfg.uses_shared_memory = shared_size > 0;
++      cfg.bytes_per_threadgroup = shared_size ? shared_size + 16 : 65536;
++   }
++}
++#endif
++
+ static inline void
+ agx_usc_immediates(struct agx_usc_builder *b, const struct agx_rodata *ro,
+                    uint64_t base_addr)
+diff --git a/src/asahi/lib/decode.c b/src/asahi/lib/decode.c
+index 3d1ccb0..c3d7ade 100644
+--- a/src/asahi/lib/decode.c
++++ b/src/asahi/lib/decode.c
+@@ -27,7 +27,8 @@ static void
+ agx_disassemble(void *_code, size_t maxlen, FILE *fp)
+ {
+    bool errors = agx2_disassemble(_code, maxlen, fp);
+-   assert(!errors);
++   /* The ISA description lacks G11's threadgroup memory encodings. */
++   assert(!errors || AGX_G11);
+ }
+ 
+ FILE *agxdecode_dump_stream;
+@@ -309,6 +310,20 @@ agxdecode_usc(struct agxdecode_ctx *ctx, const uint8_t *map,
+       return AGX_USC_##name##_LENGTH;                                          \
+    }
+ 
++#if AGX_G11
++   if ((map[0] & 0xf) == 0xf) {
++      agx_unpack(agxdecode_dump_stream, map, USC_SHADER_G11, ctrl);
++      DUMP_UNPACKED(USC_SHADER_G11, ctrl, "Shader\n");
++
++      void *buf;
++      size_t size =
++         agxdecode_grab_mapped(ctx, decode_usc(ctx, ctrl.code), &buf);
++
++      agx_disassemble(buf, size, agxdecode_dump_stream);
++      return AGX_USC_SHADER_G11_LENGTH;
++   }
++#endif
++
+    switch (type) {
+    case AGX_USC_CONTROL_NO_PRESHADER: {
+       DUMP_CL(USC_NO_PRESHADER, map, "No preshader");
+diff --git a/src/asahi/libagx/libagx_dgc.h b/src/asahi/libagx/libagx_dgc.h
+index d8266b6..785e0fa 100644
+--- a/src/asahi/libagx/libagx_dgc.h
++++ b/src/asahi/libagx/libagx_dgc.h
+@@ -234,6 +234,15 @@ agx_cdm_launch(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_grid grid,
+    agx_merge(launch, mode, CDM_LAUNCH_WORD_0);
+ #endif
+ 
++#if AGX_G11
++   /*
++    * Of the counts, G11 is only known to read the uniform one. Leave the
++    * texture, sampler and preshader counts clear, as Apple's driver does for
++    * kernels without textures.
++    */
++   launch.opaque[0] &= BITFIELD_MASK(4) | BITFIELD_RANGE(27, 5);
++#endif
++
+    agx_push_packed(out, launch, CDM_LAUNCH_WORD_0);
+ 
+    agx_push(out, CDM_LAUNCH_WORD_1, cfg) {
+@@ -371,6 +380,16 @@ agx_vdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
+ static inline GLOBAL uint32_t *
+ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
+ {
++#if AGX_G11
++   /* 0xc0000160, as Apple's G11 driver emits between launches. */
++   agx_push(out, CDM_BARRIER, cfg) {
++      cfg.unk_5 = true;
++      cfg.unk_6 = true;
++      cfg.unk_8 = true;
++   }
++   return out;
++#endif
++
+    agx_push(out, CDM_BARRIER, cfg) {
+       cfg.unk_5 = true;
+       cfg.unk_6 = true;
+@@ -581,6 +600,7 @@ agx_usc_uniform(struct agx_usc_builder *b, unsigned start_halfs,
+    assert((start_halfs + size_halfs) <= (1 << 9) && "uniform file overflow");
+    assert(size_halfs <= 64 && "caller's responsibility to split");
+    assert(size_halfs > 0 && "no empty uniforms");
++   assert(!(AGX_G11 && (start_halfs & BITFIELD_BIT(8))) && "no G11 high uniforms");
+ 
+    if (start_halfs & BITFIELD_BIT(8)) {
+       agx_usc_pack(b, UNIFORM_HIGH, cfg) {
+diff --git a/src/drm-shim/device.c b/src/drm-shim/device.c
+index 7df5900..86a3c33 100644
+--- a/src/drm-shim/device.c
++++ b/src/drm-shim/device.c
+@@ -34,6 +34,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <sys/eventfd.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <unistd.h>
+@@ -277,6 +278,16 @@ drm_shim_ioctl_syncobj_create(int fd, unsigned long request, void *arg)
+    return 0;
+ }
+ 
++/* Every fence is signalled: export a readable eventfd as the sync file. */
++static int
++drm_shim_ioctl_syncobj_handle_to_fd(int fd, unsigned long request, void *arg)
++{
++   struct drm_syncobj_handle *h = arg;
++
++   h->fd = eventfd(1, EFD_CLOEXEC);
++   return h->fd < 0 ? -1 : 0;
++}
++
+ static int
+ drm_shim_ioctl_stub(int fd, unsigned long request, void *arg)
+ {
+@@ -290,7 +301,7 @@ ioctl_fn_t core_ioctls[] = {
+    [_IOC_NR(DRM_IOCTL_GEM_CLOSE)] = drm_shim_ioctl_gem_close,
+    [_IOC_NR(DRM_IOCTL_SYNCOBJ_CREATE)] = drm_shim_ioctl_syncobj_create,
+    [_IOC_NR(DRM_IOCTL_SYNCOBJ_DESTROY)] = drm_shim_ioctl_stub,
+-   [_IOC_NR(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD)] = drm_shim_ioctl_stub,
++   [_IOC_NR(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD)] = drm_shim_ioctl_syncobj_handle_to_fd,
+    [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] = drm_shim_ioctl_stub,
+    [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_stub,
+    [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_stub,
+diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
+index 616dd6d..6803dd6 100644
+--- a/src/gallium/drivers/asahi/agx_state.c
++++ b/src/gallium/drivers/asahi/agx_state.c
+@@ -2889,7 +2889,8 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+ 
+    mesa_shader_stage stage = cs->stage;
+ 
+-   if (batch->texture_count[stage]) {
++   /* G11 texture and sampler words are not known yet. */
++   if (batch->texture_count[stage] && !AGX_G11) {
+       agx_usc_pack(&b, TEXTURE, cfg) {
+          cfg.start = 0;
+          cfg.count =
+@@ -2898,7 +2899,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+       }
+    }
+ 
+-   if (batch->sampler_count[stage]) {
++   if (batch->sampler_count[stage] && !AGX_G11) {
+       agx_usc_pack(&b, SAMPLER, cfg) {
+          cfg.start = 0;
+          cfg.count = batch->sampler_count[stage];
+@@ -2954,6 +2955,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+       }
+    }
+ 
++#if AGX_G11
++   assert(!linked && stage == MESA_SHADER_COMPUTE && "G11 is compute only");
++   agx_usc_shader_g11(&b, agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset),
++                      cs->b.info.nr_gprs, cs->b.info.local_size + variable_shared_mem);
++#else
+    if (stage == MESA_SHADER_FRAGMENT) {
+       agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
+    } else {
+@@ -2980,6 +2986,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+                              : 0;
+       }
+    }
++#endif
+ 
+    if (cs->b.info.has_preamble) {
+       agx_usc_pack(&b, PRESHADER, cfg) {

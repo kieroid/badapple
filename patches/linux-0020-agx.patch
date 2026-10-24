@@ -49,7 +49,7 @@ index 000000000..5b8b471d7
 +agx-y := agx_drv.o agx_fw.o agx_vm.o
 diff --git a/drivers/gpu/drm/agx/agx.h b/drivers/gpu/drm/agx/agx.h
 new file mode 100644
-index 000000000..058b65e0b
+index 000000000..6392bd63d
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx.h
 @@ -0,0 +1,93 @@
@@ -84,7 +84,7 @@ index 000000000..058b65e0b
 +#define AGX_USC_BASE		0x1100000000ULL
 +#define AGX_FIRST_CTX		16
 +#define AGX_NR_CTX		64
-+#define AGX_VM_START		0x1000000000ULL
++#define AGX_VM_START		SZ_16K
 +#define AGX_VM_END		0x8000000000ULL
 +#define AGX_PAGE		SZ_16K
 +
@@ -148,10 +148,10 @@ index 000000000..058b65e0b
 +#endif
 diff --git a/drivers/gpu/drm/agx/agx_drv.c b/drivers/gpu/drm/agx/agx_drv.c
 new file mode 100644
-index 000000000..5f2a1f02e
+index 000000000..efb16a7ea
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_drv.c
-@@ -0,0 +1,666 @@
+@@ -0,0 +1,709 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * DRM driver for the Apple A12 GPU (AGX G11P), compute only. It speaks the
@@ -159,8 +159,9 @@ index 000000000..5f2a1f02e
 + *
 + *  - USC addresses are relative to AGX_USC_BASE, which the firmware loads
 + *    for every context, so queues must use it as usc_exec_base.
-+ *  - No render commands, samplers, helper programs, timestamps or
-+ *    single-page binds yet.
++ *  - No render commands, helper programs or single-page binds yet.
++ *    Sampler heaps and timestamps are accepted and ignored; timestamp
++ *    objects are only kept so that Mesa can bind them.
 + *  - Each compute command is one scheduler job. Every queue is an entity
 + *    on the one scheduler, which runs one job at a time, so the commands
 + *    of a submit run in order. In-syncs gate the first, out-syncs get the
@@ -207,6 +208,7 @@ index 000000000..5f2a1f02e
 +struct agx_file {
 +	struct xarray vms;
 +	struct xarray queues;
++	struct xarray objects;	/* GEM objects bound for timestamps */
 +	struct mutex lock;	/* VMs against the queues that use them */
 +};
 +
@@ -226,6 +228,7 @@ index 000000000..5f2a1f02e
 +		return -ENOMEM;
 +	xa_init_flags(&af->vms, XA_FLAGS_ALLOC1);
 +	xa_init_flags(&af->queues, XA_FLAGS_ALLOC1);
++	xa_init_flags(&af->objects, XA_FLAGS_ALLOC1);
 +	mutex_init(&af->lock);
 +	file->driver_priv = af;
 +	return 0;
@@ -234,14 +237,18 @@ index 000000000..5f2a1f02e
 +static void agx_postclose(struct drm_device *drm, struct drm_file *file)
 +{
 +	struct agx_file *af = file->driver_priv;
++	struct drm_gem_object *obj;
 +	struct agx_queue *q;
 +	struct agx_vm *vm;
 +	unsigned long id;
 +
++	xa_for_each(&af->objects, id, obj)
++		drm_gem_object_put(obj);
 +	xa_for_each(&af->queues, id, q)
 +		agx_queue_free(q);
 +	xa_for_each(&af->vms, id, vm)
 +		agx_vm_put(vm);
++	xa_destroy(&af->objects);
 +	xa_destroy(&af->queues);
 +	xa_destroy(&af->vms);
 +	kfree(af);
@@ -374,6 +381,41 @@ index 000000000..5f2a1f02e
 +	return ret;
 +}
 +
++static int agx_gem_bind_object(struct drm_device *drm, void *data, struct drm_file *file)
++{
++	struct drm_asahi_gem_bind_object *args = data;
++	struct agx_file *af = file->driver_priv;
++	struct drm_gem_object *obj;
++	int ret;
++
++	if (args->vm_id || args->pad)
++		return -EINVAL;
++	switch (args->op) {
++	case DRM_ASAHI_BIND_OBJECT_OP_BIND:
++		if (args->flags != DRM_ASAHI_BIND_OBJECT_USAGE_TIMESTAMPS)
++			return -EINVAL;
++		obj = drm_gem_object_lookup(file, args->handle);
++		if (!obj)
++			return -ENOENT;
++		if (args->offset >= obj->size || args->range > obj->size - args->offset) {
++			drm_gem_object_put(obj);
++			return -EINVAL;
++		}
++		ret = xa_alloc(&af->objects, &args->object_handle, obj, xa_limit_32b, GFP_KERNEL);
++		if (ret)
++			drm_gem_object_put(obj);
++		return ret;
++	case DRM_ASAHI_BIND_OBJECT_OP_UNBIND:
++		obj = xa_erase(&af->objects, args->object_handle);
++		if (!obj)
++			return -ENOENT;
++		drm_gem_object_put(obj);
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
 +static int agx_gem_create(struct drm_device *drm, void *data, struct drm_file *file)
 +{
 +	struct drm_asahi_gem_create *args = data;
@@ -493,8 +535,7 @@ index 000000000..5f2a1f02e
 +		switch (h.cmd_type) {
 +		case DRM_ASAHI_CMD_COMPUTE:
 +			memcpy(&c, cmdbuf + o, min_t(u32, h.size, sizeof(c)));
-+			if (c.flags || c.sampler_count || c.sampler_heap || c.helper.binary ||
-+			    c.ts.start.handle || c.ts.end.handle || !c.cdm_ctrl_stream_base)
++			if (c.flags || c.helper.binary || !c.cdm_ctrl_stream_base)
 +				return -EINVAL;
 +			if (n == MAX_COMMANDS)
 +				return -EINVAL;
@@ -705,6 +746,7 @@ index 000000000..5f2a1f02e
 +	DRM_IOCTL_DEF_DRV(ASAHI_VM_DESTROY, agx_vm_destroy_ioctl, DRM_RENDER_ALLOW),
 +	DRM_IOCTL_DEF_DRV(ASAHI_VM_BIND, agx_vm_bind_ioctl, DRM_RENDER_ALLOW),
 +	DRM_IOCTL_DEF_DRV(ASAHI_GEM_CREATE, agx_gem_create, DRM_RENDER_ALLOW),
++	DRM_IOCTL_DEF_DRV(ASAHI_GEM_BIND_OBJECT, agx_gem_bind_object, DRM_RENDER_ALLOW),
 +	DRM_IOCTL_DEF_DRV(ASAHI_GEM_MMAP_OFFSET, agx_gem_mmap_offset, DRM_RENDER_ALLOW),
 +	DRM_IOCTL_DEF_DRV(ASAHI_QUEUE_CREATE, agx_queue_create, DRM_RENDER_ALLOW),
 +	DRM_IOCTL_DEF_DRV(ASAHI_QUEUE_DESTROY, agx_queue_destroy, DRM_RENDER_ALLOW),
@@ -722,7 +764,8 @@ index 000000000..5f2a1f02e
 +	.num_ioctls = ARRAY_SIZE(agx_ioctls),
 +	.fops = &agx_fops,
 +	DRM_GEM_SHMEM_DRIVER_OPS,
-+	.name = "agx",
++	/* Mesa picks its driver by this name; this is the Asahi uAPI. */
++	.name = "asahi",
 +	.desc = "Apple A12 GPU",
 +	.major = 0,
 +	.minor = 1,
