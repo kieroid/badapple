@@ -1,5 +1,5 @@
 diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
-index e131bcf..8c8da9c 100644
+index e131bcf..531a53f 100644
 --- a/src/asahi/compiler/agx_compile.c
 +++ b/src/asahi/compiler/agx_compile.c
 @@ -977,7 +977,7 @@ translate_atomic_opcode(nir_atomic_op op)
@@ -11,7 +11,26 @@ index e131bcf..8c8da9c 100644
        return agx_zero();
     else
        return agx_src_index(&src);
-@@ -1520,7 +1520,9 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+@@ -1501,6 +1501,18 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+          b, dst, instr, AGX_SR_THREAD_POSITION_IN_THREADGROUP_X);
+ 
+    case nir_intrinsic_load_local_invocation_index:
++      if (AGX_G11) {
++         /* G11 has no thread index register (Apple's G11 code never reads
++          * one): build it from the position and size of the threadgroup.
++          */
++         agx_index x = agx_get_sr(b, 32, AGX_SR_THREAD_POSITION_IN_THREADGROUP_X);
++         agx_index y = agx_get_sr(b, 32, AGX_SR_THREAD_POSITION_IN_THREADGROUP_X + 1);
++         agx_index z = agx_get_sr(b, 32, AGX_SR_THREAD_POSITION_IN_THREADGROUP_X + 2);
++         agx_index wx = agx_get_sr(b, 32, AGX_SR_THREADS_PER_THREADGROUP_X);
++         agx_index wy = agx_get_sr(b, 32, AGX_SR_THREADS_PER_THREADGROUP_X + 1);
++         agx_index yz = agx_imad(b, z, wy, y, 0);
++         return agx_imad_to(b, dst, yz, wx, x, 0);
++      }
+       return agx_get_sr_to(b, dst, AGX_SR_THREAD_INDEX_IN_THREADGROUP);
+ 
+    case nir_intrinsic_load_layer_id:
+@@ -1520,7 +1532,9 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
              /* Pull out all the big hammers to make cross-workgroup memory
               * barriers work.
               */
@@ -22,7 +41,7 @@ index e131bcf..8c8da9c 100644
                 agx_unknown_barrier_1(b);
                 agx_memory_barrier_2(b);
  
-@@ -2853,6 +2855,126 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
+@@ -2853,6 +2867,126 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
     return false;
  }
  
@@ -149,7 +168,7 @@ index e131bcf..8c8da9c 100644
  static void
  agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
                   uint8_t *ts_count, uint8_t *ss_count)
-@@ -2900,7 +3022,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2900,7 +3034,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
        .lower_subgroup_masks = true,
     };
  
@@ -160,7 +179,7 @@ index e131bcf..8c8da9c 100644
  
     /* Lower addressing modes. The sooner we do this, the sooner we get rid of
      * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
-@@ -3034,6 +3158,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -3034,6 +3170,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
      * do it after fusing constant shifts. Constant folding will clean up.
      */
     NIR_PASS(_, nir, agx_nir_lower_algebraic_late);
@@ -171,7 +190,7 @@ index e131bcf..8c8da9c 100644
     NIR_PASS(_, nir, agx_nir_fuse_selects);
     NIR_PASS(_, nir, nir_opt_constant_folding);
     NIR_PASS(_, nir, nir_opt_combine_barriers, NULL, NULL);
-@@ -3502,7 +3630,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3502,7 +3642,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
      */
     bool dump_shaders = agx_should_dump(nir, AGX_DBG_SHADERS);
  #ifndef NDEBUG
@@ -729,6 +748,39 @@ index 7df5900..86a3c33 100644
     [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] = drm_shim_ioctl_stub,
     [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_stub,
     [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_stub,
+diff --git a/src/gallium/drivers/asahi/agx_disk_cache.c b/src/gallium/drivers/asahi/agx_disk_cache.c
+index 6fe688d..79055ad 100644
+--- a/src/gallium/drivers/asahi/agx_disk_cache.c
++++ b/src/gallium/drivers/asahi/agx_disk_cache.c
+@@ -64,6 +64,7 @@ write_shader(struct blob *blob, const struct agx_compiled_shader *binary,
+    blob_write_bytes(blob, &binary->attrib_components_read,
+                     sizeof(binary->attrib_components_read));
+    blob_write_bytes(blob, &binary->epilog_key, sizeof(binary->epilog_key));
++   blob_write_uint32(blob, binary->global_scratch_B);
+    blob_write_uint32(blob, binary->push_range_count);
+    blob_write_bytes(blob, binary->push,
+                     sizeof(binary->push[0]) * binary->push_range_count);
+@@ -115,6 +116,7 @@ read_shader(struct agx_screen *screen, struct blob_reader *blob,
+    blob_copy_bytes(blob, &binary->attrib_components_read,
+                    sizeof(binary->attrib_components_read));
+    blob_copy_bytes(blob, &binary->epilog_key, sizeof(binary->epilog_key));
++   binary->global_scratch_B = blob_read_uint32(blob);
+    binary->push_range_count = blob_read_uint32(blob);
+    blob_copy_bytes(blob, binary->push,
+                    sizeof(binary->push[0]) * binary->push_range_count);
+diff --git a/src/gallium/drivers/asahi/agx_nir_lower_sysvals.c b/src/gallium/drivers/asahi/agx_nir_lower_sysvals.c
+index 6a75c87..627ce59 100644
+--- a/src/gallium/drivers/asahi/agx_nir_lower_sysvals.c
++++ b/src/gallium/drivers/asahi/agx_nir_lower_sysvals.c
+@@ -231,6 +231,8 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intr,
+          load_sysval(b, 1, 32, AGX_SYSVAL_TABLE_PARAMS, 0), nir_imm_int(b, 0));
+    case nir_intrinsic_load_draw_id:
+       return load_sysval_root(b, 1, 32, &u->draw_id);
++   case nir_intrinsic_load_scratch_base_ptr:
++      return load_sysval_root(b, 1, 64, &u->scratch_base);
+    default:
+       return NULL;
+    }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
 index ab205bf..2536399 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
@@ -754,10 +806,80 @@ index ab205bf..2536399 100644
     caps->int64 = true;
     caps->sample_shading = true;
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..6803dd6 100644
+index 616dd6d..ee54034 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
-@@ -2889,7 +2889,8 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -1435,6 +1435,55 @@ agx_nir_lower_point_sprite_zw(nir_builder *b, nir_intrinsic_instr *intr,
+  * shader key should have already been applied. agx_compile_variant may call
+  * this multiple times if there are auxiliary shaders.
+  */
++/*
++ * G11's stack instructions differ from G13's and are not known yet, so keep
++ * private memory in global memory instead: each thread gets stride bytes at
++ * scratch_base + its index in the dispatch * stride.
++ *
++ * ponytail: sized for the whole grid. Per-core slots like Apple's spill
++ * buffer once the G11 stack instructions are known.
++ */
++static bool
++lower_scratch_to_global(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   unsigned stride = *(unsigned *)data;
++   bool store = intr->intrinsic == nir_intrinsic_store_scratch;
++
++   if (!store && intr->intrinsic != nir_intrinsic_load_scratch)
++      return false;
++
++   /* The thread's index in the grid, from the hardware grid position, which
++    * leaves out CL's global offset.
++    */
++   b->cursor = nir_before_instr(&intr->instr);
++   nir_def *id = nir_load_global_invocation_id(b, 32);
++   nir_def *size = nir_imul(b, nir_load_num_workgroups(b), nir_load_workgroup_size(b));
++   nir_def *index = nir_iadd(
++      b, nir_channel(b, id, 0),
++      nir_imul(b, nir_channel(b, size, 0),
++               nir_iadd(b, nir_channel(b, id, 1),
++                        nir_imul(b, nir_channel(b, size, 1), nir_channel(b, id, 2)))));
++   nir_def *offset = nir_iadd(b, nir_imul_imm(b, index, stride),
++                              intr->src[store ? 1 : 0].ssa);
++   nir_def *addr = nir_iadd(b, nir_load_scratch_base_ptr(b, 1, 64, 0),
++                            nir_u2u64(b, offset));
++
++   if (store) {
++      nir_store_global(b, intr->src[0].ssa, addr,
++                       .write_mask = nir_intrinsic_write_mask(intr),
++                       .align_mul = nir_intrinsic_align_mul(intr),
++                       .align_offset = nir_intrinsic_align_offset(intr));
++      nir_instr_remove(&intr->instr);
++   } else {
++      nir_def_replace(&intr->def,
++                      nir_load_global(b, intr->def.num_components,
++                                      intr->def.bit_size, addr,
++                                      .align_mul = nir_intrinsic_align_mul(intr),
++                                      .align_offset = nir_intrinsic_align_offset(intr)));
++   }
++   return true;
++}
++
+ static struct agx_compiled_shader *
+ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
+                 struct util_debug_callback *debug, mesa_shader_stage stage,
+@@ -1463,6 +1512,13 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
+        nir->info.fs.uses_sample_shading)
+       key.fs.inside_sample_loop = true;
+ 
++   if (AGX_G11 && nir->info.stage == MESA_SHADER_COMPUTE && nir->scratch_size) {
++      compiled->global_scratch_B = align(nir->scratch_size, 16);
++      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_scratch_to_global,
++               nir_metadata_control_flow, &compiled->global_scratch_B);
++      nir->scratch_size = 0;
++   }
++
+    if (internal_kernel) {
+       key.reserved_preamble = 8;
+    } else if (!secondary) {
+@@ -2889,7 +2945,8 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
  
     mesa_shader_stage stage = cs->stage;
  
@@ -767,7 +889,7 @@ index 616dd6d..6803dd6 100644
        agx_usc_pack(&b, TEXTURE, cfg) {
           cfg.start = 0;
           cfg.count =
-@@ -2898,7 +2899,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2898,7 +2955,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -776,7 +898,7 @@ index 616dd6d..6803dd6 100644
        agx_usc_pack(&b, SAMPLER, cfg) {
           cfg.start = 0;
           cfg.count = batch->sampler_count[stage];
-@@ -2954,6 +2955,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2954,6 +3011,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -788,7 +910,7 @@ index 616dd6d..6803dd6 100644
     if (stage == MESA_SHADER_FRAGMENT) {
        agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
     } else {
-@@ -2980,6 +2986,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2980,6 +3042,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
                               : 0;
        }
     }
@@ -796,3 +918,42 @@ index 616dd6d..6803dd6 100644
  
     if (cs->b.info.has_preamble) {
        agx_usc_pack(&b, PRESHADER, cfg) {
+@@ -5314,6 +5377,14 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+       batch->incoherent_writes = true;
+    }
+ 
++   if (cs && cs->global_scratch_B) {
++      assert(grid.mode == AGX_CDM_MODE_DIRECT && "no G11 scratch for indirect");
++      uint64_t size = (uint64_t)grid.count[0] * grid.count[1] * grid.count[2] *
++                      cs->global_scratch_B;
++      batch->uniforms.scratch_base =
++         agx_pool_alloc_aligned(&batch->pool, size, 64).gpu;
++   }
++
+    agx_update_descriptors(batch, cs);
+    agx_upload_uniforms(batch);
+ 
+diff --git a/src/gallium/drivers/asahi/agx_state.h b/src/gallium/drivers/asahi/agx_state.h
+index 967cd2b..756e7d3 100644
+--- a/src/gallium/drivers/asahi/agx_state.h
++++ b/src/gallium/drivers/asahi/agx_state.h
+@@ -168,6 +168,9 @@ struct PACKED agx_draw_uniforms {
+     * indices. This mapping must be compatible with the fragment shader.
+     */
+    uint16_t uvs_index[VARYING_SLOT_MAX];
++
++   /* G11: this dispatch's private memory, global_scratch_B per thread */
++   uint64_t scratch_base;
+ };
+ 
+ struct PACKED agx_stage_uniforms {
+@@ -223,6 +226,9 @@ struct agx_compiled_shader {
+    /* Mapped executable memory */
+    struct agx_bo *bo;
+ 
++   /* G11: bytes of private memory per thread, kept in global memory */
++   unsigned global_scratch_B;
++
+    /* Uniforms the driver must push */
+    unsigned push_range_count;
+    struct agx_push_range push[AGX_MAX_PUSH_RANGES];

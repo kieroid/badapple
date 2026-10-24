@@ -49,10 +49,10 @@ index 000000000..5b8b471d7
 +agx-y := agx_drv.o agx_fw.o agx_vm.o
 diff --git a/drivers/gpu/drm/agx/agx.h b/drivers/gpu/drm/agx/agx.h
 new file mode 100644
-index 000000000..85b54291a
+index 000000000..19ba9bdd5
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx.h
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,95 @@
 +/* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 +/*
 + * Apple A12 GPU (AGX G11P). The firmware's structures are described in the
@@ -100,6 +100,7 @@ index 000000000..85b54291a
 +	const struct asc_segment *segs;
 +	int nsegs;
 +	phys_addr_t sgx, fender;
++	void __iomem *rgx;		/* read only, for the MMU fault status */
 +
 +	/* Firmware structures, see agx_fw.c. */
 +	void *buf;
@@ -149,10 +150,10 @@ index 000000000..85b54291a
 +#endif
 diff --git a/drivers/gpu/drm/agx/agx_drv.c b/drivers/gpu/drm/agx/agx_drv.c
 new file mode 100644
-index 000000000..378c3473d
+index 000000000..bbbba16f9
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_drv.c
-@@ -0,0 +1,745 @@
+@@ -0,0 +1,749 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * DRM driver for the Apple A12 GPU (AGX G11P), compute only. It speaks the
@@ -833,6 +834,10 @@ index 000000000..378c3473d
 +	if (!res)
 +		return dev_err_probe(dev, -EINVAL, "no sgx registers\n");
 +	agx->sgx = res->start;
++	/* The firmware owns these; only read the fault status after a hang. */
++	agx->rgx = devm_ioremap(dev, res->start, resource_size(res));
++	if (!agx->rgx)
++		return -ENOMEM;
 +	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "fender");
 +	if (!res)
 +		return dev_err_probe(dev, -EINVAL, "no fender registers\n");
@@ -900,10 +905,10 @@ index 000000000..378c3473d
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..891f02175
+index 000000000..b956f4238
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,618 @@
+@@ -0,0 +1,624 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -946,6 +951,7 @@ index 000000000..891f02175
 +#define ASC_CPU_CONTROL_RUN	BIT(4)
 +
 +#define EV			3
++#define RGX_MMU_FAULT_STATUS	0x17040
 +#define DONE_STAMP		0xcafe0003
 +
 +/* One entry of the ADT's segment-ranges. */
@@ -1362,12 +1368,17 @@ index 000000000..891f02175
 +void agx_fw_timeout(struct agx_device *agx)
 +{
 +	struct dma_fence *fence;
++	u64 st;
 +
 +	if (agx_complete(agx)) {
 +		dev_warn(agx->dev, "job finished without an event\n");
 +		return;
 +	}
-+	dev_err(agx->dev, "job timed out, GPU wedged\n");
++	st = readq(agx->rgx + RGX_MMU_FAULT_STATUS);
++	dev_err(agx->dev,
++		"job timed out, GPU wedged; MMU fault %#llx: VA %#llx ctx %llu requester %llu %s type %llu\n",
++		st, (st >> 24) & ~0x3fULL, (st >> 16) & 0x3f, (st >> 8) & 0xff,
++		st & BIT(4) ? "read" : "write", (st >> 1) & 7);
 +	agx->wedged = true;
 +	spin_lock_irq(&agx->fence_lock);
 +	fence = agx->active;

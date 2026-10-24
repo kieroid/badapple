@@ -68,6 +68,25 @@ static const char *src =
 	"	uint i = get_global_id(0);\n"
 	"	float x = in[i];\n"
 	"	out[i] = (float4)(rint(x), ceil(x), trunc(x), sqrt(x));\n"
+	"}\n"
+	"kernel void ids(global uint *o) {\n"
+	"	uint i = get_global_id(0);\n"
+	"	if (i < 3) {\n"
+	"		o[8 * i + 0] = get_local_size(0);\n"
+	"		o[8 * i + 1] = get_local_size(1);\n"
+	"		o[8 * i + 2] = get_num_groups(0);\n"
+	"		o[8 * i + 3] = get_global_id(1);\n"
+	"		o[8 * i + 4] = get_global_id(2);\n"
+	"		o[8 * i + 5] = get_local_linear_id();\n"
+	"		o[8 * i + 6] = get_global_size(0);\n"
+	"		o[8 * i + 7] = get_group_id(0);\n"
+	"	}\n"
+	"}\n"
+	"kernel void priv(global uint *out, uint n) {\n"
+	"	uint a[128], i = get_global_id(0);\n"
+	"	for (uint j = 0; j < 128; j++)\n"
+	"		a[j] = i * 128 + j;\n"
+	"	out[i] = a[(i + n) & 127];\n"
 	"}\n";
 
 static int failed;
@@ -96,7 +115,7 @@ int main(void)
 	cl_context ctx;
 	cl_command_queue q;
 	cl_program prog;
-	cl_kernel kfill, ksaxpy, krev, kcount, klcount, kh2f, kf2h, krnd;
+	cl_kernel kfill, ksaxpy, krev, kcount, klcount, kh2f, kf2h, krnd, kids, kpriv;
 	cl_mem bu, bx, by, bc;
 	cl_int err;
 	char name[128];
@@ -113,7 +132,7 @@ int main(void)
 	CL(err);
 	prog = clCreateProgramWithSource(ctx, 1, &src, NULL, &err);
 	CL(err);
-	if (clBuildProgram(prog, 1, &dev, "", NULL, NULL)) {
+	if (clBuildProgram(prog, 1, &dev, "-cl-std=CL3.0", NULL, NULL)) {
 		static char log[16384];
 
 		clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, sizeof(log), log, NULL);
@@ -128,6 +147,8 @@ int main(void)
 	kh2f = clCreateKernel(prog, "h2f", &err);
 	kf2h = clCreateKernel(prog, "f2h", &err);
 	krnd = clCreateKernel(prog, "rnd", &err);
+	kids = clCreateKernel(prog, "ids", &err);
+	kpriv = clCreateKernel(prog, "priv", &err);
 	CL(err);
 
 	for (i = 0; i < N; i++) {
@@ -259,6 +280,29 @@ int main(void)
 		check("rint ceil trunc", bad_r);
 		check("sqrt", bad_s);
 	}
+
+	/* the ids private memory addressing is built from */
+	CL(clSetKernelArg(kids, 0, sizeof(bu), &bu));
+	CL(run(q, kids, 64));
+	CL(clEnqueueReadBuffer(q, bu, CL_TRUE, 0, sizeof(u), u, 0, NULL, NULL));
+	for (bad = i = 0; i < 3; i++) {
+		cl_uint w[8] = { 64, 1, N / 64, 0, 0, i, N, 0 };
+
+		if (memcmp(&u[8 * i], w, sizeof(w)) && !bad++)
+			printf("  thread %u: lsize %u %u groups %u gid %u %u lid %u gsize %u group %u\n",
+			       i, u[8 * i], u[8 * i + 1], u[8 * i + 2], u[8 * i + 3], u[8 * i + 4],
+			       u[8 * i + 5], u[8 * i + 6], u[8 * i + 7]);
+	}
+	check("ids", bad);
+
+	/* a private array indexed at run time lives in scratch memory */
+	CL(clSetKernelArg(kpriv, 0, sizeof(bu), &bu));
+	CL(clSetKernelArg(kpriv, 1, sizeof(k), &k));
+	CL(run(q, kpriv, 64));
+	CL(clEnqueueReadBuffer(q, bu, CL_TRUE, 0, sizeof(u), u, 0, NULL, NULL));
+	for (bad = i = 0; i < N; i++)
+		bad += u[i] != i * 128 + ((i + k) & 127);
+	check("private array", bad);
 
 	printf("%d failed\n", failed);
 	return failed != 0;

@@ -200,8 +200,30 @@ in `agx_pack_header.h`:
 | CDM header | bit 0 set; only the uniform count is filled in |
 | CDM block type | bits 31:30: launch 0, terminate 2, barrier 3 |
 
-Texture and sampler words are left out, so kernels using images or samplers
-do not work yet, and neither do kernels that spill (no helper program).
+Texture and sampler words are left out, so images are reported unsupported.
+
+G13's stack instructions kill the thread on G11, so private memory lives in
+global memory: each thread of a dispatch gets its share of a buffer the
+driver allocates per launch, indexed from the hardware grid position. Kernels
+that spill registers still fail, since spills are placed after register
+allocation. Apple's driver instead binds a USC spill buffer per encoder, which
+the kext puts at compute command +0x80 (RGX 0x118d0) as address | field << 1
+| 1, and sets shader word bits 37:36; the G11 stack instructions that use it
+are not known.
+
+Other G11 differences, from Apple's G11 shaders and the CTS:
+
+| what | G11 |
+|---|---|
+| sqrt | no srsqrt: x * rsqrt(x), with 0 and inf passed through |
+| rounding | floor only: ceil, trunc and roundeven are built from it |
+| SIMD groups | none, so subgroups are reported unsupported |
+| half denormals | flushed in every f16 source, compares and 16-bit constants included |
+| threadgroup atomics | the device atomic with address space 2 in bits 29:28 |
+| thread index in threadgroup | never read by Apple's code; built from position and size |
+
+After a job times out, the driver prints the MMU fault status (RGX 0x17040):
+address, context, requester and direction.
 
 `make rootfs` cross-builds that Mesa for the phone. `apk.static` makes an
 Alpine aarch64 sysroot and a runtime rootfs without root, rustup goes in
