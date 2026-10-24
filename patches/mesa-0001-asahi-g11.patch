@@ -1,5 +1,5 @@
 diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
-index e131bcf..5ce13aa 100644
+index e131bcf..8c8da9c 100644
 --- a/src/asahi/compiler/agx_compile.c
 +++ b/src/asahi/compiler/agx_compile.c
 @@ -977,7 +977,7 @@ translate_atomic_opcode(nir_atomic_op op)
@@ -22,7 +22,134 @@ index e131bcf..5ce13aa 100644
                 agx_unknown_barrier_1(b);
                 agx_memory_barrier_2(b);
  
-@@ -2900,7 +2902,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2853,6 +2855,126 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
+    return false;
+ }
+ 
++/*
++ * G11 lowering, late so that nothing re-forms what it splits:
++ *
++ * - G11 flushes half denormals wherever an f16 value meets the hardware, but
++ *   f16 <-> f32 conversions must be exact. Handle the denormal range with
++ *   integer and f32 arithmetic and keep the hardware conversion for the rest.
++ * - G11 has no srsqrt, so sqrt is x * rsqrt(x) with 0 and inf passed through.
++ * - Nor roundeven: round floor(x) up when the rest is over a half, or a half
++ *   with floor(x) odd. Nor trunc: floor(|x|) with x's sign, which NIR's own
++ *   lowering loses for -0. agx_nir_options lowers ceil to -floor(-x).
++ */
++/* f16 -> f32 that keeps half denormals: sign | 0 | mantissa is
++ * +-mantissa * 2^-24, the rest is the hardware conversion.
++ */
++static nir_def *
++exact_f2f32(nir_builder *b, nir_def *x)
++{
++   nir_def *bits = nir_u2u32(b, x);
++   nir_def *den = nir_fmul_imm(b, nir_u2f32(b, nir_iand_imm(b, bits, 0x3ff)),
++                               0x1p-24);
++   den = nir_bcsel(b, nir_test_mask(b, bits, 0x8000), nir_fneg(b, den), den);
++   return nir_bcsel(b, nir_ieq_imm(b, nir_iand_imm(b, bits, 0x7c00), 0), den,
++                    nir_f2f32(b, x));
++}
++
++static bool
++lower_g11_alu(nir_builder *b, nir_alu_instr *alu, UNUSED void *data)
++{
++   nir_def *x = alu->src[0].src.ssa;
++   bool to_f32 = alu->op == nir_op_f2f32 && x->bit_size == 16;
++
++   /* f16 compares see denormals as zero, which breaks libclc's rtp and rtn
++    * conversions: compare in f32 instead.
++    */
++   if (nir_alu_instr_is_comparison(alu) && x->bit_size == 16 &&
++       nir_alu_type_get_base_type(nir_op_infos[alu->op].input_types[0]) ==
++          nir_type_float) {
++      b->cursor = nir_before_instr(&alu->instr);
++      nir_def *srcs[2];
++      for (unsigned i = 0; i < 2; ++i)
++         srcs[i] = exact_f2f32(b, nir_ssa_for_alu_src(b, alu, i));
++      nir_def_replace(&alu->def, nir_build_alu2(b, alu->op, srcs[0], srcs[1]));
++      return true;
++   }
++
++   if (alu->op == nir_op_fround_even) {
++      b->cursor = nir_before_instr(&alu->instr);
++      x = nir_ssa_for_alu_src(b, alu, 0);
++      unsigned sz = x->bit_size;
++      nir_def *f = nir_ffloor(b, x);
++      nir_def *d = nir_fadd(b, x, nir_fneg(b, f));
++      nir_def *h = nir_fmul_imm(b, f, 0.5);
++      nir_def *odd = nir_fneu(b, nir_ffloor(b, h), h);
++      nir_def *up = nir_ior(b, nir_flt(b, nir_imm_floatN_t(b, 0.5, sz), d),
++                            nir_iand(b, nir_feq_imm(b, d, 0.5), odd));
++      nir_def *r = nir_fadd(b, f, nir_bcsel(b, up, nir_imm_floatN_t(b, 1.0, sz),
++                                             nir_imm_floatN_t(b, 0.0, sz)));
++      /* A zero result keeps x's sign */
++      nir_def *sign = nir_iand_imm(b, x, 1ull << (sz - 1));
++      nir_def_replace(&alu->def,
++                      nir_bcsel(b, nir_feq_imm(b, r, 0.0), sign, r));
++      return true;
++   }
++
++   if (alu->op == nir_op_ftrunc) {
++      b->cursor = nir_before_instr(&alu->instr);
++      x = nir_ssa_for_alu_src(b, alu, 0);
++      nir_def *sign = nir_iand_imm(b, x, 1ull << (x->bit_size - 1));
++      nir_def_replace(&alu->def, nir_ior(b, nir_ffloor(b, nir_fabs(b, x)), sign));
++      return true;
++   }
++
++   if (alu->op == nir_op_fsqrt) {
++      b->cursor = nir_before_instr(&alu->instr);
++      x = nir_ssa_for_alu_src(b, alu, 0);
++      nir_def *edge = nir_ior(b, nir_feq_imm(b, x, 0.0),
++                              nir_feq_imm(b, x, INFINITY));
++      nir_def_replace(&alu->def,
++                      nir_bcsel(b, edge, x, nir_fmul(b, x, nir_frsq(b, x))));
++      return true;
++   }
++
++   if (to_f32) {
++      b->cursor = nir_before_instr(&alu->instr);
++      nir_def_replace(&alu->def, exact_f2f32(b, nir_ssa_for_alu_src(b, alu, 0)));
++      return true;
++   }
++
++   if (alu->op != nir_op_f2f16 && alu->op != nir_op_f2f16_rtne)
++      return false;
++
++   b->cursor = nir_after_instr(&alu->instr);
++   x = nir_ssa_for_alu_src(b, alu, 0);
++
++   /*
++    * Below 2^-14 the result is |x| in units of 2^-24, rounded to even,
++    * with x's sign: the 24-bit mantissa shifted right by 126 - exponent.
++    * Integer only, since G11 has no round instruction. Shifts clamp at
++    * 31, where the mantissa rounds to 0.
++    */
++   nir_def *e = nir_iand_imm(b, nir_ushr_imm(b, x, 23), 0xff);
++   nir_def *mant = nir_ior_imm(b, nir_iand_imm(b, x, 0x7fffff), 0x800000);
++   nir_def *s = nir_isub(b, nir_imm_int(b, 126), e);
++   s = nir_bcsel(b, nir_ult_imm(b, s, 31), s, nir_imm_int(b, 31));
++   nir_def *q = nir_ushr(b, mant, s);
++   nir_def *rem =
++      nir_iand(b, mant, nir_iadd_imm(b, nir_ishl(b, nir_imm_int(b, 1), s), -1));
++   nir_def *half = nir_ishl(b, nir_imm_int(b, 1), nir_iadd_imm(b, s, -1));
++   nir_def *up = nir_ior(b, nir_ult(b, half, rem),
++                         nir_iand(b, nir_ieq(b, rem, half), nir_test_mask(b, q, 1)));
++   q = nir_iadd(b, q, nir_bcsel(b, up, nir_imm_int(b, 1), nir_imm_int(b, 0)));
++   nir_def *sign = nir_ushr_imm(b, nir_iand_imm(b, x, 0x80000000), 16);
++   nir_def *den = nir_u2u16(b, nir_ior(b, q, sign));
++   nir_def *res =
++      nir_bcsel(b, nir_flt_imm(b, nir_fabs(b, x), 0x1p-14), den, &alu->def);
++
++   nir_def_rewrite_uses_after(&alu->def, res);
++   return true;
++}
++
+ static void
+ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+                  uint8_t *ts_count, uint8_t *ss_count)
+@@ -2900,7 +3022,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
        .lower_subgroup_masks = true,
     };
  
@@ -33,7 +160,18 @@ index e131bcf..5ce13aa 100644
  
     /* Lower addressing modes. The sooner we do this, the sooner we get rid of
      * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
-@@ -3502,7 +3506,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3034,6 +3158,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+     * do it after fusing constant shifts. Constant folding will clean up.
+     */
+    NIR_PASS(_, nir, agx_nir_lower_algebraic_late);
++   if (AGX_G11) {
++      NIR_PASS(_, nir, nir_shader_alu_pass, lower_g11_alu,
++               nir_metadata_control_flow, NULL);
++   }
+    NIR_PASS(_, nir, agx_nir_fuse_selects);
+    NIR_PASS(_, nir, nir_opt_constant_folding);
+    NIR_PASS(_, nir, nir_opt_combine_barriers, NULL, NULL);
+@@ -3502,7 +3630,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
      */
     bool dump_shaders = agx_should_dump(nir, AGX_DBG_SHADERS);
  #ifndef NDEBUG
@@ -43,15 +181,36 @@ index e131bcf..5ce13aa 100644
  #else
     bool selftest = false;
  #endif
+diff --git a/src/asahi/compiler/agx_compile.h b/src/asahi/compiler/agx_compile.h
+index 4b10423..3a821d9 100644
+--- a/src/asahi/compiler/agx_compile.h
++++ b/src/asahi/compiler/agx_compile.h
+@@ -5,6 +5,7 @@
+ 
+ #pragma once
+ 
++#include "asahi/genxml/agx_g11.h"
+ #include "compiler/nir/nir.h"
+ #include "util/shader_stats.h"
+ #include "util/u_dynarray.h"
+@@ -368,6 +369,8 @@ static const nir_shader_compiler_options agx_nir_options = {
+    .lower_fminmax_signed_zero = true,
+    .lower_fdph = true,
+    .lower_ffract = true,
++   /* G11 has floor but no ceil; trunc and roundeven are in lower_g11_alu. */
++   .lower_fceil = AGX_G11,
+    .lower_pack_half_2x16 = true,
+    .lower_pack_unorm_2x16 = true,
+    .lower_pack_snorm_2x16 = true,
 diff --git a/src/asahi/compiler/agx_compiler.h b/src/asahi/compiler/agx_compiler.h
-index 4546093..e19f3f9 100644
+index 4546093..b21ff6c 100644
 --- a/src/asahi/compiler/agx_compiler.h
 +++ b/src/asahi/compiler/agx_compiler.h
 @@ -6,6 +6,7 @@
  
  #pragma once
  
-+#include "asahi/genxml/agx_pack_header.h" /* AGX_G11 */
++#include "asahi/genxml/agx_g11.h"
  #include "asahi/isa/agx_minifloat.h"
  #include "compiler/nir/nir.h"
  #include "util/bitset.h"
@@ -100,6 +259,23 @@ index f5afa46..7cd478a 100644
     schedule_class = "invalid")
  op("trap", (0x08, 2, _), dests = 0, can_eliminate = False,
     schedule_class = "invalid")
+diff --git a/src/asahi/compiler/agx_opt_compact_constants.c b/src/asahi/compiler/agx_opt_compact_constants.c
+index 6baad35..309b825 100644
+--- a/src/asahi/compiler/agx_opt_compact_constants.c
++++ b/src/asahi/compiler/agx_opt_compact_constants.c
+@@ -41,7 +41,11 @@ agx_opt_compact_constants(agx_context *ctx)
+             /* Try to compact to f16 */
+             uint16_t compact = _mesa_float_to_half(uif(I->imm));
+ 
+-            if (I->imm == fui(_mesa_half_to_float(compact))) {
++            /* G11 flushes half denormal sources to zero */
++            bool denorm = !(compact & 0x7c00) && (compact & 0x3ff);
++
++            if (I->imm == fui(_mesa_half_to_float(compact)) &&
++                !(AGX_G11 && denorm)) {
+                I->dest[0].size = AGX_SIZE_16;
+                I->imm = compact;
+                BITSET_SET(replaced, v);
 diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
 index 6236c3c..5b1eab1 100644
 --- a/src/asahi/compiler/agx_pack.c
@@ -195,14 +371,19 @@ index bfbd9c0..a37d9d8 100644
  };
  
  struct asahi_bo {
-diff --git a/src/asahi/genxml/agx_pack_header.h b/src/asahi/genxml/agx_pack_header.h
-index 2f238f2..7ca60ab 100644
---- a/src/asahi/genxml/agx_pack_header.h
-+++ b/src/asahi/genxml/agx_pack_header.h
-@@ -8,6 +8,15 @@
- 
- #pragma once
- 
+diff --git a/src/asahi/genxml/agx_g11.h b/src/asahi/genxml/agx_g11.h
+new file mode 100644
+index 0000000..7bb3f09
+--- /dev/null
++++ b/src/asahi/genxml/agx_g11.h
+@@ -0,0 +1,15 @@
++/*
++ * Copyright 2026 kiki <kieran@lavato.net>
++ * SPDX-License-Identifier: MIT
++ */
++
++#pragma once
++
 +/*
 + * Target the A12 GPU (G11). In the compiler: the stop instruction is 0x0801,
 + * threadgroup memory goes through the device load/store encoding, and there
@@ -211,6 +392,15 @@ index 2f238f2..7ca60ab 100644
 + * memory words are one word. cmdbuf.xml has the G11 encodings.
 + */
 +#define AGX_G11 1
+diff --git a/src/asahi/genxml/agx_pack_header.h b/src/asahi/genxml/agx_pack_header.h
+index 2f238f2..1c3294f 100644
+--- a/src/asahi/genxml/agx_pack_header.h
++++ b/src/asahi/genxml/agx_pack_header.h
+@@ -8,6 +8,8 @@
+ 
+ #pragma once
+ 
++#include "asahi/genxml/agx_g11.h"
 +
  #include "compiler/libcl/libcl.h"
  #include "util/bitpack_helpers.h"
@@ -539,6 +729,30 @@ index 7df5900..86a3c33 100644
     [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] = drm_shim_ioctl_stub,
     [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_stub,
     [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_stub,
+diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
+index ab205bf..2536399 100644
+--- a/src/gallium/drivers/asahi/agx_pipe.c
++++ b/src/gallium/drivers/asahi/agx_pipe.c
+@@ -1993,7 +1993,8 @@ agx_init_compute_caps(struct pipe_screen *pscreen)
+ 
+    caps->subgroup_sizes = 32;
+    caps->max_variable_threads_per_block = 1024;
+-   caps->max_subgroups = caps->max_variable_threads_per_block / 32;
++   /* G11 has no SIMD-group operations (simd_iadd kills the thread). */
++   caps->max_subgroups = AGX_G11 ? 0 : caps->max_variable_threads_per_block / 32;
+ }
+ 
+ static void
+@@ -2069,7 +2070,8 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+    caps->null_textures = true;
+    caps->texture_multisample = true;
+    caps->image_load_formatted = true;
+-   caps->image_store_formatted = true;
++   /* G11 texture and sampler state is not known yet, so no images. */
++   caps->image_store_formatted = !AGX_G11;
+    caps->compute = true;
+    caps->int64 = true;
+    caps->sample_shading = true;
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
 index 616dd6d..6803dd6 100644
 --- a/src/gallium/drivers/asahi/agx_state.c

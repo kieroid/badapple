@@ -8,10 +8,22 @@
 
 #define CL_TARGET_OPENCL_VERSION 300
 #include <CL/cl.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
 #define N 4096
+#define NH 65536
+
+/* Reference conversions, exact for every half including denormals */
+static float half_to_float(unsigned short h)
+{
+	unsigned e = h >> 10 & 0x1f, m = h & 0x3ff;
+	float f = e == 0 ? m * 0x1p-24f : e == 31 ? (m ? __builtin_nanf("") : __builtin_inff())
+				: (1024 + m) * __builtin_ldexpf(1.0f, (int)e - 25);
+
+	return h & 0x8000 ? -f : f;
+}
 
 static const char *src =
 	"kernel void fill(global uint *out, uint k) {\n"
@@ -43,6 +55,19 @@ static const char *src =
 	"	barrier(CLK_LOCAL_MEM_FENCE);\n"
 	"	if (get_local_id(0) == 0)\n"
 	"		atomic_add(c, n);\n"
+	"}\n"
+	"kernel void h2f(global float *out, global const half *in) {\n"
+	"	uint i = get_global_id(0);\n"
+	"	out[i] = vload_half(i, in);\n"
+	"}\n"
+	"kernel void f2h(global half *out, global const float *in) {\n"
+	"	uint i = get_global_id(0);\n"
+	"	vstore_half(in[i], i, out);\n"
+	"}\n"
+	"kernel void rnd(global float4 *out, global const float *in) {\n"
+	"	uint i = get_global_id(0);\n"
+	"	float x = in[i];\n"
+	"	out[i] = (float4)(rint(x), ceil(x), trunc(x), sqrt(x));\n"
 	"}\n";
 
 static int failed;
@@ -71,7 +96,7 @@ int main(void)
 	cl_context ctx;
 	cl_command_queue q;
 	cl_program prog;
-	cl_kernel kfill, ksaxpy, krev, kcount, klcount;
+	cl_kernel kfill, ksaxpy, krev, kcount, klcount, kh2f, kf2h, krnd;
 	cl_mem bu, bx, by, bc;
 	cl_int err;
 	char name[128];
@@ -100,6 +125,9 @@ int main(void)
 	krev = clCreateKernel(prog, "reverse", &err);
 	kcount = clCreateKernel(prog, "count", &err);
 	klcount = clCreateKernel(prog, "lcount", &err);
+	kh2f = clCreateKernel(prog, "h2f", &err);
+	kf2h = clCreateKernel(prog, "f2h", &err);
+	krnd = clCreateKernel(prog, "rnd", &err);
 	CL(err);
 
 	for (i = 0; i < N; i++) {
@@ -154,6 +182,83 @@ int main(void)
 	CL(run(q, klcount, 64));
 	CL(clEnqueueReadBuffer(q, bc, CL_TRUE, 0, sizeof(c), &c, 0, NULL, NULL));
 	check("local count", c != want);
+
+	/* every half to float, then floats across the half denormal range back */
+	{
+		static unsigned short h[NH], h2[NH];
+		static float f[NH];
+		size_t global = NH, local = 64;
+		cl_mem bh = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(h), NULL, &err);
+		cl_mem bf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(f), NULL, &err);
+
+		CL(err);
+		for (i = 0; i < NH; i++)
+			h[i] = i;
+		CL(clEnqueueWriteBuffer(q, bh, CL_TRUE, 0, sizeof(h), h, 0, NULL, NULL));
+		CL(clSetKernelArg(kh2f, 0, sizeof(bf), &bf));
+		CL(clSetKernelArg(kh2f, 1, sizeof(bh), &bh));
+		CL(clEnqueueNDRangeKernel(q, kh2f, 1, NULL, &global, &local, 0, NULL, NULL));
+		CL(clEnqueueReadBuffer(q, bf, CL_TRUE, 0, sizeof(f), f, 0, NULL, NULL));
+		for (bad = i = 0; i < NH; i++) {
+			float w = half_to_float(i);
+
+			bad += w == w ? memcmp(&f[i], &w, 4) != 0 : f[i] == f[i];
+		}
+		check("half to float", bad);
+
+		/* i * 2^-34 steps through every half denormal and the rounding between */
+		for (i = 0; i < NH; i++)
+			f[i] = (i & 1 ? -1.0f : 1.0f) * (i >> 1) * 0x1p-34f;
+		CL(clEnqueueWriteBuffer(q, bf, CL_TRUE, 0, sizeof(f), f, 0, NULL, NULL));
+		CL(clSetKernelArg(kf2h, 0, sizeof(bh), &bh));
+		CL(clSetKernelArg(kf2h, 1, sizeof(bf), &bf));
+		CL(clEnqueueNDRangeKernel(q, kf2h, 1, NULL, &global, &local, 0, NULL, NULL));
+		CL(clEnqueueReadBuffer(q, bh, CL_TRUE, 0, sizeof(h2), h2, 0, NULL, NULL));
+		for (bad = i = 0; i < NH; i++) {
+			/* round to nearest even, in units of 2^-24 */
+			unsigned q24 = (i >> 1) >> 10, rem = (i >> 1) & 1023;
+			unsigned short w = q24 + (rem > 512 || (rem == 512 && (q24 & 1)));
+
+			w |= i & 1 ? 0x8000 : 0;
+			bad += h2[i] != w;
+		}
+		check("float to half", bad);
+	}
+
+	/* rint, ceil, trunc bit-exact; sqrt within 3 ulp */
+	{
+		static float in[N], out[4 * N];
+		static const float edge[] = { 0.0f, -0.0f, 0.5f, -0.5f, 1.5f, 2.5f, -2.5f, -0.4f,
+					      0x1p23f, 0x1.fffffep22f, -0x1.000002p23f, INFINITY,
+					      -INFINITY, 7.5f, 3.0f, 0x1p-23f };
+		cl_mem bi = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(in), NULL, &err);
+		cl_mem bo = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(out), NULL, &err);
+		unsigned bad_r = 0, bad_s = 0;
+
+		CL(err);
+		for (i = 0; i < N; i++)
+			in[i] = i < 16 ? edge[i] : (int)(i * 2654435761u) * 0x1p-20f;
+		CL(clEnqueueWriteBuffer(q, bi, CL_TRUE, 0, sizeof(in), in, 0, NULL, NULL));
+		CL(clSetKernelArg(krnd, 0, sizeof(bo), &bo));
+		CL(clSetKernelArg(krnd, 1, sizeof(bi), &bi));
+		CL(run(q, krnd, 64));
+		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(out), out, 0, NULL, NULL));
+		for (i = 0; i < N; i++) {
+			float x = in[i], w[3] = { rintf(x), ceilf(x), truncf(x) }, s = sqrtf(x);
+
+			if (memcmp(&out[4 * i], w, sizeof(w)) && !bad_r++)
+				printf("  %a: rint ceil trunc %a %a %a, want %a %a %a\n", x,
+				       out[4 * i], out[4 * i + 1], out[4 * i + 2], w[0], w[1], w[2]);
+			if (s != s)
+				bad_s += out[4 * i + 3] == out[4 * i + 3];
+			else if (isinf(s) || s == 0)
+				bad_s += out[4 * i + 3] != s;
+			else
+				bad_s += fabsf(out[4 * i + 3] - s) > 3 * (nextafterf(s, INFINITY) - s);
+		}
+		check("rint ceil trunc", bad_r);
+		check("sqrt", bad_s);
+	}
 
 	printf("%d failed\n", failed);
 	return failed != 0;
