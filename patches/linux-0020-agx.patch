@@ -25,15 +25,16 @@ index e635fcffd..13f74da08 100644
  obj-$(CONFIG_DRM_ADP) += adp/
 diff --git a/drivers/gpu/drm/agx/Kconfig b/drivers/gpu/drm/agx/Kconfig
 new file mode 100644
-index 000000000..990978f4f
+index 000000000..51f73f219
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/Kconfig
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,9 @@
 +# SPDX-License-Identifier: GPL-2.0-only OR MIT
 +config DRM_AGX
 +	tristate "Apple A12 GPU (AGX G11P)"
 +	depends on DRM && ARCH_APPLE && APPLE_RTKIT
 +	select DRM_GEM_SHMEM_HELPER
++	select DRM_SCHED
 +	help
 +	  Compute-only DRM driver for the GPU in the Apple A12 (T8020). It
 +	  boots the GPU firmware and runs compute jobs through the Asahi uAPI.
@@ -48,10 +49,10 @@ index 000000000..5b8b471d7
 +agx-y := agx_drv.o agx_fw.o agx_vm.o
 diff --git a/drivers/gpu/drm/agx/agx.h b/drivers/gpu/drm/agx/agx.h
 new file mode 100644
-index 000000000..6357732eb
+index 000000000..058b65e0b
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx.h
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,93 @@
 +/* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 +/*
 + * Apple A12 GPU (AGX G11P). The firmware's structures are described in the
@@ -64,8 +65,10 @@ index 000000000..6357732eb
 +#define __AGX_H__
 +
 +#include <drm/drm_device.h>
++#include <drm/gpu_scheduler.h>
 +#include <linux/dmapool.h>
 +#include <linux/mutex.h>
++#include <linux/spinlock.h>
 +#include <linux/types.h>
 +
 +/* The firmware's view of the chunk, through the mem-desc table. */
@@ -109,7 +112,13 @@ index 000000000..6357732eb
 +	u32 ring, info, nr_cmds;
 +	struct { u32 cmd, evc, useq, scratch; } slot[4];
 +	bool wedged;
-+	struct mutex job_lock;		/* one job at a time */
++
++	/* One job runs at a time; its fence is signalled from agx_recv(). */
++	struct drm_gpu_scheduler sched;
++	spinlock_t fence_lock;
++	u64 fence_ctx, fence_seqno;
++	struct dma_fence *active;
++	u32 active_stamp;
 +
 +	struct mutex ctx_lock;
 +	unsigned long ctx_used[BITS_TO_LONGS(AGX_NR_CTX)];
@@ -120,25 +129,29 @@ index 000000000..6357732eb
 +
 +/* agx_fw.c */
 +int agx_fw_init(struct agx_device *agx, void __iomem *asc);
-+int agx_fw_run(struct agx_device *agx, u32 ctx, u64 args, u64 stream, u32 timeout_ms);
++struct dma_fence *agx_fw_run(struct agx_device *agx, u32 ctx, u64 args, u64 stream);
++void agx_fw_timeout(struct agx_device *agx);
 +void agx_fw_flush_tlb(struct agx_device *agx, u32 ctx);
 +extern const struct apple_rtkit_ops agx_rtk_ops;
 +
 +/* agx_vm.c */
 +struct agx_vm *agx_vm_create(struct agx_device *agx, u64 kernel_start, u64 kernel_end);
-+void agx_vm_destroy(struct agx_vm *vm);
++struct agx_vm *agx_vm_get(struct agx_vm *vm);
++void agx_vm_put(struct agx_vm *vm);
 +int agx_vm_bind(struct agx_vm *vm, struct drm_gem_object *obj, u64 offset, u64 range,
 +		u64 addr, bool write);
 +int agx_vm_unbind(struct agx_vm *vm, u64 addr, u64 range);
-+int agx_vm_run(struct agx_vm *vm, u64 stream, u32 timeout_ms);
++struct agx_vm *agx_vm_job_start(struct agx_vm *vm);
++void agx_vm_job_end(struct agx_vm *vm);
++struct dma_fence *agx_vm_run(struct agx_vm *vm, u64 stream);
 +
 +#endif
 diff --git a/drivers/gpu/drm/agx/agx_drv.c b/drivers/gpu/drm/agx/agx_drv.c
 new file mode 100644
-index 000000000..3051aabed
+index 000000000..5f2a1f02e
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_drv.c
-@@ -0,0 +1,543 @@
+@@ -0,0 +1,666 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * DRM driver for the Apple A12 GPU (AGX G11P), compute only. It speaks the
@@ -148,8 +161,10 @@ index 000000000..3051aabed
 + *    for every context, so queues must use it as usc_exec_base.
 + *  - No render commands, samplers, helper programs, timestamps or
 + *    single-page binds yet.
-+ *  - Submits run synchronously: in-syncs are waited for, the commands run
-+ *    one after another, and out-syncs get a signalled fence.
++ *  - Each compute command is one scheduler job. Every queue is an entity
++ *    on the one scheduler, which runs one job at a time, so the commands
++ *    of a submit run in order. In-syncs gate the first, out-syncs get the
++ *    last one's fence.
 + *
 + * Copyright (c) 2026 kiki <kieran@lavato.net>
 + */
@@ -160,6 +175,7 @@ index 000000000..3051aabed
 +#include <drm/drm_gem_shmem_helper.h>
 +#include <drm/drm_ioctl.h>
 +#include <drm/drm_syncobj.h>
++#include <drm/gpu_scheduler.h>
 +#include <linux/dma-fence-chain.h>
 +#include <linux/dma-mapping.h>
 +#include <linux/dmapool.h>
@@ -177,13 +193,30 @@ index 000000000..3051aabed
 +
 +struct agx_queue {
 +	struct agx_vm *vm;
++	struct drm_sched_entity entity;
 +};
++
++struct agx_job {
++	struct drm_sched_job base;
++	struct agx_vm *vm;
++	u64 stream;
++};
++
++#define to_job(j) container_of(j, struct agx_job, base)
 +
 +struct agx_file {
 +	struct xarray vms;
 +	struct xarray queues;
 +	struct mutex lock;	/* VMs against the queues that use them */
 +};
++
++/* Waits up to the timeout for the queue's jobs, then drops the rest. */
++static void agx_queue_free(struct agx_queue *q)
++{
++	drm_sched_entity_destroy(&q->entity);
++	agx_vm_put(q->vm);
++	kfree(q);
++}
 +
 +static int agx_open(struct drm_device *drm, struct drm_file *file)
 +{
@@ -206,9 +239,9 @@ index 000000000..3051aabed
 +	unsigned long id;
 +
 +	xa_for_each(&af->queues, id, q)
-+		kfree(q);
++		agx_queue_free(q);
 +	xa_for_each(&af->vms, id, vm)
-+		agx_vm_destroy(vm);
++		agx_vm_put(vm);
 +	xa_destroy(&af->queues);
 +	xa_destroy(&af->vms);
 +	kfree(af);
@@ -265,38 +298,26 @@ index 000000000..3051aabed
 +		return PTR_ERR(vm);
 +	ret = xa_alloc(&af->vms, &args->vm_id, vm, xa_limit_32b, GFP_KERNEL);
 +	if (ret)
-+		agx_vm_destroy(vm);
++		agx_vm_put(vm);
 +	return ret;
 +}
 +
++/* Queues and jobs keep their own references. */
 +static int agx_vm_destroy_ioctl(struct drm_device *drm, void *data, struct drm_file *file)
 +{
 +	struct drm_asahi_vm_destroy *args = data;
 +	struct agx_file *af = file->driver_priv;
-+	struct agx_queue *q;
 +	struct agx_vm *vm;
-+	unsigned long id;
-+	int ret = 0;
 +
 +	if (args->pad)
 +		return -EINVAL;
 +	mutex_lock(&af->lock);
-+	vm = xa_load(&af->vms, args->vm_id);
-+	if (!vm) {
-+		ret = -ENOENT;
-+		goto out;
-+	}
-+	xa_for_each(&af->queues, id, q) {
-+		if (q->vm == vm) {
-+			ret = -EBUSY;
-+			goto out;
-+		}
-+	}
-+	xa_erase(&af->vms, args->vm_id);
-+	agx_vm_destroy(vm);
-+out:
++	vm = xa_erase(&af->vms, args->vm_id);
 +	mutex_unlock(&af->lock);
-+	return ret;
++	if (!vm)
++		return -ENOENT;
++	agx_vm_put(vm);
++	return 0;
 +}
 +
 +static int agx_vm_bind_ioctl(struct drm_device *drm, void *data, struct drm_file *file)
@@ -402,6 +423,7 @@ index 000000000..3051aabed
 +{
 +	struct drm_asahi_queue_create *args = data;
 +	struct agx_file *af = file->driver_priv;
++	struct drm_gpu_scheduler *sched = &to_agx(drm)->sched;
 +	struct agx_queue *q;
 +	int ret;
 +
@@ -412,12 +434,23 @@ index 000000000..3051aabed
 +	q = kzalloc(sizeof(*q), GFP_KERNEL);
 +	if (!q)
 +		return -ENOMEM;
++	ret = drm_sched_entity_init(&q->entity, DRM_SCHED_PRIORITY_NORMAL, &sched, 1, NULL);
++	if (ret) {
++		kfree(q);
++		return ret;
++	}
 +	mutex_lock(&af->lock);
 +	q->vm = xa_load(&af->vms, args->vm_id);
++	if (q->vm)
++		agx_vm_get(q->vm);
 +	ret = q->vm ? xa_alloc(&af->queues, &args->queue_id, q, xa_limit_32b, GFP_KERNEL) : -ENOENT;
 +	mutex_unlock(&af->lock);
-+	if (ret)
++	if (ret) {
++		drm_sched_entity_destroy(&q->entity);
++		if (q->vm)
++			agx_vm_put(q->vm);
 +		kfree(q);
++	}
 +	return ret;
 +}
 +
@@ -434,70 +467,17 @@ index 000000000..3051aabed
 +	mutex_unlock(&af->lock);
 +	if (!q)
 +		return -ENOENT;
-+	kfree(q);
-+	return 0;
-+}
-+
-+static int agx_wait_syncs(struct drm_file *file, struct drm_asahi_sync *syncs, u32 n)
-+{
-+	u32 i;
-+	int ret;
-+
-+	for (i = 0; i < n; i++) {
-+		struct dma_fence *fence;
-+
-+		if (syncs[i].sync_type > DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ)
-+			return -EINVAL;
-+		ret = drm_syncobj_find_fence(file, syncs[i].handle, syncs[i].timeline_value, 0,
-+					     &fence);
-+		if (ret)
-+			return ret;
-+		ret = dma_fence_wait(fence, true);
-+		dma_fence_put(fence);
-+		if (ret)
-+			return ret;
-+	}
-+	return 0;
-+}
-+
-+static int agx_signal_syncs(struct drm_file *file, struct drm_asahi_sync *syncs, u32 n)
-+{
-+	u32 i;
-+
-+	for (i = 0; i < n; i++) {
-+		struct drm_syncobj *syncobj = drm_syncobj_find(file, syncs[i].handle);
-+		struct dma_fence *fence = dma_fence_get_stub();
-+
-+		if (!syncobj) {
-+			dma_fence_put(fence);
-+			return -ENOENT;
-+		}
-+		if (syncs[i].sync_type == DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ) {
-+			struct dma_fence_chain *chain = dma_fence_chain_alloc();
-+
-+			if (!chain) {
-+				dma_fence_put(fence);
-+				drm_syncobj_put(syncobj);
-+				return -ENOMEM;
-+			}
-+			drm_syncobj_add_point(syncobj, chain, fence, syncs[i].timeline_value);
-+		} else {
-+			drm_syncobj_replace_fence(syncobj, fence);
-+		}
-+		dma_fence_put(fence);
-+		drm_syncobj_put(syncobj);
-+	}
++	agx_queue_free(q);
 +	return 0;
 +}
 +
 +/*
-+ * Walk the command buffer. With vm NULL only validate it; otherwise run its
-+ * compute commands. Attachment commands are only hints and are skipped.
++ * Check the command buffer and collect its compute streams. Attachment
++ * commands are only hints and are skipped. Returns the number of streams.
 + */
-+static int agx_walk(const u8 *cmdbuf, u32 size, struct agx_vm *vm)
++static int agx_walk(const u8 *cmdbuf, u32 size, u64 *streams)
 +{
-+	u32 o = 0, nr_hw = 0;
-+	int ret;
++	u32 o = 0, n = 0;
 +
 +	while (o < size) {
 +		struct drm_asahi_cmd_header h;
@@ -516,13 +496,9 @@ index 000000000..3051aabed
 +			if (c.flags || c.sampler_count || c.sampler_heap || c.helper.binary ||
 +			    c.ts.start.handle || c.ts.end.handle || !c.cdm_ctrl_stream_base)
 +				return -EINVAL;
-+			if (++nr_hw > MAX_COMMANDS)
++			if (n == MAX_COMMANDS)
 +				return -EINVAL;
-+			if (vm) {
-+				ret = agx_vm_run(vm, c.cdm_ctrl_stream_base, JOB_TIMEOUT_MS);
-+				if (ret)
-+					return ret;
-+			}
++			streams[n++] = c.cdm_ctrl_stream_base;
 +			break;
 +		case DRM_ASAHI_SET_VERTEX_ATTACHMENTS:
 +		case DRM_ASAHI_SET_FRAGMENT_ATTACHMENTS:
@@ -533,7 +509,53 @@ index 000000000..3051aabed
 +		}
 +		o += h.size;
 +	}
-+	return nr_hw ? 0 : -EINVAL;
++	return n ?: -EINVAL;
++}
++
++/* An out-sync, looked up before anything is queued so that nothing fails after. */
++struct agx_out {
++	struct drm_syncobj *syncobj;
++	struct dma_fence_chain *chain;
++	u64 point;
++};
++
++static int agx_get_outs(struct drm_file *file, const struct drm_asahi_sync *syncs, u32 n,
++			struct agx_out *outs)
++{
++	u32 i;
++
++	for (i = 0; i < n; i++) {
++		if (syncs[i].sync_type > DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ)
++			return -EINVAL;
++		outs[i].syncobj = drm_syncobj_find(file, syncs[i].handle);
++		if (!outs[i].syncobj)
++			return -ENOENT;
++		if (syncs[i].sync_type == DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ) {
++			outs[i].chain = dma_fence_chain_alloc();
++			if (!outs[i].chain)
++				return -ENOMEM;
++			outs[i].point = syncs[i].timeline_value;
++		}
++	}
++	return 0;
++}
++
++static void agx_put_outs(struct agx_out *outs, u32 n)
++{
++	u32 i;
++
++	for (i = 0; i < n; i++) {
++		dma_fence_chain_free(outs[i].chain);
++		if (outs[i].syncobj)
++			drm_syncobj_put(outs[i].syncobj);
++	}
++}
++
++static void agx_job_free(struct agx_job *job)
++{
++	drm_sched_job_cleanup(&job->base);
++	agx_vm_job_end(job->vm);
++	kfree(job);
 +}
 +
 +static int agx_submit(struct drm_device *drm, void *data, struct drm_file *file)
@@ -541,10 +563,13 @@ index 000000000..3051aabed
 +	struct drm_asahi_submit *args = data;
 +	struct agx_file *af = file->driver_priv;
 +	struct drm_asahi_sync *syncs = NULL;
-+	u32 nsyncs = args->in_sync_count + args->out_sync_count;
++	struct agx_job *jobs[MAX_COMMANDS] = {};
++	struct agx_out *outs = NULL;
++	struct dma_fence *done;
 +	struct agx_queue *q;
++	u64 *streams;
 +	u8 *cmdbuf;
-+	int ret;
++	int i, n, ret;
 +
 +	if (args->flags || args->pad || !args->cmdbuf_size || args->cmdbuf_size > SZ_64K ||
 +	    args->in_sync_count > MAX_SYNCS || args->out_sync_count > MAX_SYNCS)
@@ -553,31 +578,125 @@ index 000000000..3051aabed
 +	cmdbuf = memdup_user(u64_to_user_ptr(args->cmdbuf), args->cmdbuf_size);
 +	if (IS_ERR(cmdbuf))
 +		return PTR_ERR(cmdbuf);
-+	if (nsyncs) {
-+		syncs = memdup_array_user(u64_to_user_ptr(args->syncs), nsyncs, sizeof(*syncs));
++	streams = kcalloc(MAX_COMMANDS, sizeof(*streams), GFP_KERNEL);
++	outs = kcalloc(args->out_sync_count, sizeof(*outs), GFP_KERNEL);
++	if (!streams || (args->out_sync_count && !outs)) {
++		ret = -ENOMEM;
++		goto out_free;
++	}
++	if (args->in_sync_count + args->out_sync_count) {
++		syncs = memdup_array_user(u64_to_user_ptr(args->syncs),
++					  args->in_sync_count + args->out_sync_count, sizeof(*syncs));
 +		if (IS_ERR(syncs)) {
-+			kfree(cmdbuf);
-+			return PTR_ERR(syncs);
++			ret = PTR_ERR(syncs);
++			syncs = NULL;
++			goto out_free;
 +		}
 +	}
-+
-+	ret = agx_walk(cmdbuf, args->cmdbuf_size, NULL);
-+	if (!ret)
-+		ret = agx_wait_syncs(file, syncs, args->in_sync_count);
++	n = ret = agx_walk(cmdbuf, args->cmdbuf_size, streams);
++	if (ret < 0)
++		goto out_free;
++	ret = agx_get_outs(file, syncs + args->in_sync_count, args->out_sync_count, outs);
 +	if (ret)
-+		goto out;
++		goto out_outs;
 +
++	/* The file lock keeps the queue alive until its jobs are pushed. */
 +	mutex_lock(&af->lock);
 +	q = xa_load(&af->queues, args->queue_id);
-+	ret = q ? agx_walk(cmdbuf, args->cmdbuf_size, q->vm) : -ENOENT;
++	if (!q) {
++		ret = -ENOENT;
++		goto out_unlock;
++	}
++	for (i = 0; i < n; i++) {
++		jobs[i] = kzalloc(sizeof(*jobs[i]), GFP_KERNEL);
++		if (!jobs[i]) {
++			ret = -ENOMEM;
++			goto out_jobs;
++		}
++		ret = drm_sched_job_init(&jobs[i]->base, &q->entity, 1, q, file->client_id);
++		if (ret) {
++			kfree(jobs[i]);
++			jobs[i] = NULL;
++			goto out_jobs;
++		}
++		jobs[i]->vm = agx_vm_job_start(q->vm);
++		jobs[i]->stream = streams[i];
++	}
++	for (i = 0; i < args->in_sync_count; i++) {
++		if (syncs[i].sync_type > DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ) {
++			ret = -EINVAL;
++			goto out_jobs;
++		}
++		ret = drm_sched_job_add_syncobj_dependency(&jobs[0]->base, file, syncs[i].handle,
++							   syncs[i].timeline_value);
++		if (ret)
++			goto out_jobs;
++	}
++
++	/* Nothing fails from here on. */
++	for (i = 0; i < n; i++) {
++		drm_sched_job_arm(&jobs[i]->base);
++		if (i == n - 1)
++			done = dma_fence_get(&jobs[i]->base.s_fence->finished);
++		drm_sched_entity_push_job(&jobs[i]->base);
++	}
 +	mutex_unlock(&af->lock);
-+	if (!ret)
-+		ret = agx_signal_syncs(file, syncs + args->in_sync_count, args->out_sync_count);
-+out:
++
++	for (i = 0; i < args->out_sync_count; i++) {
++		if (outs[i].chain) {
++			drm_syncobj_add_point(outs[i].syncobj, outs[i].chain, done, outs[i].point);
++			outs[i].chain = NULL;
++		} else {
++			drm_syncobj_replace_fence(outs[i].syncobj, done);
++		}
++	}
++	dma_fence_put(done);
++	ret = 0;
++	goto out_outs;
++
++out_jobs:
++	for (i = 0; i < n && jobs[i]; i++)
++		agx_job_free(jobs[i]);
++out_unlock:
++	mutex_unlock(&af->lock);
++out_outs:
++	agx_put_outs(outs, args->out_sync_count);
++out_free:
 +	kfree(syncs);
++	kfree(outs);
++	kfree(streams);
 +	kfree(cmdbuf);
 +	return ret;
 +}
++
++static struct dma_fence *agx_run_job(struct drm_sched_job *sj)
++{
++	struct agx_job *job = to_job(sj);
++
++	return agx_vm_run(job->vm, job->stream);
++}
++
++/*
++ * The GPU cannot be reset: agx_fw_timeout() either finds the job done or
++ * fails it and wedges the GPU. Either way its fence is signalled, and
++ * NO_HANG puts it back on the pending list to be freed.
++ */
++static enum drm_gpu_sched_stat agx_timedout_job(struct drm_sched_job *sj)
++{
++	agx_fw_timeout(container_of(sj->sched, struct agx_device, sched));
++	return DRM_GPU_SCHED_STAT_NO_HANG;
++}
++
++static void agx_free_job(struct drm_sched_job *sj)
++{
++	agx_job_free(to_job(sj));
++}
++
++static const struct drm_sched_backend_ops agx_sched_ops = {
++	.run_job = agx_run_job,
++	.timedout_job = agx_timedout_job,
++	.free_job = agx_free_job,
++};
 +
 +static const struct drm_ioctl_desc agx_ioctls[] = {
 +	DRM_IOCTL_DEF_DRV(ASAHI_GET_PARAMS, agx_get_params, DRM_RENDER_ALLOW),
@@ -609,6 +728,11 @@ index 000000000..3051aabed
 +	.minor = 1,
 +};
 +
++static void agx_sched_fini(void *sched)
++{
++	drm_sched_fini(sched);
++}
++
 +static int agx_probe(struct platform_device *pdev)
 +{
 +	struct device *dev = &pdev->dev;
@@ -621,7 +745,6 @@ index 000000000..3051aabed
 +	if (IS_ERR(agx))
 +		return PTR_ERR(agx);
 +	agx->dev = dev;
-+	mutex_init(&agx->job_lock);
 +	mutex_init(&agx->ctx_lock);
 +
 +	agx->segs = of_get_property(dev->of_node, "apple,segment-ranges", &len);
@@ -659,6 +782,19 @@ index 000000000..3051aabed
 +	ret = agx_fw_init(agx, asc);
 +	if (ret)
 +		return ret;
++	ret = drm_sched_init(&agx->sched, &(struct drm_sched_init_args){
++		.ops = &agx_sched_ops,
++		.num_rqs = DRM_SCHED_PRIORITY_COUNT,
++		.credit_limit = 1,
++		.timeout = msecs_to_jiffies(JOB_TIMEOUT_MS),
++		.name = "agx",
++		.dev = dev,
++	});
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, agx_sched_fini, &agx->sched);
++	if (ret)
++		return ret;
 +	return drm_dev_register(&agx->drm, 0);
 +}
 +
@@ -684,10 +820,10 @@ index 000000000..3051aabed
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..dc61f5c0f
+index 000000000..891f02175
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,564 @@
+@@ -0,0 +1,618 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -701,9 +837,11 @@ index 000000000..dc61f5c0f
 + */
 +
 +#include <linux/delay.h>
++#include <linux/dma-fence.h>
 +#include <linux/dma-mapping.h>
 +#include <linux/io.h>
 +#include <linux/iopoll.h>
++#include <linux/slab.h>
 +#include <linux/soc/apple/rtkit.h>
 +#include <linux/unaligned.h>
 +
@@ -1023,20 +1161,41 @@ index 000000000..dc61f5c0f
 +	agx_doorbell(agx, CH_CP);
 +}
 +
++static const char *agx_fence_name(struct dma_fence *f)
++{
++	return "agx";
++}
++
++static const struct dma_fence_ops agx_fence_ops = {
++	.get_driver_name = agx_fence_name,
++	.get_timeline_name = agx_fence_name,
++};
++
 +/*
 + * A compute command in MMU context ctx that runs the CDM control stream at
 + * GPU VA stream. args is a zeroed scratch page mapped in that context, for
 + * RGX 0x14020. Microsequence as the kext builds it (FUN_fffffff0084d0f08):
-+ * StartCompute, wait for the CDM interrupt, finalize, end. Returns the
-+ * offset of the stamp that reads DONE_STAMP once the job is done.
++ * StartCompute, wait for the CDM interrupt, finalize, end, which writes
++ * DONE_STAMP and raises event EV.
++ *
++ * The scheduler runs one job at a time, so this never overtakes a running
++ * one. Returns the job's fence, signalled by agx_complete().
 + */
-+static u32 agx_run(struct agx_device *agx, u32 ctx, u64 args, u64 stream)
++struct dma_fence *agx_fw_run(struct agx_device *agx, u32 ctx, u64 args, u64 stream)
 +{
-+	u32 n = agx->nr_cmds++;
++	struct dma_fence *fence;
++	u32 n = agx->nr_cmds;
 +	u32 cmd = agx->slot[n % NR_SLOTS].cmd, evc = agx->slot[n % NR_SLOTS].evc;
 +	u32 useq = agx->slot[n % NR_SLOTS].useq;
 +	u32 scratch = agx->slot[n % NR_SLOTS].scratch;
 +	u32 fin = useq + 0x64 + 4;
++
++	/* After a timeout the firmware may still own a job slot. */
++	if (agx->wedged)
++		return ERR_PTR(-EIO);
++	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
++	if (!fence)
++		return ERR_PTR(-ENOMEM);
 +
 +	memset(agx->buf + cmd, 0, 0x300);
 +	memset(agx->buf + evc, 0, 0x100);
@@ -1084,20 +1243,62 @@ index 000000000..dc61f5c0f
 +	put32(agx, cmd + 0x288, DONE_STAMP);
 +	put32(agx, cmd + 0x28c, EV);
 +
++	dma_fence_init(fence, &agx_fence_ops, &agx->fence_lock, agx->fence_ctx,
++		       ++agx->fence_seqno);
++	spin_lock_irq(&agx->fence_lock);
++	agx->active = dma_fence_get(fence);
++	agx->active_stamp = scratch + 0x10;
++	spin_unlock_irq(&agx->fence_lock);
++
++	agx->nr_cmds++;
 +	agx_submit(agx, cmd, n);
-+	return scratch + 0x10;
++	return fence;
 +}
 +
-+static int agx_wait(struct agx_device *agx, u32 stamp, u32 timeout_ms)
++/* Signal the running job's fence if its stamp has landed. */
++static bool agx_complete(struct agx_device *agx)
 +{
-+	u32 v;
-+	int ret;
++	struct dma_fence *fence = NULL;
++	unsigned long flags;
 +
-+	ret = readx_poll_timeout(READ_ONCE, *(u32 *)(agx->buf + stamp), v,
-+				 v == DONE_STAMP, 100, timeout_ms * 1000ULL);
-+	if (ret)
-+		agx->wedged = true;
-+	return ret;
++	spin_lock_irqsave(&agx->fence_lock, flags);
++	if (agx->active &&
++	    READ_ONCE(*(u32 *)(agx->buf + agx->active_stamp)) == DONE_STAMP) {
++		dma_rmb();
++		fence = agx->active;
++		agx->active = NULL;
++		dma_fence_signal_locked(fence);
++	}
++	spin_unlock_irqrestore(&agx->fence_lock, flags);
++	if (fence)
++		dma_fence_put(fence);
++	return fence;
++}
++
++/*
++ * The running job timed out. The firmware cannot be reset, so unless the
++ * job finished unnoticed this fails it and every later one.
++ */
++void agx_fw_timeout(struct agx_device *agx)
++{
++	struct dma_fence *fence;
++
++	if (agx_complete(agx)) {
++		dev_warn(agx->dev, "job finished without an event\n");
++		return;
++	}
++	dev_err(agx->dev, "job timed out, GPU wedged\n");
++	agx->wedged = true;
++	spin_lock_irq(&agx->fence_lock);
++	fence = agx->active;
++	agx->active = NULL;
++	if (fence) {
++		dma_fence_set_error(fence, -ETIMEDOUT);
++		dma_fence_signal_locked(fence);
++	}
++	spin_unlock_irq(&agx->fence_lock);
++	if (fence)
++		dma_fence_put(fence);
 +}
 +
 +static int agx_shmem_setup(void *cookie, struct apple_rtkit_shmem *bfr)
@@ -1138,10 +1339,11 @@ index 000000000..dc61f5c0f
 +{
 +	struct agx_device *agx = cookie;
 +
-+	/* 0x42 only says "check the channels". */
-+	if (msg == MSG_CHECK && READ_ONCE(agx->ready))
++	/* 0x42 only says "check the channels"; a job's end is one reason. */
++	if (msg == MSG_CHECK && READ_ONCE(agx->ready)) {
 +		agx_drain(agx);
-+	else if (msg != MSG_CHECK)
++		agx_complete(agx);
++	} else if (msg != MSG_CHECK)
 +		dev_info(agx->dev, "ep %#x: %#018llx\n", ep, msg);
 +}
 +
@@ -1172,6 +1374,8 @@ index 000000000..dc61f5c0f
 +	u32 v;
 +	int ret;
 +
++	spin_lock_init(&agx->fence_lock);
++	agx->fence_ctx = dma_fence_context_alloc(1);
 +	agx->rtk = devm_apple_rtkit_init(dev, agx, NULL, 0, &agx_rtk_ops);
 +	if (IS_ERR(agx->rtk))
 +		return dev_err_probe(dev, PTR_ERR(agx->rtk), "RTKit init failed\n");
@@ -1224,20 +1428,6 @@ index 000000000..dc61f5c0f
 +	return 0;
 +}
 +
-+int agx_fw_run(struct agx_device *agx, u32 ctx, u64 args, u64 stream, u32 timeout_ms)
-+{
-+	int ret;
-+
-+	mutex_lock(&agx->job_lock);
-+	/* After a timeout the firmware may still own a job slot. */
-+	if (agx->wedged)
-+		ret = -EIO;
-+	else
-+		ret = agx_wait(agx, agx_run(agx, ctx, args, stream), timeout_ms);
-+	mutex_unlock(&agx->job_lock);
-+	return ret;
-+}
-+
 +/*
 + * After a page table change. FUN_00026514 compares each context's
 + * generation with its own copy (RegionB+0x1b0) before the context's next
@@ -1254,10 +1444,10 @@ index 000000000..dc61f5c0f
 +
 diff --git a/drivers/gpu/drm/agx/agx_vm.c b/drivers/gpu/drm/agx/agx_vm.c
 new file mode 100644
-index 000000000..a814f1014
+index 000000000..98b5c57f8
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_vm.c
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,343 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * GPU VMs. The MMU is a PowerVR Rogue S7 with 16K pages: a page catalogue
@@ -1270,6 +1460,9 @@ index 000000000..a814f1014
 + * and tables come from DMA pools. After a change the context's TLB
 + * generation is bumped and the firmware flushes before its next job.
 + *
++ * Queues and jobs hold references. Unbinds wait until no job of the VM is
++ * queued or running, so the GPU never sees pages that were given back.
++ *
 + * Copyright (c) 2026 kiki <kieran@lavato.net>
 + */
 +
@@ -1277,9 +1470,11 @@ index 000000000..a814f1014
 +#include <drm/drm_gem_shmem_helper.h>
 +#include <linux/dma-mapping.h>
 +#include <linux/dmapool.h>
++#include <linux/kref.h>
 +#include <linux/list.h>
 +#include <linux/scatterlist.h>
 +#include <linux/slab.h>
++#include <linux/wait.h>
 +
 +#include "agx.h"
 +
@@ -1308,6 +1503,9 @@ index 000000000..a814f1014
 +
 +struct agx_vm {
 +	struct agx_device *agx;
++	struct kref ref;
++	atomic_t jobs;
++	wait_queue_head_t idle;
 +	u32 ctx;
 +	struct mutex lock;
 +	struct list_head mappings;
@@ -1384,6 +1582,8 @@ index 000000000..a814f1014
 +	if (!vm)
 +		return ERR_PTR(-ENOMEM);
 +	vm->agx = agx;
++	kref_init(&vm->ref);
++	init_waitqueue_head(&vm->idle);
 +	vm->kernel_start = kernel_start;
 +	vm->kernel_end = kernel_end;
 +	mutex_init(&vm->lock);
@@ -1403,15 +1603,16 @@ index 000000000..a814f1014
 +	vm->scratch = dma_alloc_coherent(agx->dev, AGX_PAGE, &vm->scratch_dma, GFP_KERNEL);
 +	ret = vm->scratch ? agx_set_pte(vm, kernel_start, vm->scratch_dma | AGX_PTE_VALID) : -ENOMEM;
 +	if (ret) {
-+		agx_vm_destroy(vm);
++		agx_vm_put(vm);
 +		return ERR_PTR(ret);
 +	}
 +	agx_fw_flush_tlb(agx, ctx);
 +	return vm;
 +}
 +
-+void agx_vm_destroy(struct agx_vm *vm)
++static void agx_vm_release(struct kref *ref)
 +{
++	struct agx_vm *vm = container_of(ref, struct agx_vm, ref);
 +	struct agx_device *agx = vm->agx;
 +	struct agx_mapping *m, *tmp;
 +	int i, j;
@@ -1440,6 +1641,31 @@ index 000000000..a814f1014
 +	clear_bit(vm->ctx, agx->ctx_used);
 +	mutex_unlock(&agx->ctx_lock);
 +	kfree(vm);
++}
++
++struct agx_vm *agx_vm_get(struct agx_vm *vm)
++{
++	kref_get(&vm->ref);
++	return vm;
++}
++
++void agx_vm_put(struct agx_vm *vm)
++{
++	kref_put(&vm->ref, agx_vm_release);
++}
++
++/* A job of this VM was queued; unbinds wait for agx_vm_job_end(). */
++struct agx_vm *agx_vm_job_start(struct agx_vm *vm)
++{
++	atomic_inc(&vm->jobs);
++	return agx_vm_get(vm);
++}
++
++void agx_vm_job_end(struct agx_vm *vm)
++{
++	if (atomic_dec_and_test(&vm->jobs))
++		wake_up_all(&vm->idle);
++	agx_vm_put(vm);
 +}
 +
 +static bool overlaps(struct agx_vm *vm, u64 addr, u64 range)
@@ -1523,13 +1749,22 @@ index 000000000..a814f1014
 +	return ret;
 +}
 +
-+/* Unmap every binding inside [addr, addr + range); partial ones fail. */
++/*
++ * Unmap every binding inside [addr, addr + range); partial ones fail. Waits
++ * for the VM's jobs first.
++ *
++ * ponytail: waits for all of them, not only those using the range. Track
++ * per-mapping fences if unbinds under load ever stall.
++ */
 +int agx_vm_unbind(struct agx_vm *vm, u64 addr, u64 range)
 +{
 +	struct agx_mapping *m, *tmp;
-+	int ret = 0;
++	int ret;
 +
 +	mutex_lock(&vm->lock);
++	ret = wait_event_interruptible(vm->idle, !atomic_read(&vm->jobs));
++	if (ret)
++		goto out;
 +	list_for_each_entry(m, &vm->mappings, node) {
 +		if (m->addr < addr + range && addr < m->addr + m->range &&
 +		    (m->addr < addr || m->addr + m->range > addr + range)) {
@@ -1551,13 +1786,8 @@ index 000000000..a814f1014
 +	return ret;
 +}
 +
-+/* Run a CDM control stream in this VM and wait. Binds wait for it. */
-+int agx_vm_run(struct agx_vm *vm, u64 stream, u32 timeout_ms)
++/* Start a CDM control stream in this VM. Returns its hardware fence. */
++struct dma_fence *agx_vm_run(struct agx_vm *vm, u64 stream)
 +{
-+	int ret;
-+
-+	mutex_lock(&vm->lock);
-+	ret = agx_fw_run(vm->agx, vm->ctx, vm->kernel_start, stream, timeout_ms);
-+	mutex_unlock(&vm->lock);
-+	return ret;
++	return agx_fw_run(vm->agx, vm->ctx, vm->kernel_start, stream);
 +}

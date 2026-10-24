@@ -197,7 +197,7 @@ Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 | VMs | one MMU context each, 16 to 63 |
 | VA | 0x10_0000_0000 to 0x80_0000_0000, 16K pages |
 | `usc_exec_base` | must be 0x11 << 32, the base the firmware loads |
-| submit | synchronous; in-syncs waited for, out-syncs signalled after |
+| submit | async, one `drm_sched` job per compute command |
 | not yet | render commands, samplers, helper programs, timestamps, single-page binds |
 
 Every user context gets a page catalogue at init and is loaded by the
@@ -207,9 +207,18 @@ plus 1 << 22, and the firmware flushes before that context's next job.
 
 The kernel range each VM reserves holds a zeroed page for RGX 0x14020.
 
+Each queue is an entity on one scheduler that runs one job at a time, so a
+submit's commands run in order. In-syncs gate the first command and
+out-syncs get the last one's fence. When a job ends the firmware writes its
+stamp and sends 0x42 on endpoint 0x21, and the driver then signals the
+job's fence. The firmware cannot be reset, so a job that times out wedges
+the GPU until the next boot. Unbinds wait until the VM has no jobs queued
+or running.
+
 `make agx-test` builds `tools/agx-test.c` static with the kernel's nolibc,
 and the next kernelcache puts it in the initramfs. It runs the Mesa tests
-in one VM, then `t_fill` in a second.
+in one VM, three async tests (32 queued jobs, an in-sync across two queues,
+two commands in one submit), then `t_fill` in a second VM.
 
 ## Queues
 

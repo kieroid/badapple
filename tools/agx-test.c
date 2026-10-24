@@ -16,7 +16,7 @@
 static int fd;
 static uint8_t *heap;
 static uint64_t heap_gva, heap_size, heap_off;
-static uint32_t queue_id, syncobj;
+static uint32_t vm_id, queue_id, syncobj;
 static int failed;
 
 /* A VM with a heap bound at the USC base and a queue on it. */
@@ -50,33 +50,45 @@ static int setup(const struct drm_asahi_params_global *p)
 	heap_gva = USC_BASE;
 	heap_size = HEAP_SIZE;
 	heap_off = 0;
+	vm_id = vm.vm_id;
 	queue_id = q.queue_id;
 	printf("vm %u queue %u\n", vm.vm_id, q.queue_id);
 	return 0;
 }
 
-/* One compute command, signalling syncobj, then wait on it. */
-static int submit(uint64_t stream)
+/* n compute commands on queue q, after syncobj in, signalling out; 0 for none. */
+static int submit_on(uint32_t q, const uint64_t *streams, int n, uint32_t in, uint32_t out)
 {
 	struct {
 		struct drm_asahi_cmd_header h;
 		struct drm_asahi_cmd_compute c;
-	} cmd = {
-		.h = { .cmd_type = DRM_ASAHI_CMD_COMPUTE, .size = sizeof(cmd.c),
-		       .vdm_barrier = DRM_ASAHI_BARRIER_NONE, .cdm_barrier = 0 },
-		.c = { .cdm_ctrl_stream_base = stream, .cdm_ctrl_stream_end = stream + 0x40 },
+	} cmd[2] = { 0 };
+	struct drm_asahi_sync s[2] = {
+		{ .sync_type = DRM_ASAHI_SYNC_SYNCOBJ, .handle = in },
+		{ .sync_type = DRM_ASAHI_SYNC_SYNCOBJ, .handle = out },
 	};
-	struct drm_asahi_sync out = { .sync_type = DRM_ASAHI_SYNC_SYNCOBJ, .handle = syncobj };
 	struct drm_asahi_submit sub = {
-		.syncs = (uintptr_t)&out, .cmdbuf = (uintptr_t)&cmd, .queue_id = queue_id,
-		.out_sync_count = 1, .cmdbuf_size = sizeof(cmd),
+		.syncs = (uintptr_t)(in ? s : s + 1), .cmdbuf = (uintptr_t)cmd, .queue_id = q,
+		.in_sync_count = !!in, .out_sync_count = !!out, .cmdbuf_size = n * sizeof(cmd[0]),
 	};
+	int i;
+
+	for (i = 0; i < n; i++) {
+		cmd[i].h.cmd_type = DRM_ASAHI_CMD_COMPUTE;
+		cmd[i].h.size = sizeof(cmd[i].c);
+		cmd[i].h.vdm_barrier = DRM_ASAHI_BARRIER_NONE;
+		cmd[i].c.cdm_ctrl_stream_base = streams[i];
+		cmd[i].c.cdm_ctrl_stream_end = streams[i] + 0x40;
+	}
+	return ioctl(fd, DRM_IOCTL_ASAHI_SUBMIT, &sub);
+}
+
+static int wait_sync(uint32_t h)
+{
 	struct drm_syncobj_wait w = {
-		.handles = (uintptr_t)&syncobj, .count_handles = 1, .timeout_nsec = INT64_MAX,
+		.handles = (uintptr_t)&h, .count_handles = 1, .timeout_nsec = INT64_MAX,
 	};
 
-	if (ioctl(fd, DRM_IOCTL_ASAHI_SUBMIT, &sub))
-		return -1;
 	return ioctl(fd, DRM_IOCTL_SYNCOBJ_WAIT, &w);
 }
 
@@ -131,12 +143,13 @@ static uint32_t regs(uint32_t halves)
 }
 
 /*
- * Build the job, run it and return 0 once it is done. Arguments go in
- * uniforms from u0; Mesa counts uniforms in 16-bit units, the uniform load
- * in 32-bit registers. tg overrides the threadgroup memory size in bytes.
+ * Build the job and return its control stream, 0 if the kernel is not
+ * supported. Arguments go in uniforms from u0; Mesa counts uniforms in
+ * 16-bit units, the uniform load in 32-bit registers. tg overrides the
+ * threadgroup memory size in bytes.
  */
-static int run(const char *name, const uint32_t *blob, const void *args, uint32_t args_len,
-	       uint32_t grid, uint32_t tg)
+static uint64_t build(const char *name, const uint32_t *blob, const void *args,
+		      uint32_t args_len, uint32_t grid, uint32_t tg)
 {
 	struct info in;
 	const uint8_t *binary = (const uint8_t *)blob + 44;
@@ -148,7 +161,8 @@ static int run(const char *name, const uint32_t *blob, const void *args, uint32_
 	in.txf = ((const uint8_t *)blob)[40];
 	if (in.main % 64 || in.ro_base % 2 || in.iblk || in.txf) {
 		printf("[%s] unsupported kernel\n", name);
-		return -1;
+		failed++;
+		return 0;
 	}
 
 	code = alloc(in.size, 0x4000);
@@ -202,8 +216,18 @@ static int run(const char *name, const uint32_t *blob, const void *args, uint32_
 	put32(stream + 28, in.wg[2]);
 	put32(stream + 32, 0xc0000160);
 	put32(stream + 36, 0x80000000);
+	return gva(stream);
+}
 
-	if (submit(gva(stream))) {
+/* Build the job, run it and return 0 once it is done. */
+static int run(const char *name, const uint32_t *blob, const void *args, uint32_t args_len,
+	       uint32_t grid, uint32_t tg)
+{
+	uint64_t stream = build(name, blob, args, args_len, grid, tg);
+
+	if (!stream)
+		return -1;
+	if (submit_on(queue_id, &stream, 1, 0, syncobj) || wait_sync(syncobj)) {
 		printf("[%s] run failed: %d\n", name, errno);
 		failed++;
 		return -1;
@@ -272,6 +296,8 @@ static uint32_t w_shared(uint32_t g) { return 64 * g * 64 + 64 * 65 / 2; }
 static uint32_t w_atomic(uint32_t i) { return 64 * 65 / 2; }
 static uint32_t w_simd(uint32_t i) { return 256 * 257 / 2; }
 static uint32_t w_256(uint32_t i) { return 256; }
+static uint32_t w_burst(uint32_t i) { return i + 5 * 32; }
+static uint32_t w_fill5(uint32_t i) { return 0x1000 + i + 5; }
 
 /* one output buffer of 256 words */
 static void simple(const char *name, const uint32_t *blob, uint32_t (*want)(uint32_t), uint32_t tg)
@@ -394,6 +420,51 @@ int main(void)
 
 		if (!run("t_atomic", t_atomic_0_g13g, &a, sizeof(a), 64, 0))
 			expect("t_atomic", c, 1, w_atomic);
+	}
+
+	/*
+	 * Async: 32 adds queued back to back, then waited for once. Then a
+	 * t_fill and an add that must follow it, across two queues of the VM
+	 * through a syncobj, and within one submit.
+	 */
+	{
+		struct drm_asahi_queue_create q2 = { .vm_id = vm_id, .usc_exec_base = USC_BASE };
+		struct drm_syncobj_create s1 = { 0 };
+		struct args1 a = { gva(c = buf(256, 0, 1)) };
+		struct args2 f = { gva(c), 0x1000 };
+		uint64_t add = build("async add", k_atomic_noret_0_g13g, &a, sizeof(a), 256, 0);
+		uint64_t fill = build("async fill", t_fill_0_g13g, &f, sizeof(f), 256, 0);
+		uint64_t both[2] = { fill, add };
+		int i, err = 0;
+
+		if (!add || !fill || ioctl(fd, DRM_IOCTL_ASAHI_QUEUE_CREATE, &q2) ||
+		    ioctl(fd, DRM_IOCTL_SYNCOBJ_CREATE, &s1)) {
+			printf("[async] setup failed: %d\n", errno);
+			return 1;
+		}
+		for (i = 0; i < 32 && !err; i++)
+			err = submit_on(queue_id, &add, 1, 0, i == 31 ? syncobj : 0);
+		if (err || wait_sync(syncobj)) {
+			printf("[async burst] failed: %d\n", errno);
+			failed++;
+		} else {
+			expect("async burst", c, 256, w_burst);
+		}
+
+		if (submit_on(queue_id, &fill, 1, 0, s1.handle) ||
+		    submit_on(q2.queue_id, &add, 1, s1.handle, syncobj) || wait_sync(syncobj)) {
+			printf("[async deps] failed: %d\n", errno);
+			failed++;
+		} else {
+			expect("async deps", c, 256, w_fill5);
+		}
+
+		if (submit_on(queue_id, both, 2, 0, syncobj) || wait_sync(syncobj)) {
+			printf("[async multi] failed: %d\n", errno);
+			failed++;
+		} else {
+			expect("async multi", c, 256, w_fill5);
+		}
 	}
 
 	/*
