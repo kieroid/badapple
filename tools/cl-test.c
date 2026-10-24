@@ -2,7 +2,8 @@
 // Copyright (c) 2026 kiki <kieran@lavato.net>
 //
 // OpenCL through Mesa's Rusticl on the A12 GPU: a few kernels covering
-// arguments, floats, threadgroup memory with barriers, and atomics, each
+// arguments, floats, threadgroup memory with barriers, and global and
+// threadgroup atomics, each
 // checked on the CPU.
 
 #define CL_TARGET_OPENCL_VERSION 300
@@ -31,6 +32,17 @@ static const char *src =
 	"kernel void count(global uint *c, global const uint *in) {\n"
 	"	if (in[get_global_id(0)] & 1)\n"
 	"		atomic_inc(c);\n"
+	"}\n"
+	"kernel void lcount(global uint *c, global const uint *in) {\n"
+	"	local uint n;\n"
+	"	if (get_local_id(0) == 0)\n"
+	"		n = 0;\n"
+	"	barrier(CLK_LOCAL_MEM_FENCE);\n"
+	"	if (in[get_global_id(0)] & 1)\n"
+	"		atomic_inc(&n);\n"
+	"	barrier(CLK_LOCAL_MEM_FENCE);\n"
+	"	if (get_local_id(0) == 0)\n"
+	"		atomic_add(c, n);\n"
 	"}\n";
 
 static int failed;
@@ -59,7 +71,7 @@ int main(void)
 	cl_context ctx;
 	cl_command_queue q;
 	cl_program prog;
-	cl_kernel kfill, ksaxpy, krev, kcount;
+	cl_kernel kfill, ksaxpy, krev, kcount, klcount;
 	cl_mem bu, bx, by, bc;
 	cl_int err;
 	char name[128];
@@ -87,6 +99,7 @@ int main(void)
 	ksaxpy = clCreateKernel(prog, "saxpy", &err);
 	krev = clCreateKernel(prog, "reverse", &err);
 	kcount = clCreateKernel(prog, "count", &err);
+	klcount = clCreateKernel(prog, "lcount", &err);
 	CL(err);
 
 	for (i = 0; i < N; i++) {
@@ -133,6 +146,14 @@ int main(void)
 	for (want = i = 0; i < N; i++)
 		want += v[i] & 1;
 	check("count", c != want);
+
+	c = 0;
+	CL(clEnqueueWriteBuffer(q, bc, CL_TRUE, 0, sizeof(c), &c, 0, NULL, NULL));
+	CL(clSetKernelArg(klcount, 0, sizeof(bc), &bc));
+	CL(clSetKernelArg(klcount, 1, sizeof(bu), &bu));
+	CL(run(q, klcount, 64));
+	CL(clEnqueueReadBuffer(q, bc, CL_TRUE, 0, sizeof(c), &c, 0, NULL, NULL));
+	check("local count", c != want);
 
 	printf("%d failed\n", failed);
 	return failed != 0;

@@ -55,6 +55,22 @@ index 4546093..e19f3f9 100644
  #include "asahi/isa/agx_minifloat.h"
  #include "compiler/nir/nir.h"
  #include "util/bitset.h"
+diff --git a/src/asahi/compiler/agx_insert_waits.c b/src/asahi/compiler/agx_insert_waits.c
+index 75bfd00..f11a26a 100644
+--- a/src/asahi/compiler/agx_insert_waits.c
++++ b/src/asahi/compiler/agx_insert_waits.c
+@@ -15,6 +15,11 @@
+ static bool
+ instr_is_async(agx_instr *I)
+ {
++   /* G11 threadgroup loads and atomics use the device memory encodings. */
++   if (AGX_G11 &&
++       (I->op == AGX_OPCODE_LOCAL_LOAD || I->op == AGX_OPCODE_LOCAL_ATOMIC))
++      return true;
++
+    return agx_opcodes_info[I->op].immediates & AGX_IMMEDIATE_SCOREBOARD;
+ }
+ 
 diff --git a/src/asahi/compiler/agx_lower_uniform_sources.c b/src/asahi/compiler/agx_lower_uniform_sources.c
 index 3aeb3a4..b3073c5 100644
 --- a/src/asahi/compiler/agx_lower_uniform_sources.c
@@ -85,10 +101,10 @@ index f5afa46..7cd478a 100644
  op("trap", (0x08, 2, _), dests = 0, can_eliminate = False,
     schedule_class = "invalid")
 diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
-index 6236c3c..305d307 100644
+index 6236c3c..5b1eab1 100644
 --- a/src/asahi/compiler/agx_pack.c
 +++ b/src/asahi/compiler/agx_pack.c
-@@ -779,6 +779,26 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -779,6 +779,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O =
           agx_pack_local_index(I, is_load ? I->src[1] : I->src[2], &Ot);
  
@@ -102,6 +118,7 @@ index 6236c3c..305d307 100644
 +            (is_load ? 0x05 : 0x45) | ((I->format & BITFIELD_MASK(3)) << 7) |
 +            ((R & BITFIELD_MASK(6)) << 10) | ((A & BITFIELD_MASK(4)) << 16) |
 +            ((O & BITFIELD_MASK(4)) << 20) | (1 << 24) | (2 << 28) |
++            (I->scoreboard << 30) |
 +            (((uint64_t)((O >> 4) & BITFIELD_MASK(4))) << 32) |
 +            (((uint64_t)((A >> 4) & BITFIELD_MASK(4))) << 36) |
 +            (((uint64_t)((R >> 6) & BITFIELD_MASK(2))) << 40) |
@@ -115,6 +132,38 @@ index 6236c3c..305d307 100644
        uint64_t raw =
           agx_opcodes_info[I->op].encoding.exact | (Rt ? BITFIELD64_BIT(8) : 0) |
           ((R & BITFIELD_MASK(6)) << 9) | (L ? BITFIELD64_BIT(15) : 0) |
+@@ -827,6 +848,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+    }
+ 
+    case AGX_OPCODE_LOCAL_ATOMIC: {
++      if (AGX_G11) {
++         /* The device atomic with address space 2 in bits 28-29 and the
++          * byte address in a 16-bit register, as Apple's G11 code has it.
++          */
++         bool Rt, Ot;
++         unsigned At;
++         unsigned R = agx_pack_atomic_dest(I, I->dest[0], &Rt);
++         unsigned S = agx_pack_atomic_source(I, I->src[0]);
++         unsigned A = agx_pack_local_base(I, I->src[1], &At);
++         unsigned O = agx_pack_local_index(I, I->src[2], &Ot);
++
++         pack_assert(I, At == 0 && Ot);
++         uint64_t raw =
++            0x15 | (((uint64_t)I->atomic_opc) << 6) |
++            ((R & BITFIELD_MASK(6)) << 10) | ((A & BITFIELD_MASK(4)) << 16) |
++            ((O & BITFIELD_MASK(4)) << 20) | (1 << 24) | (2 << 28) |
++            (I->scoreboard << 30) | (1u << 31) |
++            (((uint64_t)((O >> 4) & BITFIELD_MASK(4))) << 32) |
++            (((uint64_t)((A >> 4) & BITFIELD_MASK(4))) << 36) |
++            (((uint64_t)(R >> 6)) << 40) | (Rt ? BITFIELD64_BIT(47) : 0) |
++            (((uint64_t)S) << 48) | (((uint64_t)(O >> 8)) << 56);
++         memcpy(util_dynarray_grow_bytes(emission, 1, 8), &raw, 8);
++         break;
++      }
++
+       bool L = true; /* TODO: Don't force */
+ 
+       unsigned At;
 diff --git a/src/asahi/drm-shim/asahi_noop.c b/src/asahi/drm-shim/asahi_noop.c
 index bfbd9c0..a37d9d8 100644
 --- a/src/asahi/drm-shim/asahi_noop.c
@@ -426,6 +475,32 @@ index d8266b6..785e0fa 100644
  
     if (start_halfs & BITFIELD_BIT(8)) {
        agx_usc_pack(b, UNIFORM_HIGH, cfg) {
+diff --git a/src/compiler/nir/nir_opt_shrink_vectors.c b/src/compiler/nir/nir_opt_shrink_vectors.c
+index b3b18e0..9bbb2a9 100644
+--- a/src/compiler/nir/nir_opt_shrink_vectors.c
++++ b/src/compiler/nir/nir_opt_shrink_vectors.c
+@@ -111,8 +111,19 @@ shrink_dest_to_read_mask(nir_def *def, bool shrink_start)
+    int last_bit = util_last_bit(mask);
+    int first_bit = shrink_start ? (ffs(mask) - 1) : 0;
+ 
+-   const unsigned comps = last_bit - first_bit;
+-   const unsigned rounded = round_up_components_no_vec5(comps);
++   unsigned comps = last_bit - first_bit;
++   unsigned rounded = round_up_components_no_vec5(comps);
++
++   /* Moving the start and then rounding up can read past the end of the
++    * original access, e.g. components 1-7 of a vec8 becoming an 8-wide load
++    * one component later. Without soft faults that can fault, so keep the
++    * start instead.
++    */
++   if (first_bit + rounded > def->num_components) {
++      first_bit = 0;
++      comps = last_bit;
++      rounded = round_up_components_no_vec5(comps);
++   }
+ 
+    if ((def->num_components > rounded) || first_bit > 0) {
+       def->num_components = rounded;
 diff --git a/src/drm-shim/device.c b/src/drm-shim/device.c
 index 7df5900..86a3c33 100644
 --- a/src/drm-shim/device.c

@@ -5,6 +5,10 @@ Mainline Linux on the Apple A12 (T8020), tested on the iPhone XS Max.
 The boot is tethered and reads nothing off the NAND, so the NAND can hold ext4.
 Hardware notes are in [docs](docs/README.md).
 
+Written with assistance from an LLM, including the reverse engineering of
+Apple firmware and binaries, so this is not clean-room work. Human reviewed,
+and tested on real hardware.
+
 ## Boot chain
 
 ```text

@@ -49,10 +49,10 @@ index 000000000..5b8b471d7
 +agx-y := agx_drv.o agx_fw.o agx_vm.o
 diff --git a/drivers/gpu/drm/agx/agx.h b/drivers/gpu/drm/agx/agx.h
 new file mode 100644
-index 000000000..6392bd63d
+index 000000000..85b54291a
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx.h
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,94 @@
 +/* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 +/*
 + * Apple A12 GPU (AGX G11P). The firmware's structures are described in the
@@ -141,6 +141,7 @@ index 000000000..6392bd63d
 +int agx_vm_bind(struct agx_vm *vm, struct drm_gem_object *obj, u64 offset, u64 range,
 +		u64 addr, bool write);
 +int agx_vm_unbind(struct agx_vm *vm, u64 addr, u64 range);
++void agx_vm_unmap_object(struct agx_vm *vm, struct drm_gem_object *obj);
 +struct agx_vm *agx_vm_job_start(struct agx_vm *vm);
 +void agx_vm_job_end(struct agx_vm *vm);
 +struct dma_fence *agx_vm_run(struct agx_vm *vm, u64 stream);
@@ -148,10 +149,10 @@ index 000000000..6392bd63d
 +#endif
 diff --git a/drivers/gpu/drm/agx/agx_drv.c b/drivers/gpu/drm/agx/agx_drv.c
 new file mode 100644
-index 000000000..efb16a7ea
+index 000000000..378c3473d
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_drv.c
-@@ -0,0 +1,709 @@
+@@ -0,0 +1,745 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * DRM driver for the Apple A12 GPU (AGX G11P), compute only. It speaks the
@@ -416,6 +417,43 @@ index 000000000..efb16a7ea
 +	}
 +}
 +
++static void agx_gem_close(struct drm_gem_object *obj, struct drm_file *file)
++{
++	struct agx_file *af = file->driver_priv;
++	struct agx_vm *vm;
++	unsigned long id;
++
++	mutex_lock(&af->lock);
++	xa_for_each(&af->vms, id, vm)
++		agx_vm_unmap_object(vm, obj);
++	mutex_unlock(&af->lock);
++}
++
++static const struct drm_gem_object_funcs agx_gem_funcs = {
++	.free = drm_gem_shmem_object_free,
++	.close = agx_gem_close,
++	.print_info = drm_gem_shmem_object_print_info,
++	.pin = drm_gem_shmem_object_pin,
++	.unpin = drm_gem_shmem_object_unpin,
++	.get_sg_table = drm_gem_shmem_object_get_sg_table,
++	.vmap = drm_gem_shmem_object_vmap,
++	.vunmap = drm_gem_shmem_object_vunmap,
++	.mmap = drm_gem_shmem_object_mmap,
++	.vm_ops = &drm_gem_shmem_vm_ops,
++};
++
++/* The GPU does not snoop, so CPU mappings are always write-combined. */
++static struct drm_gem_object *agx_gem_create_object(struct drm_device *drm, size_t size)
++{
++	struct drm_gem_shmem_object *shmem = kzalloc(sizeof(*shmem), GFP_KERNEL);
++
++	if (!shmem)
++		return ERR_PTR(-ENOMEM);
++	shmem->base.funcs = &agx_gem_funcs;
++	shmem->map_wc = true;
++	return &shmem->base;
++}
++
 +static int agx_gem_create(struct drm_device *drm, void *data, struct drm_file *file)
 +{
 +	struct drm_asahi_gem_create *args = data;
@@ -430,12 +468,10 @@ index 000000000..efb16a7ea
 +	if (IS_ERR(shmem))
 +		return PTR_ERR(shmem);
 +	/*
-+	 * The GPU does not snoop, so CPU mappings are always write-combined;
 +	 * WRITEBACK is only a performance hint. Pin and map the pages now: that
 +	 * cleans the cache lines left by zeroing them, which would otherwise
 +	 * land on top of whatever userspace writes before the first bind.
 +	 */
-+	shmem->map_wc = true;
 +	ret = PTR_ERR_OR_ZERO(drm_gem_shmem_get_pages_sgt(shmem));
 +	if (!ret)
 +		ret = drm_gem_handle_create(file, &shmem->base, &args->handle);
@@ -763,6 +799,7 @@ index 000000000..efb16a7ea
 +	.ioctls = agx_ioctls,
 +	.num_ioctls = ARRAY_SIZE(agx_ioctls),
 +	.fops = &agx_fops,
++	.gem_create_object = agx_gem_create_object,
 +	DRM_GEM_SHMEM_DRIVER_OPS,
 +	/* Mesa picks its driver by this name; this is the Asahi uAPI. */
 +	.name = "asahi",
@@ -1487,10 +1524,10 @@ index 000000000..891f02175
 +
 diff --git a/drivers/gpu/drm/agx/agx_vm.c b/drivers/gpu/drm/agx/agx_vm.c
 new file mode 100644
-index 000000000..98b5c57f8
+index 000000000..146dd5840
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_vm.c
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,371 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * GPU VMs. The MMU is a PowerVR Rogue S7 with 16K pages: a page catalogue
@@ -1827,6 +1864,34 @@ index 000000000..98b5c57f8
 +out:
 +	mutex_unlock(&vm->lock);
 +	return ret;
++}
++
++/*
++ * Drop every mapping of obj, as when its handle is closed: Mesa frees a
++ * buffer by closing it and reuses the VA. If waiting for the VM's jobs is
++ * interrupted the mappings stay until the VM goes, holding the pages.
++ */
++void agx_vm_unmap_object(struct agx_vm *vm, struct drm_gem_object *obj)
++{
++	struct agx_mapping *m, *tmp;
++	bool mapped = false;
++
++	mutex_lock(&vm->lock);
++	list_for_each_entry(m, &vm->mappings, node)
++		mapped |= m->obj == obj;
++	if (!mapped || wait_event_killable(vm->idle, !atomic_read(&vm->jobs)))
++		goto out;
++	list_for_each_entry_safe(m, tmp, &vm->mappings, node) {
++		if (m->obj != obj)
++			continue;
++		clear_range(vm, m->addr, m->range);
++		list_del(&m->node);
++		drm_gem_object_put(m->obj);
++		kfree(m);
++	}
++	agx_fw_flush_tlb(vm->agx, vm->ctx);
++out:
++	mutex_unlock(&vm->lock);
 +}
 +
 +/* Start a CDM control stream in this VM. Returns its hardware fence. */
