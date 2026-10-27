@@ -532,7 +532,7 @@ index 6baad35..309b825 100644
                 I->imm = compact;
                 BITSET_SET(replaced, v);
 diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
-index 6236c3c..77eb29a 100644
+index 6236c3c..fd563c3 100644
 --- a/src/asahi/compiler/agx_pack.c
 +++ b/src/asahi/compiler/agx_pack.c
 @@ -779,6 +779,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
@@ -595,7 +595,7 @@ index 6236c3c..77eb29a 100644
        bool L = true; /* TODO: Don't force */
  
        unsigned At;
-@@ -872,6 +918,44 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -872,6 +918,42 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O = agx_pack_sample_compare_offset(I, I->src[5]);
        unsigned D = agx_pack_lod(I, I->src[1], &lod_mode);
  
@@ -603,11 +603,9 @@ index 6236c3c..77eb29a 100644
 +         /*
 +          * From Apple's G11 kernels lined up with the same kernels built for
 +          * G13. Ten bytes, always a sample: loads come as samples at pixel
-+          * centres through the txf sampler. Arrays are not known.
++          * centres through the txf sampler.
 +          */
-+         /* ponytail: arrays and multisampling take the plain encoding, so
-+          * only layer 0 and sample 0 work until those bits are found.
-+          */
++         /* ponytail: multisampling is not known, only sample 0 works */
 +         static const uint8_t dims[] = {
 +            [AGX_DIM_1D] = 0,   [AGX_DIM_1D_ARRAY] = 0, [AGX_DIM_2D] = 1,
 +            [AGX_DIM_2D_ARRAY] = 1, [AGX_DIM_2D_MS] = 1, [AGX_DIM_3D] = 2,
@@ -640,7 +638,7 @@ index 6236c3c..77eb29a 100644
        unsigned q1 = I->shadow;
        unsigned q2 = I->query_lod ? 2 : 0;
        unsigned q3 = 0xc; // XXX
-@@ -963,6 +1047,30 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -963,6 +1045,30 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
  
        unsigned coherency = I->coherent ? 0xf : 0x9;
  
@@ -649,7 +647,7 @@ index 6236c3c..77eb29a 100644
 +          * Apple's kernels write with LOD 0, data in 32-bit registers. The
 +          * texture state and the coordinate register (halves) are split in
 +          * nibbles: state 23:20 and 35:32, coordinates 19:16 and 39:36, found
-+          * by writing through each state on the phone (agx-test wslot).
++          * by writing through each state on the phone.
 +          */
 +         pack_assert(I, Tt == 0 && T < 256 && U == 0 && C < 256);
 +         pack_assert(I, Rt && !Cs && Dt && D == 0);
@@ -737,7 +735,7 @@ index 2f238f2..1c3294f 100644
  #include "util/bitpack_helpers.h"
  
 diff --git a/src/asahi/genxml/cmdbuf.xml b/src/asahi/genxml/cmdbuf.xml
-index c2979f9..324c69f 100644
+index c2979f9..9d882f6 100644
 --- a/src/asahi/genxml/cmdbuf.xml
 +++ b/src/asahi/genxml/cmdbuf.xml
 @@ -221,24 +221,27 @@
@@ -821,7 +819,7 @@ index c2979f9..324c69f 100644
      <field name="Address" size="36" start="66" type="hex" modifier="shr(4)"/>
      <!-- Unknown bit set by Metal when mipmapping. Might relate to a mechanism
      to switch tile size (or disable tiling altogether?) at small mip levels to
-@@ -637,17 +642,20 @@
+@@ -637,17 +642,19 @@
    <!-- PPP state ends -->
  
    <!-- USC state starts -->
@@ -838,14 +836,14 @@ index c2979f9..324c69f 100644
      <value name="Uniform high" value="0x3d"/>
      <value name="Shared" value="0x4d"/>
      <value name="Registers" value="0x8d"/>
-     <value name="Sampler" value="0x9d"/>
+-    <value name="Sampler" value="0x9d"/>
 -    <value name="Texture" value="0xdd"/>
++    <value name="Sampler" value="0x13"/>
 +    <value name="Texture" value="0x17"/>
-+    <value name="Sampler G11" value="0x13"/>
    </enum>
  
    <struct name="USC Uniform" size="8">
-@@ -664,12 +672,24 @@
+@@ -664,20 +671,22 @@
      <field name="Buffer" size="38" start="0:26" type="address" modifier="shr(2)"/>
    </struct>
  
@@ -859,21 +857,22 @@ index c2979f9..324c69f 100644
 -    <field name="Buffer" size="36" start="0:27" type="address" modifier="shr(3)"/>
 +    <field name="Count" size="6" start="0:20" type="uint"/>
 +    <field name="Buffer" size="38" start="0:26" type="address" modifier="shr(2)"/>
-+  </struct>
-+
-+  <!-- AGXMetalA12's ComputeProgramVariant loads a program's constant
-+       samplers this way, count from a size in 32-bit words halved, so 8 bytes
-+       apart. API samplers go through an indirect load (tag 0x07) that is not
-+       understood. -->
-+  <struct name="USC Sampler G11" size="8">
-+    <field name="Tag" size="8" start="0:0" type="USC Control" exact="Sampler G11"/>
-+    <field name="Start" size="8" start="0:8" type="uint"/>
+   </struct>
+ 
++  <!-- G11: the word AGXMetalA12 uses for a program's constant samplers,
++       8 bytes apart. Metal's own samplers load indirectly (tag 0x07). -->
+   <struct name="USC Sampler" size="8">
+     <field name="Tag" size="8" start="0:0" type="USC Control" exact="Sampler"/>
+     <field name="Start" size="8" start="0:8" type="uint"/>
+-    <field name="Count" size="7" start="0:20" type="uint"/>
+-    <!-- Exact split is unknown. -->
+-    <field name="Buffer" size="36" start="0:27" type="address" modifier="shr(3)"/>
 +    <field name="Count" size="6" start="0:20" type="uint"/>
 +    <field name="Buffer" size="38" start="0:26" type="address" modifier="shr(2)"/>
    </struct>
  
-   <struct name="USC Sampler" size="8">
-@@ -705,6 +725,17 @@
+   <enum name="Shared layout">
+@@ -705,6 +714,17 @@
      <field name="Code" size="32" start="16" type="address"/>
    </struct>
  
@@ -891,7 +890,7 @@ index c2979f9..324c69f 100644
    <struct name="USC Registers" size="4">
      <field name="Tag" size="8" start="0" type="USC Control" exact="Registers"/>
      <field name="Register count" size="5" start="8" type="uint" modifier="groups(8)"/>
-@@ -715,11 +746,12 @@
+@@ -715,11 +735,12 @@
  
    <struct name="USC No Preshader" size="2">
      <field name="Tag" size="8" start="0" type="USC Control" exact="No preshader"/>
@@ -905,7 +904,7 @@ index c2979f9..324c69f 100644
      <field name="Code" size="32" start="32" type="address"/>
    </struct>
  
-@@ -996,12 +1028,15 @@
+@@ -996,12 +1017,15 @@
    <!-- VDM commands end -->
  
    <!-- CDM commands start -->
@@ -924,7 +923,7 @@ index c2979f9..324c69f 100644
    </enum>
  
    <enum name="CDM Mode">
-@@ -1020,6 +1055,8 @@
+@@ -1020,6 +1044,8 @@
    </enum>
  
    <struct name="CDM Launch Word 0" size="4">
@@ -1305,7 +1304,7 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..5827b54 100644
+index ab205bf..97e8710 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
 @@ -369,7 +369,9 @@ agx_linear_allowed(const struct agx_resource *pres)
@@ -1313,7 +1312,7 @@ index ab205bf..5827b54 100644
     case PIPE_TEXTURE_2D_ARRAY:
     case PIPE_TEXTURE_RECT:
 -      if (pres->base.bind & PIPE_BIND_SHADER_IMAGE)
-+      /* G11 has no image atomics, and linear is the layout we know there */
++      /* G11 has no image atomics, so its 1D and 2D images can be linear */
 +      if ((pres->base.bind & PIPE_BIND_SHADER_IMAGE) &&
 +          !(AGX_G11 && !util_texture_is_array(pres->base.target)))
           return false;
@@ -1335,7 +1334,7 @@ index ab205bf..5827b54 100644
      * to write from the CPU.
      */
 -   if (agx_linear_allowed(pres) && pres->base.usage == PIPE_USAGE_STAGING)
-+   /* Likewise for everything on G11, whose twiddled layout is unchecked */
++   /* G11 too, where linear is the best tested */
 +   if (agx_linear_allowed(pres) &&
 +       (pres->base.usage == PIPE_USAGE_STAGING || AGX_G11))
        return DRM_FORMAT_MOD_LINEAR;
@@ -1352,14 +1351,14 @@ index ab205bf..5827b54 100644
  
  static void
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..6044acd 100644
+index 616dd6d..716751c 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
 @@ -1127,6 +1127,9 @@ target_is_array(enum pipe_texture_target target)
     }
  }
  
-+/* G11 has the levels in the low bits of the linear stride, which want 0 */
++/* G11 keeps the level count in the low stride bits */
 +#define AGX_PBE_STRIDE_BIAS (AGX_G11 ? 16 : 4)
 +
  static void
@@ -1489,32 +1488,17 @@ index 616dd6d..6044acd 100644
        agx_usc_pack(&b, TEXTURE, cfg) {
           cfg.start = 0;
           cfg.count =
-@@ -2898,6 +2968,16 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2898,7 +2968,8 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
-+#if AGX_G11
-+   if (batch->sampler_count[stage] && textures &&
-+       cs->b.info.sampler_state_count) {
-+      agx_usc_pack(&b, SAMPLER_G11, cfg) {
-+         cfg.start = 0;
-+         cfg.count = batch->sampler_count[stage];
-+         cfg.buffer = batch->samplers[stage];
-+      }
-+   }
-+#else
-    if (batch->sampler_count[stage]) {
+-   if (batch->sampler_count[stage]) {
++   if (batch->sampler_count[stage] &&
++       (!AGX_G11 || (textures && cs->b.info.sampler_state_count))) {
        agx_usc_pack(&b, SAMPLER, cfg) {
           cfg.start = 0;
-@@ -2905,6 +2985,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
-          cfg.buffer = batch->samplers[stage];
-       }
-    }
-+#endif
- 
-    for (unsigned i = 0; i < cs->push_range_count; ++i) {
-       unsigned table = cs->push[i].table;
-@@ -2954,6 +3035,14 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+          cfg.count = batch->sampler_count[stage];
+@@ -2954,6 +3025,14 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -1529,7 +1513,7 @@ index 616dd6d..6044acd 100644
     if (stage == MESA_SHADER_FRAGMENT) {
        agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
     } else {
-@@ -2980,6 +3069,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2980,6 +3059,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
                               : 0;
        }
     }
@@ -1537,7 +1521,7 @@ index 616dd6d..6044acd 100644
  
     if (cs->b.info.has_preamble) {
        agx_usc_pack(&b, PRESHADER, cfg) {
-@@ -5314,6 +5404,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5314,6 +5394,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -1557,7 +1541,7 @@ index 616dd6d..6044acd 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +5447,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +5437,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);

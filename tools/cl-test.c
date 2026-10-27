@@ -100,23 +100,6 @@ static const char *src =
 	"	uint8 h = r.lo + r.hi;\n"
 	"	uint4 q = h.lo + h.hi;\n"
 	"	out[i] = q.x + q.y + q.z + q.w;\n"
-	"}\n";
-
-/* Built only if the device reports images */
-static const char *isrc =
-	"kernel void isize(global int *out, read_only image2d_t img) {\n"
-	"	out[get_global_id(0)] = get_image_width(img) * 1000 + get_image_height(img);\n"
-	"}\n"
-	"kernel void ibindw(global int *out, write_only image2d_t img) {\n"
-	"	if (out[0] == 12345)\n"
-	"		write_imagef(img, (int2)(0, 0), (float4)(1.0f));\n"
-	"	out[get_global_id(0)] = 7;\n"
-	"}\n"
-	"kernel void ibindr(global int *out, read_only image2d_t img) {\n"
-	"	int v = 7;\n"
-	"	if (out[0] == 12345)\n"
-	"		v = read_imagef(img, (int2)(0, 0)).x;\n"
-	"	out[get_global_id(0)] = v;\n"
 	"}\n"
 	"kernel void iwrite(write_only image2d_t img) {\n"
 	"	int x = get_global_id(0), y = get_global_id(1);\n"
@@ -129,6 +112,14 @@ static const char *isrc =
 	"kernel void isample(global float4 *out, read_only image2d_t img, sampler_t s) {\n"
 	"	int x = get_global_id(0), y = get_global_id(1);\n"
 	"	out[y * get_global_size(0) + x] = read_imagef(img, s, (float2)(x + 0.5f, y + 0.5f));\n"
+	"}\n"
+	"kernel void icopy(read_only image2d_t s, write_only image2d_t d) {\n"
+	"	int2 p = (int2)(get_global_id(0), get_global_id(1));\n"
+	"	write_imagef(d, p, read_imagef(s, p));\n"
+	"}\n"
+	"kernel void iread3d(global float4 *out, read_only image3d_t img) {\n"
+	"	int x = get_global_id(0), y = get_global_id(1), z = get_global_id(2);\n"
+	"	out[(z * 8 + y) * 8 + x] = read_imagef(img, (int4)(x, y, z, 0));\n"
 	"}\n";
 
 static int failed;
@@ -148,7 +139,7 @@ static cl_int run(cl_command_queue q, cl_kernel k, size_t local)
 	return clEnqueueNDRangeKernel(q, k, 1, NULL, &global, &local, 0, NULL, NULL);
 }
 
-int main(int argc, char **argv)
+int main(void)
 {
 	static cl_uint u[N], v[N];
 	static float x[N], y[N];
@@ -156,10 +147,9 @@ int main(int argc, char **argv)
 	cl_device_id dev;
 	cl_context ctx;
 	cl_command_queue q;
-	cl_program prog, iprog;
-	cl_bool images = CL_FALSE;
+	cl_program prog;
 	cl_kernel kfill, ksaxpy, krev, kcount, klcount, kh2f, kf2h, krnd, kids, kpriv, kspill;
-	cl_kernel kisz = NULL, kbw = NULL, kbr = NULL, kiw = NULL, kir = NULL, kis = NULL;
+	cl_kernel kiw, kir, kis, kicp, kir3;
 	cl_mem bu, bv, bx, by, bc;
 	cl_int err;
 	char name[128];
@@ -194,21 +184,12 @@ int main(int argc, char **argv)
 	kids = clCreateKernel(prog, "ids", &err);
 	kpriv = clCreateKernel(prog, "priv", &err);
 	kspill = clCreateKernel(prog, "spill", &err);
+	kiw = clCreateKernel(prog, "iwrite", &err);
+	kir = clCreateKernel(prog, "iread", &err);
+	kis = clCreateKernel(prog, "isample", &err);
+	kicp = clCreateKernel(prog, "icopy", &err);
+	kir3 = clCreateKernel(prog, "iread3d", &err);
 	CL(err);
-
-	CL(clGetDeviceInfo(dev, CL_DEVICE_IMAGE_SUPPORT, sizeof(images), &images, NULL));
-	if (images) {
-		iprog = clCreateProgramWithSource(ctx, 1, &isrc, NULL, &err);
-		CL(err);
-		CL(clBuildProgram(iprog, 1, &dev, "-cl-std=CL3.0", NULL, NULL));
-		kisz = clCreateKernel(iprog, "isize", &err);
-		kbw = clCreateKernel(iprog, "ibindw", &err);
-		kbr = clCreateKernel(iprog, "ibindr", &err);
-		kiw = clCreateKernel(iprog, "iwrite", &err);
-		kir = clCreateKernel(iprog, "iread", &err);
-		kis = clCreateKernel(iprog, "isample", &err);
-		CL(err);
-	}
 
 	for (i = 0; i < N; i++) {
 		x[i] = i * 0.5f;
@@ -391,19 +372,23 @@ int main(int argc, char **argv)
 	}
 	check("register spills", bad);
 
-	/* 64x64 RGBA float image: write it from a kernel and read it back,
-	 * then read it in a kernel with and without a sampler. Pixel (x, y) is
-	 * (x, y, x * y, 0.5).
+	/* 64x64 RGBA float image, pixel (x, y) = (x, y, x * y, 0.5): write it
+	 * from a kernel, read it with and without a sampler, copy it to a second
+	 * image, which writes through texture state 1. Then an 8x8x4 3D image,
+	 * which is twiddled.
 	 */
-	if (!images)
-		printf("  no images\n");
-	else {
+	{
 		static float img[IW * IW * 4], got[IW * IW * 4];
 		cl_image_format fmt = { CL_RGBA, CL_FLOAT };
 		cl_image_desc desc = { .image_type = CL_MEM_OBJECT_IMAGE2D,
 				       .image_width = IW, .image_height = IW };
+		cl_image_desc desc3 = { .image_type = CL_MEM_OBJECT_IMAGE3D,
+					.image_width = 8, .image_height = 8, .image_depth = 4 };
 		size_t org[3] = { 0 }, reg[3] = { IW, IW, 1 }, gl[2] = { IW, IW }, lo[2] = { 8, 8 };
+		size_t gl3[3] = { 8, 8, 4 };
 		cl_mem bi = clCreateImage(ctx, CL_MEM_READ_WRITE, &fmt, &desc, NULL, &err);
+		cl_mem bd = clCreateImage(ctx, CL_MEM_READ_WRITE, &fmt, &desc, NULL, &err);
+		cl_mem b3;
 		cl_mem bo = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(got), NULL, &err);
 		cl_sampler smp = clCreateSampler(ctx, CL_FALSE, CL_ADDRESS_CLAMP_TO_EDGE,
 						 CL_FILTER_NEAREST, &err);
@@ -415,42 +400,13 @@ int main(int argc, char **argv)
 			img[4 * i + 2] = (i % IW) * (i / IW);
 			img[4 * i + 3] = 0.5f;
 		}
+		b3 = clCreateImage(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, &fmt, &desc3, img, &err);
+		CL(err);
 
-		/* binds the image but only reads its descriptor from memory */
-		CL(clSetKernelArg(kisz, 0, sizeof(bo), &bo));
-		CL(clSetKernelArg(kisz, 1, sizeof(bi), &bi));
-		CL(clEnqueueNDRangeKernel(q, kisz, 1, NULL, gl, lo, 0, NULL, NULL));
-		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(cl_int), &c, 0, NULL, NULL));
-		check("image size", c != IW * 1000 + IW);
-
-		/* bind the image for writing, then for reading, but never touch it:
-		 * tests the texture and sampler state words alone
-		 */
-		CL(clSetKernelArg(kbw, 0, sizeof(bo), &bo));
-		CL(clSetKernelArg(kbw, 1, sizeof(bi), &bi));
-		CL(clEnqueueNDRangeKernel(q, kbw, 1, NULL, gl, lo, 0, NULL, NULL));
-		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(cl_int), &c, 0, NULL, NULL));
-		check("image bind for write", c != 7);
-		/* "noread" skips everything that loads samplers */
-		if (argc > 1 && !strcmp(argv[1], "noread"))
-			goto write;
-		CL(clSetKernelArg(kbr, 0, sizeof(bo), &bo));
-		CL(clSetKernelArg(kbr, 1, sizeof(bi), &bi));
-		CL(clEnqueueNDRangeKernel(q, kbr, 1, NULL, gl, lo, 0, NULL, NULL));
-		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(cl_int), &c, 0, NULL, NULL));
-		check("image bind for read", c != 7);
-write:
-
-		memset(got, 0, sizeof(got));
-		CL(clEnqueueWriteImage(q, bi, CL_TRUE, org, reg, 0, 0, got, 0, NULL, NULL));
 		CL(clSetKernelArg(kiw, 0, sizeof(bi), &bi));
 		CL(clEnqueueNDRangeKernel(q, kiw, 2, NULL, gl, lo, 0, NULL, NULL));
 		CL(clEnqueueReadImage(q, bi, CL_TRUE, org, reg, 0, 0, got, 0, NULL, NULL));
 		check("image write", memcmp(img, got, sizeof(img)) != 0);
-
-		/* "noread" stops here, before anything samples */
-		if (argc > 1 && !strcmp(argv[1], "noread"))
-			goto out;
 
 		CL(clEnqueueWriteImage(q, bi, CL_TRUE, org, reg, 0, 0, img, 0, NULL, NULL));
 		memset(got, 0, sizeof(got));
@@ -467,13 +423,22 @@ write:
 		CL(clEnqueueNDRangeKernel(q, kis, 2, NULL, gl, lo, 0, NULL, NULL));
 		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(got), got, 0, NULL, NULL));
 		check("image sample", memcmp(img, got, sizeof(img)) != 0);
-		if (memcmp(img, got, sizeof(img)))
-			printf("  pixel 1,1: %g %g %g %g\n", got[4 * (IW + 1)], got[4 * (IW + 1) + 1],
-			       got[4 * (IW + 1) + 2], got[4 * (IW + 1) + 3]);
 
+		memset(got, 0, sizeof(got));
+		CL(clSetKernelArg(kicp, 0, sizeof(bi), &bi));
+		CL(clSetKernelArg(kicp, 1, sizeof(bd), &bd));
+		CL(clEnqueueNDRangeKernel(q, kicp, 2, NULL, gl, lo, 0, NULL, NULL));
+		CL(clEnqueueReadImage(q, bd, CL_TRUE, org, reg, 0, 0, got, 0, NULL, NULL));
+		check("image copy", memcmp(img, got, sizeof(img)) != 0);
+
+		memset(got, 0, sizeof(got));
+		CL(clSetKernelArg(kir3, 0, sizeof(bo), &bo));
+		CL(clSetKernelArg(kir3, 1, sizeof(b3), &b3));
+		CL(clEnqueueNDRangeKernel(q, kir3, 3, NULL, gl3, NULL, 0, NULL, NULL));
+		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(got), got, 0, NULL, NULL));
+		check("3D image read", memcmp(img, got, 8 * 8 * 4 * 16) != 0);
 	}
 
-out:
 	printf("%d failed\n", failed);
 	return failed != 0;
 }

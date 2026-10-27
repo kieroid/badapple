@@ -49,7 +49,7 @@ index 000000000..5b8b471d7
 +agx-y := agx_drv.o agx_fw.o agx_vm.o
 diff --git a/drivers/gpu/drm/agx/agx.h b/drivers/gpu/drm/agx/agx.h
 new file mode 100644
-index 000000000..625b0bfa1
+index 000000000..19ba9bdd5
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx.h
 @@ -0,0 +1,95 @@
@@ -145,15 +145,15 @@ index 000000000..625b0bfa1
 +void agx_vm_unmap_object(struct agx_vm *vm, struct drm_gem_object *obj);
 +struct agx_vm *agx_vm_job_start(struct agx_vm *vm);
 +void agx_vm_job_end(struct agx_vm *vm);
-+struct dma_fence *agx_vm_run(struct agx_vm *vm, u64 stream, u64 table);
++struct dma_fence *agx_vm_run(struct agx_vm *vm, u64 stream);
 +
 +#endif
 diff --git a/drivers/gpu/drm/agx/agx_drv.c b/drivers/gpu/drm/agx/agx_drv.c
 new file mode 100644
-index 000000000..26f7f3b97
+index 000000000..bbbba16f9
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_drv.c
-@@ -0,0 +1,753 @@
+@@ -0,0 +1,749 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * DRM driver for the Apple A12 GPU (AGX G11P), compute only. It speaks the
@@ -202,7 +202,7 @@ index 000000000..26f7f3b97
 +struct agx_job {
 +	struct drm_sched_job base;
 +	struct agx_vm *vm;
-+	u64 stream, table;
++	u64 stream;
 +};
 +
 +#define to_job(j) container_of(j, struct agx_job, base)
@@ -551,10 +551,8 @@ index 000000000..26f7f3b97
 +}
 +
 +/*
-+ * Check the command buffer and collect its compute streams, each followed by
-+ * its sampler heap, which G11 takes as the table behind RGX 0x14020 (see
-+ * agx_fw_run). Attachment commands are only hints and are skipped. Returns
-+ * the number of streams.
++ * Check the command buffer and collect its compute streams. Attachment
++ * commands are only hints and are skipped. Returns the number of streams.
 + */
 +static int agx_walk(const u8 *cmdbuf, u32 size, u64 *streams)
 +{
@@ -578,8 +576,7 @@ index 000000000..26f7f3b97
 +				return -EINVAL;
 +			if (n == MAX_COMMANDS)
 +				return -EINVAL;
-+			streams[2 * n] = c.cdm_ctrl_stream_base;
-+			streams[2 * n++ + 1] = c.sampler_heap;
++			streams[n++] = c.cdm_ctrl_stream_base;
 +			break;
 +		case DRM_ASAHI_SET_VERTEX_ATTACHMENTS:
 +		case DRM_ASAHI_SET_FRAGMENT_ATTACHMENTS:
@@ -659,7 +656,7 @@ index 000000000..26f7f3b97
 +	cmdbuf = memdup_user(u64_to_user_ptr(args->cmdbuf), args->cmdbuf_size);
 +	if (IS_ERR(cmdbuf))
 +		return PTR_ERR(cmdbuf);
-+	streams = kcalloc(2 * MAX_COMMANDS, sizeof(*streams), GFP_KERNEL);
++	streams = kcalloc(MAX_COMMANDS, sizeof(*streams), GFP_KERNEL);
 +	outs = kcalloc(args->out_sync_count, sizeof(*outs), GFP_KERNEL);
 +	if (!streams || (args->out_sync_count && !outs)) {
 +		ret = -ENOMEM;
@@ -701,8 +698,7 @@ index 000000000..26f7f3b97
 +			goto out_jobs;
 +		}
 +		jobs[i]->vm = agx_vm_job_start(q->vm);
-+		jobs[i]->stream = streams[2 * i];
-+		jobs[i]->table = streams[2 * i + 1];
++		jobs[i]->stream = streams[i];
 +	}
 +	for (i = 0; i < args->in_sync_count; i++) {
 +		if (syncs[i].sync_type > DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ) {
@@ -755,7 +751,7 @@ index 000000000..26f7f3b97
 +{
 +	struct agx_job *job = to_job(sj);
 +
-+	return agx_vm_run(job->vm, job->stream, job->table);
++	return agx_vm_run(job->vm, job->stream);
 +}
 +
 +/*
@@ -909,10 +905,10 @@ index 000000000..26f7f3b97
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..4b09d45a2
+index 000000000..b956f4238
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,625 @@
+@@ -0,0 +1,624 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -1263,9 +1259,8 @@ index 000000000..4b09d45a2
 +
 +/*
 + * A compute command in MMU context ctx that runs the CDM control stream at
-+ * GPU VA stream. args goes to RGX 0x14020: userspace's table, else a zeroed
-+ * scratch page mapped in that context. Indirect state loads seem to index
-+ * it, as AGXMetalA12 numbers buffers from 12 there. Microsequence as the kext builds it (FUN_fffffff0084d0f08):
++ * GPU VA stream. args is a zeroed scratch page mapped in that context, for
++ * RGX 0x14020. Microsequence as the kext builds it (FUN_fffffff0084d0f08):
 + * StartCompute, wait for the CDM interrupt, finalize, end, which writes
 + * DONE_STAMP and raises event EV.
 + *
@@ -1540,10 +1535,10 @@ index 000000000..4b09d45a2
 +
 diff --git a/drivers/gpu/drm/agx/agx_vm.c b/drivers/gpu/drm/agx/agx_vm.c
 new file mode 100644
-index 000000000..4324643cc
+index 000000000..146dd5840
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_vm.c
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,371 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * GPU VMs. The MMU is a PowerVR Rogue S7 with 16K pages: a page catalogue
@@ -1910,10 +1905,8 @@ index 000000000..4324643cc
 +	mutex_unlock(&vm->lock);
 +}
 +
-+/* Start a CDM control stream in this VM, table for RGX 0x14020 or 0. Returns
-+ * its hardware fence.
-+ */
-+struct dma_fence *agx_vm_run(struct agx_vm *vm, u64 stream, u64 table)
++/* Start a CDM control stream in this VM. Returns its hardware fence. */
++struct dma_fence *agx_vm_run(struct agx_vm *vm, u64 stream)
 +{
-+	return agx_fw_run(vm->agx, vm->ctx, table ?: vm->kernel_start, stream);
++	return agx_fw_run(vm->agx, vm->ctx, vm->kernel_start, stream);
 +}

@@ -20,14 +20,10 @@ static uint32_t vm_id, queue_id, syncobj;
 static int failed;
 
 /* A VM with a heap bound at the USC base and a queue on it. */
-/* Mesa puts the kernel range in the top 32 GB of the VM, we at the bottom */
-static int mesa_vm;
-
 static int setup(const struct drm_asahi_params_global *p)
 {
 	struct drm_asahi_vm_create vm = {
-		.kernel_start = mesa_vm ? p->vm_end - (32ull << 30) : p->vm_start,
-		.kernel_end = mesa_vm ? p->vm_end : p->vm_start + p->vm_kernel_min_size,
+		.kernel_start = p->vm_start, .kernel_end = p->vm_start + p->vm_kernel_min_size,
 	};
 	struct drm_asahi_gem_create gem = { .size = HEAP_SIZE };
 	struct drm_asahi_gem_mmap_offset mo = { 0 };
@@ -60,32 +56,7 @@ static int setup(const struct drm_asahi_params_global *p)
 	return 0;
 }
 
-/* A BO of size bytes bound at GPU VA va in the current VM, mapped. */
-static uint8_t *bind_at(uint64_t va, uint64_t size)
-{
-	struct drm_asahi_gem_create gem = { .size = size };
-	struct drm_asahi_gem_mmap_offset mo = { 0 };
-	struct drm_asahi_gem_bind_op op = {
-		.flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE, .range = size, .addr = va,
-	};
-	struct drm_asahi_vm_bind bind = { .num_binds = 1, .stride = sizeof(op), .vm_id = vm_id };
-	void *m;
-
-	if (ioctl(fd, DRM_IOCTL_ASAHI_GEM_CREATE, &gem))
-		return NULL;
-	mo.handle = op.handle = gem.handle;
-	bind.userptr = (uintptr_t)&op;
-	if (ioctl(fd, DRM_IOCTL_ASAHI_GEM_MMAP_OFFSET, &mo) ||
-	    ioctl(fd, DRM_IOCTL_ASAHI_VM_BIND, &bind))
-		return NULL;
-	m = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mo.offset);
-	return m == MAP_FAILED ? NULL : m;
-}
-
 /* n compute commands on queue q, after syncobj in, signalling out; 0 for none. */
-/* Table for RGX 0x14020, passed as the sampler heap; 0 for the kernel's */
-static uint64_t table_va;
-
 static int submit_on(uint32_t q, const uint64_t *streams, int n, uint32_t in, uint32_t out)
 {
 	struct {
@@ -108,7 +79,6 @@ static int submit_on(uint32_t q, const uint64_t *streams, int n, uint32_t in, ui
 		cmd[i].h.vdm_barrier = DRM_ASAHI_BARRIER_NONE;
 		cmd[i].c.cdm_ctrl_stream_base = streams[i];
 		cmd[i].c.cdm_ctrl_stream_end = streams[i] + 0x40;
-		cmd[i].c.sampler_heap = table_va;
 	}
 	return ioctl(fd, DRM_IOCTL_ASAHI_SUBMIT, &sub);
 }
@@ -178,12 +148,9 @@ static uint32_t regs(uint32_t halves)
  * 16-bit units, the uniform load in 32-bit registers. tg overrides the
  * threadgroup memory size in bytes.
  */
-/* Probe hooks: extra state words before the shader word, header bits, and
- * how many argument registers the direct uniform load covers (0 for all).
- */
-static uint64_t extra[8];
-static int nr_extra;
-static uint32_t hdr_or, arg_regs, grid_y = 1;
+/* For t_image_write: a texture state word and header bits, and the grid height */
+static uint64_t extra;
+static uint32_t hdr_or, grid_y = 1;
 
 static uint64_t build(const char *name, const uint32_t *blob, const void *args,
 		      uint32_t args_len, uint32_t grid, uint32_t tg)
@@ -209,11 +176,13 @@ static uint64_t build(const char *name, const uint32_t *blob, const void *args,
 	state = o = alloc(0x100, 0x40);
 
 	/* uniform loads: 3 | first << 9 | count << 21 | VA << 24 */
-	n = arg_regs ? arg_regs : (args_len + 3) / 4;
+	n = (args_len + 3) / 4;
 	put64(o, gva(ubuf) << 24 | (uint64_t)n << 21 | 3);
 	o += 8;
-	for (int i = 0; i < nr_extra; i++, o += 8)
-		put64(o, extra[i]);
+	if (extra) {
+		put64(o, extra);
+		o += 8;
+	}
 	n = (in.ro16 + 1) / 2;
 	if (n) {
 		put64(o, (gva(code) + in.ro) << 24 | (uint64_t)n << 21 | (in.ro_base / 2) << 9 | 3);
@@ -377,247 +346,62 @@ static void t_float(void)
 }
 
 /*
- * G11 loads samplers and some uniforms indirectly, through an index that
- * AGXMetalA12 numbers buffers from 12 in. Not understood yet: fill t_fill's
- * value through an indirect uniform load of index idx, with a table at RGX
- * 0x14020 whose entries point at different values, and the heap starting
- * with its own offsets (see main). With bit 6, indexes 0 and 1 read heap
- * offsets 0x80 and 0x70 and index 2 faults; without it the GPU faults.
- * TAG=1 makes the entries unmapped, so a fault address names one.
+ * G11 image write, hand assembled: (1, 2, 3, 4) to each pixel of a 64x8
+ * RGBA32F linear image, through texture state `state`, among eight.
  */
-static void p_indirect_uniform(uint32_t idx)
+static void t_image_write(uint32_t state)
 {
-	uint32_t table = alloc(16 * 8, 0x100), vals = alloc(16 * 16, 0x100), o, i, v;
-	struct args2 a = { gva(o = buf(256, 0xdeadbeef, 0)), 0 };
-
-	for (i = 0; i < 16; i++) {
-		put32(vals + 16 * i, (i + 1) << 20);
-		put64(table + 8 * i, gva(vals + 16 * i));
-		/* unmapped and distinct: a fault address names the entry */
-		if (getenv("TAG"))
-			put64(table + 8 * i, 0x3000000000ull + ((uint64_t)i << 24));
-	}
-	/* value register u2, bit 6 as AGXMetalA12 sets for its own bindings */
-	nr_extra = 0;
-	extra[nr_extra++] = 0x1b | 1 << 6 | 2 << 9 | 1 << 21 | (uint64_t)idx << 27;
-	arg_regs = 2;		/* just the output pointer */
-	table_va = gva(table);
-	printf("[indirect uniform] table %llx values %llx\n", (unsigned long long)gva(table),
-	       (unsigned long long)gva(vals));
-	if (!run("indirect uniform", t_fill_0_g13g, &a, sizeof(a), 256, 0)) {
-		v = get32(o);
-		printf("[indirect uniform %u] value %#x: entry %d\n", idx, v,
-		       v & 0xfffff ? -1 : (int)(v >> 20) - 1);
-	}
-	nr_extra = 0;
-	arg_regs = 0;
-	table_va = 0;
-	hdr_or = 0;
-}
-
-/*
- * Apple's G11 image write, byte for byte (data r5-r8, coordinates r1-r2,
- * state 0), into a 64 x h RGBA32F linear image through a PBE descriptor laid
- * out as AGXMetalA12 builds it. With h > 1 the grid is 2D in 8x8 groups,
- * like Mesa's, and r2 is the row.
- */
-static void p_image_write(uint32_t h, int mesa, int gprs16, int tex2, uint64_t hi)
-{
-	/* Mesa's registers: data r4-r7, coordinates r0-r1 */
-	static const uint8_t mcode[] = {
-		0xf2, 0x01, 0x10, 0x04,				/* get_sr r0, sr80 */
-		0xf2, 0x05, 0x11, 0x04,				/* get_sr r1, sr81 */
-		0x62, 0x11, 0x00, 0x00, 0x80, 0x3f,		/* r4 = 1.0 */
-		0x62, 0x15, 0x00, 0x00, 0x00, 0x40,		/* r5 = 2.0 */
-		0x62, 0x19, 0x00, 0x00, 0x40, 0x40,		/* r6 = 3.0 */
-		0x62, 0x1d, 0x00, 0x00, 0x80, 0x40,		/* r7 = 4.0 */
-		0x31, 0x21, 0x00, 0x09, 0x00, 0x90, 0x02, 0x00,	/* image_write */
-		0x08, 0x01,					/* stop */
-	};
-	static const uint8_t code[] = {
+	uint8_t code[] = {
 		0xf2, 0x05, 0x10, 0x04,				/* get_sr r1, sr80 */
 		0xf2, 0x09, 0x11, 0x04,				/* get_sr r2, sr81 */
-		0x62, 0x15, 0x00, 0x00, 0x80, 0x3f,		/* r5 = 1.0 */
-		0x62, 0x19, 0x00, 0x00, 0x00, 0x40,		/* r6 = 2.0 */
-		0x62, 0x1d, 0x00, 0x00, 0x40, 0x40,		/* r7 = 3.0 */
-		0x62, 0x21, 0x00, 0x00, 0x80, 0x40,		/* r8 = 4.0 */
-		0x31, 0x29, 0x02, 0x09, 0x00, 0x90, 0x02, 0x00,	/* image_write */
+		0x62, 0x15, 0x00, 0x00, 0x80, 0x3f,		/* mov_imm r5, 1.0 */
+		0x62, 0x19, 0x00, 0x00, 0x00, 0x40,		/* mov_imm r6, 2.0 */
+		0x62, 0x1d, 0x00, 0x00, 0x40, 0x40,		/* mov_imm r7, 3.0 */
+		0x62, 0x21, 0x00, 0x00, 0x80, 0x40,		/* mov_imm r8, 4.0 */
+		/* image_write r5-r8, r1-r2, state 23:20 and 35:32 */
+		0x31, 0x29, 0x02 | (state & 0xf) << 4, 0x09, state >> 4, 0x90, 0x02, 0x00,
 		0x08, 0x01,					/* stop */
 	};
-	static uint32_t blob[11 + 16];
-	uint32_t img = alloc(1024 * h, 0x4000), desc = alloc(64, 0x40), i, bad = 0;
-	uint8_t *b = (uint8_t *)blob, *mem = heap + img;
-	uint64_t img_va = gva(img);
+	uint32_t blob[11 + 16] = { 0 }, img = alloc(8 * 8192, 0x4000), desc = alloc(8 * 24, 0x40);
+	uint8_t *b = (uint8_t *)blob;
+	uint32_t i, bad = 0;
 	float px[4];
 
-	/* or the image in its own BO at a high VA, like Mesa's */
-	if (hi) {
-		mem = bind_at(hi, 0x10000);
-		img_va = hi;
-		if (!mem) {
-			printf("[raw image write] bind at %llx failed\n", (unsigned long long)hi);
-			failed++;
-			return;
-		}
-	}
-	memset(mem, 0, 1024 * h);
-	memset(blob, 0, sizeof(blob));
-	/* struct info: main 0, size, gprs, push, workgroup */
+	memset(heap + img, 0, 8 * 8192);
+	/* struct info: code size, registers, uniforms, workgroup 8x8 */
 	blob[2] = blob[3] = sizeof(code);
-	if (mesa) {
-		blob[2] = blob[3] = sizeof(mcode);
-		memcpy(b + 44, mcode, sizeof(mcode));
-	}
-	b[24] = gprs16 ? 16 : 32;
+	b[24] = 32;
 	b[28] = 8;
-	b[30] = h > 1 ? 8 : 64;
-	b[32] = h > 1 ? 8 : 1;
-	b[34] = 1;
-	if (!mesa)
-		memcpy(b + 44, code, sizeof(code));
-
-	/* PBE: 2D, linear, R32G32B32A32 float, RGBA, 64 x h */
-	put64(desc, 2 | 0x38 << 5 | 4 << 12 | 1 << 17 | 2 << 19 | 3 << 21 | 63ull << 23 |
-		    (uint64_t)(h - 1) << 37);
-	put64(desc + 8, img_va >> 4 | (uint64_t)(1024 / 16 - 1) << 44);
-	put64(desc + 16, 0);
-	/* Mesa's texture descriptor for the same image after it, at state 1 */
-	put64(desc + 24, 0x00007e01fb444702ull);
-	put64(desc + 32, 0x000fc00000000000ull | (img_va >> 4) << 2);
-	put64(desc + 40, 0);
-	extra[0] = 0x17 | (tex2 ? 2 : 1) << 20 | (gva(desc) >> 2) << 26;
-	nr_extra = 1;
-	hdr_or = 1 << 1 | 1 | 1 << 4;	/* one texture state block */
-	grid_y = h;
-	if (!run(h > 1 ? "raw image write 2D" : "raw image write", blob, NULL, 0, 64, 0)) {
-		for (i = 0; i < 64 * h; i++) {
-			memcpy(px, mem + 16 * i, 16);
-			bad += px[0] != 1 || px[1] != 2 || px[2] != 3 || px[3] != 4;
-		}
-		memcpy(px, mem + 1024 * (h - 1), 16);
-		printf("[raw image write %ux%u%s%s%s%s] %s, %u bad, last row pixel 0: %d %d %d %d\n", 64, h,
-		       mesa ? " r0/r4" : "", gprs16 ? " 8 regs" : "", tex2 ? " +ts1" : "",
-		       hi ? " high VA" : "",
-		       bad ? "FAIL" : "ok", bad, (int)px[0], (int)px[1], (int)px[2], (int)px[3]);
-		failed += bad != 0;
-	}
-	nr_extra = 0;
-	hdr_or = 0;
-	grid_y = 1;
-}
-
-/* Mesa's whole iwrite kernel, with its 0.5 in u0, into a 64x64 image */
-static void p_mesa_iwrite(void)
-{
-	static const uint8_t code[] = {
-		0xf2, 0x01, 0x10, 0x04, 0xf2, 0x05, 0x11, 0x04, 0x1e, 0x09, 0x40, 0x26,
-		0x64, 0x00, 0x00, 0x00, 0x3e, 0x91, 0x0b, 0x04, 0x24, 0x00, 0x3e, 0x95,
-		0x0b, 0x24, 0x24, 0x00, 0x3e, 0x99, 0x0b, 0x44, 0x2c, 0x00, 0x7e, 0x1d,
-		0x80, 0x09, 0x80, 0x00, 0x31, 0x21, 0x00, 0x09, 0x00, 0x90, 0x02, 0x00,
-		0x08, 0x01,
-	};
-	static uint32_t blob[11 + 16];
-	uint32_t img = alloc(0x10000, 0x4000), desc = alloc(64, 0x40), i, bad = 0;
-	uint8_t *b = (uint8_t *)blob;
-	float half = 0.5f, px[4];
-
-	memset(heap + img, 0, 0x10000);
-	memset(blob, 0, sizeof(blob));
-	blob[2] = blob[3] = sizeof(code);
-	b[24] = 16;
-	b[28] = 2;
 	b[30] = 8;
 	b[32] = 8;
 	b[34] = 1;
 	memcpy(b + 44, code, sizeof(code));
-	put64(desc, 0x000007e01ff24702ull);
-	put64(desc + 8, 0x0003f00000000000ull | gva(img) >> 4);
-	put64(desc + 16, 0);
-	put64(desc + 24, 0x00007e01fb444702ull);
-	put64(desc + 32, 0x000fc00000000000ull | (gva(img) >> 4) << 2);
-	put64(desc + 40, 0);
-	extra[0] = 0x17 | 2 << 20 | (gva(desc) >> 2) << 26;
-	nr_extra = 1;
+
+	/* PBE: 2D, linear, R32G32B32A32 float, 64x8, 1 KB rows */
+	for (i = 0; i < 8; i++) {
+		put64(desc + 24 * i, 2 | 0x38 << 5 | 4 << 12 | 1 << 17 | 2 << 19 | 3 << 21 |
+					     63ull << 23 | 7ull << 37);
+		put64(desc + 24 * i + 8, gva(img + 8192 * i) >> 4 | 63ull << 44);
+		put64(desc + 24 * i + 16, 0);
+	}
+	extra = 0x17 | 8 << 20 | (gva(desc) >> 2) << 26;
 	hdr_or = 1 << 1 | 1 | 1 << 4;
-	grid_y = 64;
-	if (!run("mesa iwrite", blob, &half, 4, 64, 0)) {
-		for (i = 0; i < 64 * 64; i++) {
+	grid_y = 8;
+	if (!run("image write", blob, NULL, 0, 64, 0)) {
+		for (i = 0; i < 8 * 512; i++) {
 			memcpy(px, heap + img + 16 * i, 16);
-			bad += px[0] != i % 64 || px[1] != i / 64 || px[2] != (i % 64) * (i / 64) ||
-			       px[3] != 0.5f;
+			bad += (px[0] == 1 && px[1] == 2 && px[2] == 3 && px[3] == 4) !=
+			       (i / 512 == state);
 		}
-		printf("[mesa iwrite] %s, %u bad\n", bad ? "FAIL" : "ok", bad);
+		printf("[image write, state %u] %s\n", state, bad ? "FAIL" : "ok");
 		failed += bad != 0;
 	}
-	nr_extra = 0;
+	extra = 0;
 	hdr_or = 0;
 	grid_y = 1;
 }
 
-/*
- * Where does the image write keep its texture state index? Apple's kernels
- * only write to state 0. Bind eight PBE descriptors, each for its own 64x1
- * image, set one bit of the write at a time and report which image changed.
- */
-static void p_write_slot(int byte, uint8_t bit, int byte2, uint8_t bit2)
-{
-	static uint8_t code[] = {
-		0xf2, 0x05, 0x10, 0x04,				/* get_sr r1, sr80 */
-		0x62, 0x09, 0x00, 0x00, 0x00, 0x00,		/* r2 = 0 */
-		0x62, 0x15, 0x00, 0x00, 0x80, 0x3f,		/* r5 = 1.0 */
-		0x62, 0x19, 0x00, 0x00, 0x00, 0x40,		/* r6 = 2.0 */
-		0x62, 0x1d, 0x00, 0x00, 0x40, 0x40,		/* r7 = 3.0 */
-		0x62, 0x21, 0x00, 0x00, 0x80, 0x40,		/* r8 = 4.0 */
-		0x31, 0x29, 0x02, 0x09, 0x00, 0x90, 0x02, 0x00,	/* image_write, at 34 */
-		0x08, 0x01,
-	};
-	static const uint8_t write[8] = { 0x31, 0x29, 0x02, 0x09, 0x00, 0x90, 0x02, 0x00 };
-	static uint32_t blob[11 + 16];
-	uint32_t img = alloc(8 * 1024, 0x4000), desc = alloc(8 * 24, 0x40), i;
-	uint8_t *b = (uint8_t *)blob;
-	char hit[32] = "", *p = hit;
-
-	memset(heap + img, 0, 8 * 1024);
-	memset(blob, 0, sizeof(blob));
-	memcpy(code + 34, write, 8);
-	code[34 + byte] ^= bit;
-	code[34 + byte2] ^= bit2;
-	blob[2] = blob[3] = sizeof(code);
-	b[24] = 32;
-	b[28] = 8;
-	b[30] = 64;
-	b[32] = 1;
-	b[34] = 1;
-	memcpy(b + 44, code, sizeof(code));
-	for (i = 0; i < 8; i++) {
-		put64(desc + 24 * i, 2 | 0x38 << 5 | 4 << 12 | 1 << 17 | 2 << 19 | 3 << 21 | 63ull << 23);
-		put64(desc + 24 * i + 8, gva(img + 1024 * i) >> 4 | (uint64_t)(1024 / 16 - 1) << 44);
-		put64(desc + 24 * i + 16, 0);
-	}
-	extra[0] = 0x17 | 8 << 20 | (gva(desc) >> 2) << 26;
-	nr_extra = 1;
-	hdr_or = 1 << 1 | 1 | 1 << 4;
-	if (!run("write slot", blob, NULL, 0, 64, 0)) {
-		uint32_t n = 0, first = ~0u;
-
-		for (i = 0; i < 8; i++)
-			if (get32(img + 1024 * i) == 0x3f800000)
-				p += sprintf(p, " %u", i);
-		/* anything written anywhere in the heap after the images */
-		for (i = img + 8192; i < heap_off; i += 4)
-			if (get32(i) == 0x3f800000 && get32(i + 4) == 0x40000000) {
-				n++;
-				if (first == ~0u)
-					first = i;
-			}
-		printf("[write slot] byte %d ^ %#04x, byte %d ^ %#04x: wrote state%s; %u pixels elsewhere, first at %#x (images at %#x)\n",
-		       byte, bit, byte2, bit2, *hit ? hit : " none", n, first, img);
-	}
-	nr_extra = 0;
-	hdr_or = 0;
-}
-
-int main(int argc, char **argv)
+int main(void)
 {
 	struct drm_asahi_params_global p = { 0 };
 	struct drm_asahi_get_params gp = { .pointer = (uintptr_t)&p, .size = sizeof(p) };
@@ -633,43 +417,9 @@ int main(int argc, char **argv)
 	syncobj = sc.handle;
 	printf("G%u%c chip %x, VA %llx..%llx\n", p.gpu_generation, p.gpu_variant, p.chip_id,
 	       (unsigned long long)p.vm_start, (unsigned long long)p.vm_end);
-	mesa_vm = argc > 1 && !strcmp(argv[1], "probe-mesavm");
 	if (setup(&p)) {
 		printf("setup failed: %d\n", errno);
 		return 1;
-	}
-
-	if (argc > 1 && !strcmp(argv[1], "wslot")) {
-		/* byte, bit: unchanged, then the bits Apple's writes never set */
-		static const uint8_t v[][4] = {
-			{ 4, 0, 4, 0 }, { 2, 0x10, 4, 0x10 }, { 2, 0x10, 4, 0 }, { 2, 0x20, 4, 0x20 },
-			{ 3, 0x10, 4, 0 }, { 3, 0x20, 4, 0 }, { 3, 0x40, 4, 0 }, { 3, 0x80, 4, 0 },
-			{ 2, 0x40, 4, 0 }, { 2, 0x80, 4, 0 },
-		};
-
-		for (unsigned k = 0; k < sizeof(v) / 4; k++)
-			p_write_slot(v[k][0], v[k][1], v[k][2], v[k][3]);
-		printf("%d failed\n", failed);
-		return failed != 0;
-	}
-	if (argc > 1 && !strcmp(argv[1], "indirect")) {
-		/* the heap starts with 64 KB of its own byte offsets | 0xa0000000 */
-		uint32_t pat = alloc(0x10000, 0x4000), k;
-
-		for (k = 0; k < 0x10000; k += 4)
-			put32(pat + k, 0xa0000000 | k);
-		for (k = 0; k < (argc > 2 ? argc - 2 : 1); k++)
-			p_indirect_uniform(argc > 2 ? atoi(argv[2 + k]) : 8);
-		printf("%d failed\n", failed);
-		return failed != 0;
-	}
-	if (argc > 1 && !strncmp(argv[1], "probe", 5)) {
-		p_image_write(64, 1, 1, 1, 0);
-		p_mesa_iwrite();
-		if (argc > 2)
-			p_indirect_uniform(8);
-		printf("%d failed\n", failed);
-		return failed != 0;
 	}
 
 	{
@@ -679,6 +429,9 @@ int main(int argc, char **argv)
 			expect("t_fill", o, 256, w_fill);
 	}
 	t_float();
+	t_image_write(0);
+	t_image_write(1);
+	t_image_write(5);
 	{
 		struct args2 a = { gva(o = buf(64, 0xdeadbeef, 0)), 5 };
 

@@ -178,87 +178,20 @@ completes. A store's register offset is scaled by the element size.
 
 ## Mesa
 
-`patches/mesa-0001-asahi-g11.patch` makes Mesa's Asahi compiler emit G11
-code. `make gfx-tests` builds its `asahi_clc` and compiles
-`tools/gfx-tests.cl`, and `agx-test` runs the result. Kernel
-arguments go in uniforms from u0, and rodata is loaded from the binary into
-the uniforms Mesa asks for.
+`patches/mesa-0001-asahi-g11.patch` makes Mesa's Asahi compiler and Gallium
+driver target G11, so OpenCL runs through Rusticl. `AGX_G11` is in
+`genxml/agx_g11.h`. `make gfx-tests` builds `asahi_clc` and compiles
+`tools/gfx-tests.cl` for `agx-test`.
 
-These pass: arithmetic, floats, loops, a preamble, thread and threadgroup ids,
-threadgroup memory with barriers, a reduction, fences and atomics.
-
-The same patch makes the Gallium driver emit G11 command streams, so OpenCL
-runs through Rusticl. `cmdbuf.xml` holds the G11 encodings, with `AGX_G11`
-in `agx_pack_header.h`:
-
-| word | G11 |
+| state word | G11 |
 |---|---|
-| uniform | tag 0x03, otherwise as G13 |
+| uniform | tag 0x03 |
 | shader | one word for shader, registers and threadgroup memory |
 | no preshader | 0x0108 |
 | preshader | 0x38, then 0xc04000, then the code address |
-| CDM header | bit 0 set; uniforms, textures in 8s, samplers in 4s; preshader count clear |
-| CDM block type | bits 31:30: launch 0, terminate 2, barrier 3 |
-
-### Images
-
-Image reads (1D, 2D, 3D, arrays, buffers), sampled reads and 2D writes work.
-CTS kernel_image_methods, samplerless_reads, cl_read_write_images and
-cl_fill_images pass. Layouts come from AGXMetalA12 and from Apple's G11
-kernels lined up against the same kernels built for G13 (iPhone13,2 IPSWs
-for iOS 16.6.1 and 18.6.2).
-
-Still wrong:
-
-- Writes to twiddled 2D arrays of 2, 4 and 8-byte formats (1 and 16-byte
-  ones are fine): each channel lands as its own 32-bit word.
-- Linear filtering, in image_streams, for float, half, snorm, sRGB and
-  10:10:10:2 formats. Half weights come out in 1/32 steps, 32-bit floats do
-  not filter at all, and sRGB is filtered wrong although nearest reads decode
-  right. unorm formats pass.
-
-| what | G11 |
-|---|---|
-| texture, PBE descriptors | as G13 from word 1 on; word 0 is a bit lower, the dimension is 3 bits |
-| sampler | as G13, 8 bytes |
-| texture state word | `0x17 \| start << 8 \| count << 20 \| address >> 2 << 26`, count 0 is 64, 24 bytes apart |
-| sampler state word | `0x13 \| start << 8 \| count << 20 \| address >> 2 << 26`, 8 bytes apart |
-| sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinate register 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8 (1D 0, 2D 1, 3D 2, cube 3), coordinates 3 for 3D, cubes and arrays else 2 in 77:76 |
-| image write | 8 bytes: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32, LOD 0 only |
-| texture_load | none: loads sample at the pixel centre through a pixel-coordinate sampler |
-
-Apple's kernels only write to state 0, so the write's state field was found
-on the phone: `agx-test wslot` binds several PBE descriptors and flips one
-bit at a time. Mesa uses linear layouts where it can and no compression.
-Twiddled tiles are the sizes G13 uses, but G11's Z order starts with Y rather
-than X. G11 has no bindless texture state, so textures
-stay in state registers and size and layer checks find descriptors from the
-index.
-
-The sampler word is the one AGXMetalA12's ComputeProgramVariant uses for a
-program's constant samplers. Metal's own samplers go through an indirect load
-(`0x07 | start << 8 | count << 20 | index << 27`, bit 6 for Apple's own
-tables) whose index is not understood: uniform registers and a table at RGX
-0x14020 both failed. A bad sampler load breaks every later texture access,
-in any job, until the next boot (MMU fault at VA 0x1700a11880, requester 33).
-`agx-test probe` runs raw image writes, `agx-test indirect N...` the
-indirect uniform load (tag 0x1b).
-
-Other state words found on the way, from ComputeProgramVariant: `0x03`
-loads uniforms from memory and `0x23` writes a 32-bit value (bits 55:24)
-into one; `| 0x30` and `| 0x04` pick registers from 128 up.
-
-G13's stack instructions kill the thread on G11, so private memory lives in
-global memory: each thread of a dispatch gets its share of a buffer the
-driver allocates per launch, indexed from the hardware grid position.
-
-Register spills come after register allocation, so they go to threadgroup
-memory instead: the shader takes the whole 32 KB window and each thread gets
-a slice at the top, below 32752, addressed from r3l. The kernel's own
-threadgroup memory sits below, which caps the threadgroup size Mesa reports.
-Apple's driver binds a USC spill buffer per encoder, which the kext puts at
-compute command +0x80 (RGX 0x118d0) as address | field << 1 | 1, and sets
-shader word bits 37:36; the G11 stack instructions that use it are not known.
+| texture | `0x17 \| start << 8 \| count << 20 \| address >> 2 << 26`, count 0 is 64 |
+| sampler | `0x13 \| start << 8 \| count << 20 \| address >> 2 << 26` |
+| CDM header | bit 0 set; uniforms, textures in 8s, samplers in 4s |
 
 Other G11 differences, from Apple's G11 shaders and the CTS:
 
@@ -266,19 +199,45 @@ Other G11 differences, from Apple's G11 shaders and the CTS:
 |---|---|
 | sqrt | no srsqrt: x * rsqrt(x), with 0 and inf passed through |
 | rounding | floor only: ceil, trunc and roundeven are built from it |
-| SIMD groups | none, so subgroups are reported unsupported |
+| SIMD groups | none, so no subgroups |
 | half denormals | flushed in every f16 source, compares and 16-bit constants included |
 | threadgroup atomics | the device atomic with address space 2 in bits 29:28 |
-| thread index in threadgroup | never read by Apple's code; built from position and size |
+| thread index in threadgroup | built from position and size; Apple's code never reads it |
+| stack | G13's stack instructions kill the thread |
 
-After a job times out, the driver prints the MMU fault status (RGX 0x17040):
-address, context, requester and direction.
+Private memory lives in a global buffer allocated per launch, indexed from
+the grid position. Register spills go to the top of a full 32 KB threadgroup
+window, one slice per thread from r3l, which caps the threadgroup size.
 
-`make rootfs` cross-builds that Mesa for the phone. `apk.static` makes an
-Alpine aarch64 sysroot and a runtime rootfs without root, rustup goes in
-`build/rust`, and the host Mesa build from `make gfx-tests` supplies the
-build-time compilers. The tarball holds Rusticl and `tools/cl-test.c`.
-`tools/rootfs-push.sh` copies it over USB into a tmpfs on a booted phone:
+### Images
+
+Layouts are from AGXMetalA12 and from Apple's G11 kernels lined up against the
+same kernels built for G13 (iPhone13,2 IPSWs for iOS 16.6.1 and 18.6.2).
+
+| what | G11 |
+|---|---|
+| texture, PBE descriptors | as G13, but word 0 from bit 3 up sits one bit lower |
+| sampler | as G13, 8 bytes |
+| sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinates 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8, coordinate count 77:76 |
+| image write | 8 bytes: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32 |
+| texture_load | none; Mesa samples at the pixel centre instead |
+| bindless textures | none; descriptors are found from the state index |
+| twiddled tiles | G13's sizes, Z order starting with Y |
+
+CTS kernel_image_methods, samplerless_reads, cl_read_write_images and
+cl_fill_images pass. Still wrong:
+
+- writes to twiddled 2D arrays of 2, 4 and 8-byte formats;
+- linear filtering of float, half, snorm, sRGB and 10:10:10:2 formats.
+
+Metal's own samplers load indirectly, `0x07 | start << 8 | count << 20 |
+index << 27`, and the index is not understood. A bad sampler load breaks
+every later texture access until the next boot.
+
+### Running
+
+`make rootfs` cross-builds Mesa and `tools/cl-test.c` into an Alpine rootfs;
+`tools/rootfs-push.sh` copies it to a tmpfs on the phone:
 
 ```sh
 make rootfs
@@ -286,9 +245,8 @@ make rootfs
 build/venv/bin/python tools/tsh.py "chroot /mnt/a env RUSTICL_ENABLE=asahi cl-test"
 ```
 
-To check command streams without the phone, build Mesa for the PC with
-`-Dtools=drm-shim` and run under `LD_PRELOAD=libasahi_noop_drm_shim.so` with
-`ASAHI_MESA_DEBUG=trace`. The shim reports the A12's parameters.
+Without the phone, build Mesa with `-Dtools=drm-shim` and run under
+`LD_PRELOAD=libasahi_noop_drm_shim.so ASAHI_MESA_DEBUG=trace`.
 
 ## DRM
 
@@ -302,7 +260,7 @@ Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 | `usc_exec_base` | must be 0x11 << 32, the base the firmware loads |
 | submit | async, one `drm_sched` job per compute command |
 | name | `asahi`, so Mesa picks it up |
-| ignored | timestamps; the sampler heap goes to RGX 0x14020 |
+| ignored | sampler heaps, timestamps |
 | not yet | render commands, helper programs, single-page binds |
 
 Every user context gets a page catalogue at init and is loaded by the
@@ -310,8 +268,7 @@ firmware at every power-up, so a VM only fills its page tables. After a
 change the driver sets the context's TLB generation to the firmware's copy
 plus 1 << 22, and the firmware flushes before that context's next job.
 
-The kernel range each VM reserves holds a zeroed page for RGX 0x14020. A
-compute command's sampler heap replaces it, to experiment with indirect loads.
+The kernel range each VM reserves holds a zeroed page for RGX 0x14020.
 
 Each queue is an entity on one scheduler that runs one job at a time, so a
 submit's commands run in order. In-syncs gate the first command and
@@ -322,9 +279,10 @@ the GPU until the next boot. Unbinds wait until the VM has no jobs queued
 or running.
 
 `make agx-test` builds `tools/agx-test.c` static with the kernel's nolibc,
-and the next kernelcache puts it in the initramfs. It runs the Mesa tests
-in one VM, three async tests (32 queued jobs, an in-sync across two queues,
-two commands in one submit), then `t_fill` in a second VM.
+and the next kernelcache puts it in the initramfs. It runs the Mesa tests,
+hand-assembled image writes, async tests and a second VM.
+
+After a job times out, the driver prints the MMU fault status (RGX 0x17040).
 
 ## Queues
 
