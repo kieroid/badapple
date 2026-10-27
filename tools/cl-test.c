@@ -14,6 +14,7 @@
 
 #define N 4096
 #define NH 65536
+#define IW 64
 
 /* Reference conversions, exact for every half including denormals */
 static float half_to_float(unsigned short h)
@@ -87,6 +88,47 @@ static const char *src =
 	"	for (uint j = 0; j < 128; j++)\n"
 	"		a[j] = i * 128 + j;\n"
 	"	out[i] = a[(i + n) & 127];\n"
+	"}\n"
+	"#define L(k) uint16 a##k = vload16(0, in + ((i * 7 + k * 16) & 4080));\n"
+	"kernel void spill(global uint *out, global const uint *in) {\n"
+	"	uint i = get_global_id(0);\n"
+	"	L(0) L(1) L(2) L(3) L(4) L(5) L(6) L(7) L(8) L(9)\n"
+	"	uint16 s = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9;\n"
+	"	uint16 r = a0 * s ^ a1 * (s + 1) ^ a2 * (s + 2) ^ a3 * (s + 3) ^\n"
+	"		   a4 * (s + 4) ^ a5 * (s + 5) ^ a6 * (s + 6) ^ a7 * (s + 7) ^\n"
+	"		   a8 * (s + 8) ^ a9 * (s + 9);\n"
+	"	uint8 h = r.lo + r.hi;\n"
+	"	uint4 q = h.lo + h.hi;\n"
+	"	out[i] = q.x + q.y + q.z + q.w;\n"
+	"}\n";
+
+/* Built only if the device reports images */
+static const char *isrc =
+	"kernel void isize(global int *out, read_only image2d_t img) {\n"
+	"	out[get_global_id(0)] = get_image_width(img) * 1000 + get_image_height(img);\n"
+	"}\n"
+	"kernel void ibindw(global int *out, write_only image2d_t img) {\n"
+	"	if (out[0] == 12345)\n"
+	"		write_imagef(img, (int2)(0, 0), (float4)(1.0f));\n"
+	"	out[get_global_id(0)] = 7;\n"
+	"}\n"
+	"kernel void ibindr(global int *out, read_only image2d_t img) {\n"
+	"	int v = 7;\n"
+	"	if (out[0] == 12345)\n"
+	"		v = read_imagef(img, (int2)(0, 0)).x;\n"
+	"	out[get_global_id(0)] = v;\n"
+	"}\n"
+	"kernel void iwrite(write_only image2d_t img) {\n"
+	"	int x = get_global_id(0), y = get_global_id(1);\n"
+	"	write_imagef(img, (int2)(x, y), (float4)(x, y, x * y, 0.5f));\n"
+	"}\n"
+	"kernel void iread(global float4 *out, read_only image2d_t img) {\n"
+	"	int x = get_global_id(0), y = get_global_id(1);\n"
+	"	out[y * get_global_size(0) + x] = read_imagef(img, (int2)(x, y));\n"
+	"}\n"
+	"kernel void isample(global float4 *out, read_only image2d_t img, sampler_t s) {\n"
+	"	int x = get_global_id(0), y = get_global_id(1);\n"
+	"	out[y * get_global_size(0) + x] = read_imagef(img, s, (float2)(x + 0.5f, y + 0.5f));\n"
 	"}\n";
 
 static int failed;
@@ -106,7 +148,7 @@ static cl_int run(cl_command_queue q, cl_kernel k, size_t local)
 	return clEnqueueNDRangeKernel(q, k, 1, NULL, &global, &local, 0, NULL, NULL);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
 	static cl_uint u[N], v[N];
 	static float x[N], y[N];
@@ -114,9 +156,11 @@ int main(void)
 	cl_device_id dev;
 	cl_context ctx;
 	cl_command_queue q;
-	cl_program prog;
-	cl_kernel kfill, ksaxpy, krev, kcount, klcount, kh2f, kf2h, krnd, kids, kpriv;
-	cl_mem bu, bx, by, bc;
+	cl_program prog, iprog;
+	cl_bool images = CL_FALSE;
+	cl_kernel kfill, ksaxpy, krev, kcount, klcount, kh2f, kf2h, krnd, kids, kpriv, kspill;
+	cl_kernel kisz = NULL, kbw = NULL, kbr = NULL, kiw = NULL, kir = NULL, kis = NULL;
+	cl_mem bu, bv, bx, by, bc;
 	cl_int err;
 	char name[128];
 	cl_uint c = 0, k = 0x1000, i, bad, want;
@@ -149,7 +193,22 @@ int main(void)
 	krnd = clCreateKernel(prog, "rnd", &err);
 	kids = clCreateKernel(prog, "ids", &err);
 	kpriv = clCreateKernel(prog, "priv", &err);
+	kspill = clCreateKernel(prog, "spill", &err);
 	CL(err);
+
+	CL(clGetDeviceInfo(dev, CL_DEVICE_IMAGE_SUPPORT, sizeof(images), &images, NULL));
+	if (images) {
+		iprog = clCreateProgramWithSource(ctx, 1, &isrc, NULL, &err);
+		CL(err);
+		CL(clBuildProgram(iprog, 1, &dev, "-cl-std=CL3.0", NULL, NULL));
+		kisz = clCreateKernel(iprog, "isize", &err);
+		kbw = clCreateKernel(iprog, "ibindw", &err);
+		kbr = clCreateKernel(iprog, "ibindr", &err);
+		kiw = clCreateKernel(iprog, "iwrite", &err);
+		kir = clCreateKernel(iprog, "iread", &err);
+		kis = clCreateKernel(iprog, "isample", &err);
+		CL(err);
+	}
 
 	for (i = 0; i < N; i++) {
 		x[i] = i * 0.5f;
@@ -160,6 +219,7 @@ int main(void)
 	bx = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(x), x, &err);
 	by = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, sizeof(y), y, &err);
 	bc = clCreateBuffer(ctx, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, sizeof(c), &c, &err);
+	bv = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(v), v, &err);
 	CL(err);
 
 	CL(clSetKernelArg(kfill, 0, sizeof(bu), &bu));
@@ -304,6 +364,116 @@ int main(void)
 		bad += u[i] != i * 128 + ((i + k) & 127);
 	check("private array", bad);
 
+	/* more live values than registers, so the compiler spills */
+	{
+		size_t wg;
+
+		CL(clGetKernelWorkGroupInfo(kspill, dev, CL_KERNEL_WORK_GROUP_SIZE,
+					    sizeof(wg), &wg, NULL));
+		printf("  spill kernel: %zu threads per group\n", wg);
+	}
+	CL(clSetKernelArg(kspill, 0, sizeof(bu), &bu));
+	CL(clSetKernelArg(kspill, 1, sizeof(bv), &bv));
+	CL(run(q, kspill, 32));
+	CL(clEnqueueReadBuffer(q, bu, CL_TRUE, 0, sizeof(u), u, 0, NULL, NULL));
+	for (bad = i = 0; i < N; i++) {
+		cl_uint s[16] = { 0 }, r[16] = { 0 }, t = 0, j, l;
+
+		for (l = 0; l < 10; l++)
+			for (j = 0; j < 16; j++)
+				s[j] += v[((i * 7 + l * 16) & 4080) + j];
+		for (l = 0; l < 10; l++)
+			for (j = 0; j < 16; j++)
+				r[j] ^= v[((i * 7 + l * 16) & 4080) + j] * (s[j] + l);
+		for (j = 0; j < 16; j++)
+			t += r[j];
+		bad += u[i] != t;
+	}
+	check("register spills", bad);
+
+	/* 64x64 RGBA float image: write it from a kernel and read it back,
+	 * then read it in a kernel with and without a sampler. Pixel (x, y) is
+	 * (x, y, x * y, 0.5).
+	 */
+	if (!images)
+		printf("  no images\n");
+	else {
+		static float img[IW * IW * 4], got[IW * IW * 4];
+		cl_image_format fmt = { CL_RGBA, CL_FLOAT };
+		cl_image_desc desc = { .image_type = CL_MEM_OBJECT_IMAGE2D,
+				       .image_width = IW, .image_height = IW };
+		size_t org[3] = { 0 }, reg[3] = { IW, IW, 1 }, gl[2] = { IW, IW }, lo[2] = { 8, 8 };
+		cl_mem bi = clCreateImage(ctx, CL_MEM_READ_WRITE, &fmt, &desc, NULL, &err);
+		cl_mem bo = clCreateBuffer(ctx, CL_MEM_READ_WRITE, sizeof(got), NULL, &err);
+		cl_sampler smp = clCreateSampler(ctx, CL_FALSE, CL_ADDRESS_CLAMP_TO_EDGE,
+						 CL_FILTER_NEAREST, &err);
+		CL(err);
+
+		for (i = 0; i < IW * IW; i++) {
+			img[4 * i] = i % IW;
+			img[4 * i + 1] = i / IW;
+			img[4 * i + 2] = (i % IW) * (i / IW);
+			img[4 * i + 3] = 0.5f;
+		}
+
+		/* binds the image but only reads its descriptor from memory */
+		CL(clSetKernelArg(kisz, 0, sizeof(bo), &bo));
+		CL(clSetKernelArg(kisz, 1, sizeof(bi), &bi));
+		CL(clEnqueueNDRangeKernel(q, kisz, 1, NULL, gl, lo, 0, NULL, NULL));
+		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(cl_int), &c, 0, NULL, NULL));
+		check("image size", c != IW * 1000 + IW);
+
+		/* bind the image for writing, then for reading, but never touch it:
+		 * tests the texture and sampler state words alone
+		 */
+		CL(clSetKernelArg(kbw, 0, sizeof(bo), &bo));
+		CL(clSetKernelArg(kbw, 1, sizeof(bi), &bi));
+		CL(clEnqueueNDRangeKernel(q, kbw, 1, NULL, gl, lo, 0, NULL, NULL));
+		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(cl_int), &c, 0, NULL, NULL));
+		check("image bind for write", c != 7);
+		/* "noread" skips everything that loads samplers */
+		if (argc > 1 && !strcmp(argv[1], "noread"))
+			goto write;
+		CL(clSetKernelArg(kbr, 0, sizeof(bo), &bo));
+		CL(clSetKernelArg(kbr, 1, sizeof(bi), &bi));
+		CL(clEnqueueNDRangeKernel(q, kbr, 1, NULL, gl, lo, 0, NULL, NULL));
+		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(cl_int), &c, 0, NULL, NULL));
+		check("image bind for read", c != 7);
+write:
+
+		memset(got, 0, sizeof(got));
+		CL(clEnqueueWriteImage(q, bi, CL_TRUE, org, reg, 0, 0, got, 0, NULL, NULL));
+		CL(clSetKernelArg(kiw, 0, sizeof(bi), &bi));
+		CL(clEnqueueNDRangeKernel(q, kiw, 2, NULL, gl, lo, 0, NULL, NULL));
+		CL(clEnqueueReadImage(q, bi, CL_TRUE, org, reg, 0, 0, got, 0, NULL, NULL));
+		check("image write", memcmp(img, got, sizeof(img)) != 0);
+
+		/* "noread" stops here, before anything samples */
+		if (argc > 1 && !strcmp(argv[1], "noread"))
+			goto out;
+
+		CL(clEnqueueWriteImage(q, bi, CL_TRUE, org, reg, 0, 0, img, 0, NULL, NULL));
+		memset(got, 0, sizeof(got));
+		CL(clSetKernelArg(kir, 0, sizeof(bo), &bo));
+		CL(clSetKernelArg(kir, 1, sizeof(bi), &bi));
+		CL(clEnqueueNDRangeKernel(q, kir, 2, NULL, gl, lo, 0, NULL, NULL));
+		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(got), got, 0, NULL, NULL));
+		check("image read", memcmp(img, got, sizeof(img)) != 0);
+
+		memset(got, 0, sizeof(got));
+		CL(clSetKernelArg(kis, 0, sizeof(bo), &bo));
+		CL(clSetKernelArg(kis, 1, sizeof(bi), &bi));
+		CL(clSetKernelArg(kis, 2, sizeof(smp), &smp));
+		CL(clEnqueueNDRangeKernel(q, kis, 2, NULL, gl, lo, 0, NULL, NULL));
+		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(got), got, 0, NULL, NULL));
+		check("image sample", memcmp(img, got, sizeof(img)) != 0);
+		if (memcmp(img, got, sizeof(img)))
+			printf("  pixel 1,1: %g %g %g %g\n", got[4 * (IW + 1)], got[4 * (IW + 1) + 1],
+			       got[4 * (IW + 1) + 2], got[4 * (IW + 1) + 3]);
+
+	}
+
+out:
 	printf("%d failed\n", failed);
 	return failed != 0;
 }

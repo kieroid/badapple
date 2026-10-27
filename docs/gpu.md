@@ -197,19 +197,49 @@ in `agx_pack_header.h`:
 | shader | one word for shader, registers and threadgroup memory |
 | no preshader | 0x0108 |
 | preshader | 0x38, then 0xc04000, then the code address |
-| CDM header | bit 0 set; only the uniform count is filled in |
+| CDM header | bit 0 set; uniforms, textures in 8s, samplers in 4s; preshader count clear |
 | CDM block type | bits 31:30: launch 0, terminate 2, barrier 3 |
 
-Texture and sampler words are left out, so images are reported unsupported.
+### Images
+
+Image writes work. Reads do not, since the sampler load is not known, so
+Mesa reports images only with `AGX_G11_IMAGES=1`. Layouts come from
+AGXMetalA12 and from Apple's G11 kernels lined up against the same kernels
+built for G13 (iPhone13,2 IPSWs for iOS 16.6.1 and 18.6.2).
+
+| what | G11 |
+|---|---|
+| texture, PBE descriptors | as G13 from word 1 on; word 0 is a bit lower, the dimension is 3 bits |
+| sampler | as G13, 8 bytes |
+| texture state word | `0x17 \| start << 8 \| count << 20 \| address >> 2 << 26`, count 0 is 64, 24 bytes apart |
+| sampler state word | `0x07 \| start << 8 \| count << 20 \| index << 27`, bit 6 for Apple's own bindings |
+| sample | 10 bytes, `0x21`: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinate register 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8 |
+| image write | 8 bytes, as Apple's: data halves 15:10, coordinates 21:16, state 37:32 |
+| texture_load | none: loads sample at the pixel centre through a pixel-coordinate sampler |
+
+Apple's kernels write only to state 0, so on G11 an image's PBE descriptor
+comes before its texture descriptor. Mesa uses linear layouts and no
+compression, since the G11 twiddled layout is unchecked.
+
+The sampler word loads samplers indirectly through an index, which
+AGXMetalA12 numbers as 12 plus the Metal buffer, with small numbers for its
+own tables. Uniform registers, a table at RGX 0x14020, and the same tests on
+the indirect uniform load (tag 0x1b) all failed. A bad sampler load breaks
+every later texture access, in any job, until the next boot (MMU fault at VA
+0x1700a11880, requester 33). `agx-test probe` runs raw image writes,
+`agx-test indirect N...` the indirect load.
 
 G13's stack instructions kill the thread on G11, so private memory lives in
 global memory: each thread of a dispatch gets its share of a buffer the
-driver allocates per launch, indexed from the hardware grid position. Kernels
-that spill registers still fail, since spills are placed after register
-allocation. Apple's driver instead binds a USC spill buffer per encoder, which
-the kext puts at compute command +0x80 (RGX 0x118d0) as address | field << 1
-| 1, and sets shader word bits 37:36; the G11 stack instructions that use it
-are not known.
+driver allocates per launch, indexed from the hardware grid position.
+
+Register spills come after register allocation, so they go to threadgroup
+memory instead: the shader takes the whole 32 KB window and each thread gets
+a slice at the top, below 32752, addressed from r3l. The kernel's own
+threadgroup memory sits below, which caps the threadgroup size Mesa reports.
+Apple's driver binds a USC spill buffer per encoder, which the kext puts at
+compute command +0x80 (RGX 0x118d0) as address | field << 1 | 1, and sets
+shader word bits 37:36; the G11 stack instructions that use it are not known.
 
 Other G11 differences, from Apple's G11 shaders and the CTS:
 
@@ -253,7 +283,7 @@ Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 | `usc_exec_base` | must be 0x11 << 32, the base the firmware loads |
 | submit | async, one `drm_sched` job per compute command |
 | name | `asahi`, so Mesa picks it up |
-| ignored | sampler heaps, timestamps |
+| ignored | timestamps; the sampler heap goes to RGX 0x14020 |
 | not yet | render commands, helper programs, single-page binds |
 
 Every user context gets a page catalogue at init and is loaded by the
@@ -261,7 +291,8 @@ firmware at every power-up, so a VM only fills its page tables. After a
 change the driver sets the context's TLB generation to the firmware's copy
 plus 1 << 22, and the firmware flushes before that context's next job.
 
-The kernel range each VM reserves holds a zeroed page for RGX 0x14020.
+The kernel range each VM reserves holds a zeroed page for RGX 0x14020. A
+compute command's sampler heap replaces it, to experiment with indirect loads.
 
 Each queue is an entity on one scheduler that runs one job at a time, so a
 submit's commands run in order. In-syncs gate the first command and
