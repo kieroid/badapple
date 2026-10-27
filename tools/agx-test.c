@@ -554,6 +554,69 @@ static void p_mesa_iwrite(void)
 	grid_y = 1;
 }
 
+/*
+ * Where does the image write keep its texture state index? Apple's kernels
+ * only write to state 0. Bind eight PBE descriptors, each for its own 64x1
+ * image, set one bit of the write at a time and report which image changed.
+ */
+static void p_write_slot(int byte, uint8_t bit, int byte2, uint8_t bit2)
+{
+	static uint8_t code[] = {
+		0xf2, 0x05, 0x10, 0x04,				/* get_sr r1, sr80 */
+		0x62, 0x09, 0x00, 0x00, 0x00, 0x00,		/* r2 = 0 */
+		0x62, 0x15, 0x00, 0x00, 0x80, 0x3f,		/* r5 = 1.0 */
+		0x62, 0x19, 0x00, 0x00, 0x00, 0x40,		/* r6 = 2.0 */
+		0x62, 0x1d, 0x00, 0x00, 0x40, 0x40,		/* r7 = 3.0 */
+		0x62, 0x21, 0x00, 0x00, 0x80, 0x40,		/* r8 = 4.0 */
+		0x31, 0x29, 0x02, 0x09, 0x00, 0x90, 0x02, 0x00,	/* image_write, at 34 */
+		0x08, 0x01,
+	};
+	static const uint8_t write[8] = { 0x31, 0x29, 0x02, 0x09, 0x00, 0x90, 0x02, 0x00 };
+	static uint32_t blob[11 + 16];
+	uint32_t img = alloc(8 * 1024, 0x4000), desc = alloc(8 * 24, 0x40), i;
+	uint8_t *b = (uint8_t *)blob;
+	char hit[32] = "", *p = hit;
+
+	memset(heap + img, 0, 8 * 1024);
+	memset(blob, 0, sizeof(blob));
+	memcpy(code + 34, write, 8);
+	code[34 + byte] ^= bit;
+	code[34 + byte2] ^= bit2;
+	blob[2] = blob[3] = sizeof(code);
+	b[24] = 32;
+	b[28] = 8;
+	b[30] = 64;
+	b[32] = 1;
+	b[34] = 1;
+	memcpy(b + 44, code, sizeof(code));
+	for (i = 0; i < 8; i++) {
+		put64(desc + 24 * i, 2 | 0x38 << 5 | 4 << 12 | 1 << 17 | 2 << 19 | 3 << 21 | 63ull << 23);
+		put64(desc + 24 * i + 8, gva(img + 1024 * i) >> 4 | (uint64_t)(1024 / 16 - 1) << 44);
+		put64(desc + 24 * i + 16, 0);
+	}
+	extra[0] = 0x17 | 8 << 20 | (gva(desc) >> 2) << 26;
+	nr_extra = 1;
+	hdr_or = 1 << 1 | 1 | 1 << 4;
+	if (!run("write slot", blob, NULL, 0, 64, 0)) {
+		uint32_t n = 0, first = ~0u;
+
+		for (i = 0; i < 8; i++)
+			if (get32(img + 1024 * i) == 0x3f800000)
+				p += sprintf(p, " %u", i);
+		/* anything written anywhere in the heap after the images */
+		for (i = img + 8192; i < heap_off; i += 4)
+			if (get32(i) == 0x3f800000 && get32(i + 4) == 0x40000000) {
+				n++;
+				if (first == ~0u)
+					first = i;
+			}
+		printf("[write slot] byte %d ^ %#04x, byte %d ^ %#04x: wrote state%s; %u pixels elsewhere, first at %#x (images at %#x)\n",
+		       byte, bit, byte2, bit2, *hit ? hit : " none", n, first, img);
+	}
+	nr_extra = 0;
+	hdr_or = 0;
+}
+
 int main(int argc, char **argv)
 {
 	struct drm_asahi_params_global p = { 0 };
@@ -576,6 +639,19 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	if (argc > 1 && !strcmp(argv[1], "wslot")) {
+		/* byte, bit: unchanged, then the bits Apple's writes never set */
+		static const uint8_t v[][4] = {
+			{ 4, 0, 4, 0 }, { 2, 0x10, 4, 0x10 }, { 2, 0x10, 4, 0 }, { 2, 0x20, 4, 0x20 },
+			{ 3, 0x10, 4, 0 }, { 3, 0x20, 4, 0 }, { 3, 0x40, 4, 0 }, { 3, 0x80, 4, 0 },
+			{ 2, 0x40, 4, 0 }, { 2, 0x80, 4, 0 },
+		};
+
+		for (unsigned k = 0; k < sizeof(v) / 4; k++)
+			p_write_slot(v[k][0], v[k][1], v[k][2], v[k][3]);
+		printf("%d failed\n", failed);
+		return failed != 0;
+	}
 	if (argc > 1 && !strcmp(argv[1], "indirect")) {
 		/* the heap starts with 64 KB of its own byte offsets | 0xa0000000 */
 		uint32_t pat = alloc(0x10000, 0x4000), k;

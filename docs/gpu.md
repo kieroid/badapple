@@ -202,32 +202,51 @@ in `agx_pack_header.h`:
 
 ### Images
 
-Image writes work. Reads do not, since the sampler load is not known, so
-Mesa reports images only with `AGX_G11_IMAGES=1`. Layouts come from
-AGXMetalA12 and from Apple's G11 kernels lined up against the same kernels
-built for G13 (iPhone13,2 IPSWs for iOS 16.6.1 and 18.6.2).
+Image reads (1D, 2D, 3D, arrays, buffers), sampled reads and 2D writes work.
+CTS kernel_image_methods, samplerless_reads, cl_read_write_images and
+cl_fill_images pass. Layouts come from AGXMetalA12 and from Apple's G11
+kernels lined up against the same kernels built for G13 (iPhone13,2 IPSWs
+for iOS 16.6.1 and 18.6.2).
+
+Still wrong:
+
+- Writes to twiddled 2D arrays of 2, 4 and 8-byte formats (1 and 16-byte
+  ones are fine): each channel lands as its own 32-bit word.
+- Linear filtering, in image_streams, for float, half, snorm, sRGB and
+  10:10:10:2 formats. Half weights come out in 1/32 steps, 32-bit floats do
+  not filter at all, and sRGB is filtered wrong although nearest reads decode
+  right. unorm formats pass.
 
 | what | G11 |
 |---|---|
 | texture, PBE descriptors | as G13 from word 1 on; word 0 is a bit lower, the dimension is 3 bits |
 | sampler | as G13, 8 bytes |
 | texture state word | `0x17 \| start << 8 \| count << 20 \| address >> 2 << 26`, count 0 is 64, 24 bytes apart |
-| sampler state word | `0x07 \| start << 8 \| count << 20 \| index << 27`, bit 6 for Apple's own bindings |
-| sample | 10 bytes, `0x21`: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinate register 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8 |
-| image write | 8 bytes, as Apple's: data halves 15:10, coordinates 21:16, state 37:32 |
+| sampler state word | `0x13 \| start << 8 \| count << 20 \| address >> 2 << 26`, 8 bytes apart |
+| sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinate register 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8 (1D 0, 2D 1, 3D 2, cube 3), coordinates 3 for 3D, cubes and arrays else 2 in 77:76 |
+| image write | 8 bytes: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32, LOD 0 only |
 | texture_load | none: loads sample at the pixel centre through a pixel-coordinate sampler |
 
-Apple's kernels write only to state 0, so on G11 an image's PBE descriptor
-comes before its texture descriptor. Mesa uses linear layouts and no
-compression, since the G11 twiddled layout is unchecked.
+Apple's kernels only write to state 0, so the write's state field was found
+on the phone: `agx-test wslot` binds several PBE descriptors and flips one
+bit at a time. Mesa uses linear layouts where it can and no compression.
+Twiddled tiles are the sizes G13 uses, but G11's Z order starts with Y rather
+than X. G11 has no bindless texture state, so textures
+stay in state registers and size and layer checks find descriptors from the
+index.
 
-The sampler word loads samplers indirectly through an index, which
-AGXMetalA12 numbers as 12 plus the Metal buffer, with small numbers for its
-own tables. Uniform registers, a table at RGX 0x14020, and the same tests on
-the indirect uniform load (tag 0x1b) all failed. A bad sampler load breaks
-every later texture access, in any job, until the next boot (MMU fault at VA
-0x1700a11880, requester 33). `agx-test probe` runs raw image writes,
-`agx-test indirect N...` the indirect load.
+The sampler word is the one AGXMetalA12's ComputeProgramVariant uses for a
+program's constant samplers. Metal's own samplers go through an indirect load
+(`0x07 | start << 8 | count << 20 | index << 27`, bit 6 for Apple's own
+tables) whose index is not understood: uniform registers and a table at RGX
+0x14020 both failed. A bad sampler load breaks every later texture access,
+in any job, until the next boot (MMU fault at VA 0x1700a11880, requester 33).
+`agx-test probe` runs raw image writes, `agx-test indirect N...` the
+indirect uniform load (tag 0x1b).
+
+Other state words found on the way, from ComputeProgramVariant: `0x03`
+loads uniforms from memory and `0x23` writes a 32-bit value (bits 55:24)
+into one; `| 0x30` and `| 0x04` pick registers from 128 up.
 
 G13's stack instructions kill the thread on G11, so private memory lives in
 global memory: each thread of a dispatch gets its share of a buffer the

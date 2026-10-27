@@ -445,6 +445,62 @@ index 3aeb3a4..b3073c5 100644
     case AGX_OPCODE_IMAGE_WRITE:
        return src_index == 3;
     case AGX_OPCODE_BLOCK_IMAGE_STORE:
+diff --git a/src/asahi/compiler/agx_nir_lower_texture.c b/src/asahi/compiler/agx_nir_lower_texture.c
+index 616d0b0..c3effd9 100644
+--- a/src/asahi/compiler/agx_nir_lower_texture.c
++++ b/src/asahi/compiler/agx_nir_lower_texture.c
+@@ -8,6 +8,7 @@
+ 
+ #include "compiler/nir/nir.h"
+ #include "compiler/nir/nir_builder.h"
++#include "asahi/genxml/agx_g11.h"
+ #include "agx_nir.h"
+ #include "agx_nir_texture.h"
+ #include "glsl_types.h"
+@@ -50,10 +51,29 @@ fence_image(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
+    }
+ }
+ 
++/*
++ * G11 has no bindless texture state, so its textures stay in state registers
++ * and descriptors are found from the index (see agx_nir_lower_bindings).
++ */
++static nir_def *
++descriptor_for_index(nir_builder *b, nir_def *index)
++{
++   return nir_load_from_texture_handle_agx(
++      b, nir_load_texture_handle_agx(b, nir_u2u32(b, index)));
++}
++
+ static nir_def *
+ texture_descriptor_ptr(nir_builder *b, nir_tex_instr *tex)
+ {
+    int handle_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
++
++   if (AGX_G11 && handle_idx < 0) {
++      int offs_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
++      return descriptor_for_index(b, offs_idx >= 0
++                                        ? tex->src[offs_idx].src.ssa
++                                        : nir_imm_int(b, tex->texture_index));
++   }
++
+    assert(handle_idx >= 0 && "must be bindless");
+    return nir_load_from_texture_handle_agx(b, tex->src[handle_idx].src.ssa);
+ }
+@@ -528,8 +548,12 @@ lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr)
+    nir_def *layer = nir_channel(b, coord, lidx);
+ 
+    /* image_load is effectively the same as txf, reuse the txf lower */
++   nir_def *desc = intr->intrinsic == nir_intrinsic_image_load
++                      ? descriptor_for_index(b, intr->src[0].ssa)
++                      : nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
++
+    nir_def *replaced = libagx_lower_txf_robustness(
+-      b, nir_load_from_texture_handle_agx(b, intr->src[0].ssa),
++      b, desc,
+       nir_imm_bool(b, false /* lower LOD */), lod,
+       nir_imm_bool(b, false /* lower min LOD */), lod,
+       nir_imm_bool(b, true /* lower layer */), layer, nir_channel(b, coord, 0));
 diff --git a/src/asahi/compiler/agx_opcodes.py b/src/asahi/compiler/agx_opcodes.py
 index f5afa46..7cd478a 100644
 --- a/src/asahi/compiler/agx_opcodes.py
@@ -476,7 +532,7 @@ index 6baad35..309b825 100644
                 I->imm = compact;
                 BITSET_SET(replaced, v);
 diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
-index 6236c3c..ab5459e 100644
+index 6236c3c..77eb29a 100644
 --- a/src/asahi/compiler/agx_pack.c
 +++ b/src/asahi/compiler/agx_pack.c
 @@ -779,6 +779,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
@@ -539,7 +595,7 @@ index 6236c3c..ab5459e 100644
        bool L = true; /* TODO: Don't force */
  
        unsigned At;
-@@ -872,6 +918,42 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -872,6 +918,44 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O = agx_pack_sample_compare_offset(I, I->src[5]);
        unsigned D = agx_pack_lod(I, I->src[1], &lod_mode);
  
@@ -564,9 +620,11 @@ index 6236c3c..ab5459e 100644
 +         pack_assert(I, !I->shadow && !I->query_lod && !I->offset);
 +         pack_assert(I, !I->gather && !I->sparse && lod_mode < 8);
 +
-+         bool three = I->dim == AGX_DIM_3D || I->dim == AGX_DIM_CUBE;
++         bool array = I->dim == AGX_DIM_1D_ARRAY || I->dim == AGX_DIM_2D_ARRAY ||
++                      I->dim == AGX_DIM_CUBE_ARRAY;
++         bool three = I->dim == AGX_DIM_3D || I->dim == AGX_DIM_CUBE || array;
 +         uint64_t raw =
-+            0x21 | (I->dim == AGX_DIM_3D ? 0x80 : 0) | (dims[I->dim] << 8) |
++            0x21 | ((I->dim == AGX_DIM_3D || array) ? 0x80 : 0) | (dims[I->dim] << 8) |
 +            ((R & BITFIELD_MASK(6)) << 10) | (T << 16) | (S << 20) |
 +            (Rt ? BITFIELD_BIT(24) : 0) | (((C >> 1) & BITFIELD_MASK(5)) << 25) |
 +            (((uint64_t)I->scoreboard) << 31) | (((uint64_t)I->mask) << 32) |
@@ -582,26 +640,30 @@ index 6236c3c..ab5459e 100644
        unsigned q1 = I->shadow;
        unsigned q2 = I->query_lod ? 2 : 0;
        unsigned q3 = 0xc; // XXX
-@@ -963,6 +1045,26 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -963,6 +1047,30 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
  
        unsigned coherency = I->coherent ? 0xf : 0x9;
  
 +      if (AGX_G11) {
-+         /* From Apple's G11 kernels, 2D with LOD 0 only */
-+         pack_assert(I, Tt == 0 && T < 64 && U == 0);
++         /*
++          * Apple's kernels write with LOD 0, data in 32-bit registers. The
++          * texture state and the coordinate register (halves) are split in
++          * nibbles: state 23:20 and 35:32, coordinates 19:16 and 39:36, found
++          * by writing through each state on the phone (agx-test wslot).
++          */
++         pack_assert(I, Tt == 0 && T < 256 && U == 0 && C < 256);
 +         pack_assert(I, Rt && !Cs && Dt && D == 0);
 +
-+         /* Apple never sets bit 22, where G13 has the coordinate discard */
 +         uint64_t raw = 0x31 | BITFIELD_BIT(8) | ((R & BITFIELD_MASK(6)) << 10) |
-+                        ((C & BITFIELD_MASK(6)) << 16) |
-+                        (0x09u << 24) | (((uint64_t)T) << 32) |
++                        ((C & 0xf) << 16) | ((T & 0xf) << 20) | (0x09u << 24) |
++                        (((uint64_t)T >> 4) << 32) | (((uint64_t)C >> 4) << 36) |
 +                        (((uint64_t)coherency) << 44) |
 +                        (((uint64_t)I->dim) << 48);
 +
-+         /* ponytail: Apple's kernels only write from r0-r31, so the high
-+          * register bits are a guess at G13's places.
++         /* ponytail: Apple's kernels only write from r0-r31, so the high data
++          * register bits are a guess at G13's place.
 +          */
-+         raw |= (((uint64_t)R >> 6) << 56) | (((uint64_t)C >> 6) << 58);
++         raw |= ((uint64_t)R >> 6) << 56;
 +         memcpy(util_dynarray_grow_bytes(emission, 1, 8), &raw, 8);
 +         break;
 +      }
@@ -675,7 +737,7 @@ index 2f238f2..1c3294f 100644
  #include "util/bitpack_helpers.h"
  
 diff --git a/src/asahi/genxml/cmdbuf.xml b/src/asahi/genxml/cmdbuf.xml
-index c2979f9..f0e1815 100644
+index c2979f9..324c69f 100644
 --- a/src/asahi/genxml/cmdbuf.xml
 +++ b/src/asahi/genxml/cmdbuf.xml
 @@ -221,24 +221,27 @@
@@ -779,11 +841,11 @@ index c2979f9..f0e1815 100644
      <value name="Sampler" value="0x9d"/>
 -    <value name="Texture" value="0xdd"/>
 +    <value name="Texture" value="0x17"/>
-+    <value name="Sampler G11" value="0x07"/>
++    <value name="Sampler G11" value="0x13"/>
    </enum>
  
    <struct name="USC Uniform" size="8">
-@@ -664,12 +672,22 @@
+@@ -664,12 +672,24 @@
      <field name="Buffer" size="38" start="0:26" type="address" modifier="shr(2)"/>
    </struct>
  
@@ -799,17 +861,19 @@ index c2979f9..f0e1815 100644
 +    <field name="Buffer" size="38" start="0:26" type="address" modifier="shr(2)"/>
 +  </struct>
 +
-+  <!-- G11 only loads samplers through a uniform holding their address
-+       (ESLStateLoadEncoderGen1::addIndirectSamplerStateDMA). -->
++  <!-- AGXMetalA12's ComputeProgramVariant loads a program's constant
++       samplers this way, count from a size in 32-bit words halved, so 8 bytes
++       apart. API samplers go through an indirect load (tag 0x07) that is not
++       understood. -->
 +  <struct name="USC Sampler G11" size="8">
 +    <field name="Tag" size="8" start="0:0" type="USC Control" exact="Sampler G11"/>
 +    <field name="Start" size="8" start="0:8" type="uint"/>
 +    <field name="Count" size="6" start="0:20" type="uint"/>
-+    <field name="Uniform" size="16" start="0:27" type="uint"/>
++    <field name="Buffer" size="38" start="0:26" type="address" modifier="shr(2)"/>
    </struct>
  
    <struct name="USC Sampler" size="8">
-@@ -705,6 +723,17 @@
+@@ -705,6 +725,17 @@
      <field name="Code" size="32" start="16" type="address"/>
    </struct>
  
@@ -827,7 +891,7 @@ index c2979f9..f0e1815 100644
    <struct name="USC Registers" size="4">
      <field name="Tag" size="8" start="0" type="USC Control" exact="Registers"/>
      <field name="Register count" size="5" start="8" type="uint" modifier="groups(8)"/>
-@@ -715,11 +744,12 @@
+@@ -715,11 +746,12 @@
  
    <struct name="USC No Preshader" size="2">
      <field name="Tag" size="8" start="0" type="USC Control" exact="No preshader"/>
@@ -841,7 +905,7 @@ index c2979f9..f0e1815 100644
      <field name="Code" size="32" start="32" type="address"/>
    </struct>
  
-@@ -996,12 +1026,15 @@
+@@ -996,12 +1028,15 @@
    <!-- VDM commands end -->
  
    <!-- CDM commands start -->
@@ -860,7 +924,7 @@ index c2979f9..f0e1815 100644
    </enum>
  
    <enum name="CDM Mode">
-@@ -1020,6 +1053,8 @@
+@@ -1020,6 +1055,8 @@
    </enum>
  
    <struct name="CDM Launch Word 0" size="4">
@@ -882,6 +946,69 @@ index f3e6733..2fd210d 100644
    </ins>
  
    <ins name="trap" length="2">
+diff --git a/src/asahi/layout/tiling.cc b/src/asahi/layout/tiling.cc
+index 084d727..8bd8d07 100644
+--- a/src/asahi/layout/tiling.cc
++++ b/src/asahi/layout/tiling.cc
+@@ -9,6 +9,7 @@
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include "asahi/genxml/agx_g11.h"
+ #include "util/macros.h"
+ #include "layout.h"
+ 
+@@ -55,6 +56,20 @@ ail_space_mask(unsigned x)
+    return MOD_POT(0x55555555, x * x);
+ }
+ 
++/* Spread the low bits of x over the set bits of mask */
++static uint32_t
++ail_deposit(uint32_t x, uint32_t mask)
++{
++   uint32_t out = 0;
++
++   for (uint32_t bit = 1; mask; bit <<= 1, mask &= mask - 1) {
++      if (x & bit)
++         out |= mask & -mask;
++   }
++
++   return out;
++}
++
+ template <typename T, bool is_store>
+ void
+ memcpy_small(void *_tiled, void *_linear, const struct ail_layout *tiled_layout,
+@@ -74,12 +89,25 @@ memcpy_small(void *_tiled, void *_linear, const struct ail_layout *tiled_layout,
+    struct ail_tile tile_size = tiled_layout->tilesize_el[level];
+    unsigned tile_area_el = tile_size.width_el * tile_size.height_el;
+    unsigned tiles_per_row = DIV_ROUND_UP(stride_el, tile_size.width_el);
+-   unsigned y_offs_el = ail_space_bits(MOD_POT(sy_el, tile_size.height_el))
+-                        << 1;
+-   unsigned x_offs_start_el =
+-      ail_space_bits(MOD_POT(sx_el, tile_size.width_el));
+    unsigned space_mask_x = ail_space_mask(tile_size.width_el);
+    unsigned space_mask_y = ail_space_mask(tile_size.height_el) << 1;
++
++   /* G11 interleaves with Y in the low bit (checked on the phone with
++    * square tiles), any extra X bits of wide tiles staying on top.
++    */
++   if (AGX_G11) {
++      unsigned h_bits = util_logbase2(tile_size.height_el);
++
++      space_mask_y = ail_space_mask(tile_size.height_el);
++      space_mask_x = (space_mask_y << 1) |
++                     ((tile_size.width_el / tile_size.height_el - 1)
++                      << (2 * h_bits));
++   }
++
++   unsigned y_offs_el =
++      ail_deposit(MOD_POT(sy_el, tile_size.height_el), space_mask_y);
++   unsigned x_offs_start_el =
++      ail_deposit(MOD_POT(sx_el, tile_size.width_el), space_mask_x);
+    unsigned log2_tile_width_el = util_logbase2(tile_size.width_el);
+    unsigned log2_tile_height_el = util_logbase2(tile_size.height_el);
+ 
 diff --git a/src/asahi/lib/agx_bg_eot.c b/src/asahi/lib/agx_bg_eot.c
 index 1cb8fab..736568f 100644
 --- a/src/asahi/lib/agx_bg_eot.c
@@ -1143,26 +1270,27 @@ index 6fe688d..79055ad 100644
     blob_copy_bytes(blob, binary->push,
                     sizeof(binary->push[0]) * binary->push_range_count);
 diff --git a/src/gallium/drivers/asahi/agx_nir_lower_bindings.c b/src/gallium/drivers/asahi/agx_nir_lower_bindings.c
-index 77e4ca9..9fa542f 100644
+index 77e4ca9..e20e6af 100644
 --- a/src/gallium/drivers/asahi/agx_nir_lower_bindings.c
 +++ b/src/gallium/drivers/asahi/agx_nir_lower_bindings.c
-@@ -66,11 +66,12 @@ lower(nir_builder *b, nir_instr *instr, void *data)
-       unsigned offset = BITSET_LAST_BIT(b->shader->info.textures_used);
+@@ -42,6 +42,17 @@ lower(nir_builder *b, nir_instr *instr, void *data)
+    bool *uses_bindless_samplers = data;
+    bool progress = false;
+    bool force_bindless = agx_nir_needs_texture_crawl(instr);
++
++   /* G11 has no bindless texture state, so only queries, which never reach
++    * the hardware, go bindless. The rest find their descriptor from the
++    * index, see agx_nir_lower_texture.
++    */
++   if (AGX_G11 && force_bindless) {
++      force_bindless =
++         instr->type == nir_instr_type_intrinsic
++            ? nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_image_load
++            : nir_tex_instr_is_query(nir_instr_as_tex(instr));
++   }
+    b->cursor = nir_before_instr(instr);
  
-       /* For reads and queries, we use the texture descriptor which is first.
--       * Writes and atomics use the PBE descriptor.
-+       * Writes and atomics use the PBE descriptor. G11 puts the PBE first, so
-+       * that writes use state 0 like Apple's kernels.
-        */
--      if (intr->intrinsic != nir_intrinsic_image_load &&
--          intr->intrinsic != nir_intrinsic_image_size &&
--          intr->intrinsic != nir_intrinsic_image_samples)
-+      if ((intr->intrinsic != nir_intrinsic_image_load &&
-+           intr->intrinsic != nir_intrinsic_image_size &&
-+           intr->intrinsic != nir_intrinsic_image_samples) != AGX_G11)
-          offset++;
- 
-       /* If we can determine statically that the image fits in texture state
+    if (instr->type == nir_instr_type_intrinsic) {
 diff --git a/src/gallium/drivers/asahi/agx_nir_lower_sysvals.c b/src/gallium/drivers/asahi/agx_nir_lower_sysvals.c
 index 6a75c87..627ce59 100644
 --- a/src/gallium/drivers/asahi/agx_nir_lower_sysvals.c
@@ -1177,7 +1305,7 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..7ef8f72 100644
+index ab205bf..5827b54 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
 @@ -369,7 +369,9 @@ agx_linear_allowed(const struct agx_resource *pres)
@@ -1223,22 +1351,8 @@ index ab205bf..7ef8f72 100644
  }
  
  static void
-@@ -2069,7 +2078,12 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
-    caps->null_textures = true;
-    caps->texture_multisample = true;
-    caps->image_load_formatted = true;
--   caps->image_store_formatted = true;
-+   /* G11 image writes work but sampler loads are not known, and a wrong one
-+    * breaks every later texture access. AGX_G11_IMAGES=1 exposes images to
-+    * test with.
-+    */
-+   caps->image_store_formatted =
-+      !AGX_G11 || debug_get_bool_option("AGX_G11_IMAGES", false);
-    caps->compute = true;
-    caps->int64 = true;
-    caps->sample_shading = true;
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..6c7ea42 100644
+index 616dd6d..6044acd 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
 @@ -1127,6 +1127,9 @@ target_is_array(enum pipe_texture_target target)
@@ -1362,43 +1476,7 @@ index 616dd6d..6c7ea42 100644
     info->private_memory = 0;
     info->preferred_simd_size = 32;
     info->simd_sizes = 32;
-@@ -2729,6 +2795,12 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
- 
-       struct agx_pbe_packed *pbe = (struct agx_pbe_packed *)(texture + 1);
- 
-+      /* See agx_nir_lower_bindings */
-+      if (AGX_G11) {
-+         pbe = (struct agx_pbe_packed *)texture;
-+         texture++;
-+      }
-+
-       if (!(ctx->stage[stage].image_mask & BITFIELD_BIT(i))) {
-          agx_set_null_texture(texture);
-          agx_set_null_pbe(pbe);
-@@ -2869,6 +2941,13 @@ agx_update_descriptors(struct agx_batch *batch, struct agx_compiled_shader *cs)
-       agx_pool_upload_aligned(&batch->pool, unif, sizeof(*unif), 16);
- }
- 
-+/* G11 uniform holding the sampler address, see agx_build_pipeline */
-+static unsigned
-+agx_g11_sampler_uniform(const struct agx_compiled_shader *cs)
-+{
-+   return ALIGN_POT(cs->b.info.push_count, 4);
-+}
-+
- static uint32_t
- agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
-                    struct agx_linked_shader *linked,
-@@ -2880,7 +2959,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
-    unsigned constant_push_ranges = DIV_ROUND_UP(cs->b.info.rodata.size_16, 64);
- 
-    size_t usc_size =
--      agx_usc_size(constant_push_ranges + cs->push_range_count + 2);
-+      agx_usc_size(constant_push_ranges + cs->push_range_count + 6);
- 
-    struct agx_ptr t =
-       agx_pool_alloc_aligned(&batch->pipeline_pool, usc_size, 64);
-@@ -2889,7 +2968,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2889,7 +2955,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
  
     mesa_shader_stage stage = cs->stage;
  
@@ -1411,36 +1489,24 @@ index 616dd6d..6c7ea42 100644
        agx_usc_pack(&b, TEXTURE, cfg) {
           cfg.start = 0;
           cfg.count =
-@@ -2898,6 +2981,28 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2898,6 +2968,16 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
 +#if AGX_G11
 +   if (batch->sampler_count[stage] && textures &&
 +       cs->b.info.sampler_state_count) {
-+      /* G11 takes the sampler address from a uniform, which we place after
-+       * the shader's own. The unit of the uniform index is not known, so put
-+       * the address where 16, 32, 64 and 128-bit units would all find it.
-+       */
-+      unsigned u = agx_g11_sampler_uniform(cs);
-+      struct agx_ptr p = agx_pool_alloc_aligned(&batch->pool, 8, 8);
-+      *(uint64_t *)p.cpu = batch->samplers[stage];
-+      agx_usc_uniform(&b, u, 4, p.gpu);
-+      agx_usc_uniform(&b, u * 2, 4, p.gpu);
-+      agx_usc_uniform(&b, u * 4, 4, p.gpu);
-+      agx_usc_uniform(&b, u * 8, 4, p.gpu);
-+
 +      agx_usc_pack(&b, SAMPLER_G11, cfg) {
 +         cfg.start = 0;
 +         cfg.count = batch->sampler_count[stage];
-+         cfg.uniform = u;
++         cfg.buffer = batch->samplers[stage];
 +      }
 +   }
 +#else
     if (batch->sampler_count[stage]) {
        agx_usc_pack(&b, SAMPLER, cfg) {
           cfg.start = 0;
-@@ -2905,6 +3010,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2905,6 +2985,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
           cfg.buffer = batch->samplers[stage];
        }
     }
@@ -1448,7 +1514,7 @@ index 616dd6d..6c7ea42 100644
  
     for (unsigned i = 0; i < cs->push_range_count; ++i) {
        unsigned table = cs->push[i].table;
-@@ -2954,6 +3060,14 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2954,6 +3035,14 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -1463,7 +1529,7 @@ index 616dd6d..6c7ea42 100644
     if (stage == MESA_SHADER_FRAGMENT) {
        agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
     } else {
-@@ -2980,6 +3094,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2980,6 +3069,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
                               : 0;
        }
     }
@@ -1471,7 +1537,7 @@ index 616dd6d..6c7ea42 100644
  
     if (cs->b.info.has_preamble) {
        agx_usc_pack(&b, PRESHADER, cfg) {
-@@ -5314,6 +5429,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5314,6 +5404,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -1491,19 +1557,15 @@ index 616dd6d..6c7ea42 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +5472,15 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +5447,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);
 +
 +      /* See agx_build_pipeline */
 +      if (AGX_G11 && (!cfg.texture_state_register_count ||
-+                      !cs->b.info.sampler_state_count)) {
++                      !cs->b.info.sampler_state_count))
 +         cfg.sampler_state_register_count = 0;
-+      } else if (AGX_G11) {
-+         cfg.uniform_register_count = agx_g11_sampler_uniform(cs) * 8 + 4;
-+         assert(cfg.uniform_register_count <= 512);
-+      }
     }
  
     agx_launch_internal(batch, grid, wg, launch, stage, usc);
