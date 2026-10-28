@@ -120,6 +120,10 @@ static const char *src =
 	"kernel void iread3d(global float4 *out, read_only image3d_t img) {\n"
 	"	int x = get_global_id(0), y = get_global_id(1), z = get_global_id(2);\n"
 	"	out[(z * 8 + y) * 8 + x] = read_imagef(img, (int4)(x, y, z, 0));\n"
+	"}\n"
+	"kernel void iwarr(write_only image2d_array_t img) {\n"
+	"	int x = get_global_id(0), y = get_global_id(1), z = get_global_id(2);\n"
+	"	write_imageui(img, (int4)(x, y, z, 0), (uint4)(x, y, z, 0xaa));\n"
 	"}\n";
 
 static int failed;
@@ -149,7 +153,7 @@ int main(void)
 	cl_command_queue q;
 	cl_program prog;
 	cl_kernel kfill, ksaxpy, krev, kcount, klcount, kh2f, kf2h, krnd, kids, kpriv, kspill;
-	cl_kernel kiw, kir, kis, kicp, kir3;
+	cl_kernel kiw, kir, kis, kicp, kir3, kiwa;
 	cl_mem bu, bv, bx, by, bc;
 	cl_int err;
 	char name[128];
@@ -189,6 +193,7 @@ int main(void)
 	kis = clCreateKernel(prog, "isample", &err);
 	kicp = clCreateKernel(prog, "icopy", &err);
 	kir3 = clCreateKernel(prog, "iread3d", &err);
+	kiwa = clCreateKernel(prog, "iwarr", &err);
 	CL(err);
 
 	for (i = 0; i < N; i++) {
@@ -437,6 +442,24 @@ int main(void)
 		CL(clEnqueueNDRangeKernel(q, kir3, 3, NULL, gl3, NULL, 0, NULL, NULL));
 		CL(clEnqueueReadBuffer(q, bo, CL_TRUE, 0, sizeof(got), got, 0, NULL, NULL));
 		check("3D image read", memcmp(img, got, 8 * 8 * 4 * 16) != 0);
+	}
+
+	{
+		static unsigned char got[8 * 8 * 4 * 4];
+		cl_image_format fmt = { CL_RGBA, CL_UNSIGNED_INT8 };
+		cl_image_desc desc = { .image_type = CL_MEM_OBJECT_IMAGE2D_ARRAY,
+				       .image_width = 8, .image_height = 8, .image_array_size = 4 };
+		size_t org[3] = { 0 }, reg[3] = { 8, 8, 4 };
+		cl_mem ba = clCreateImage(ctx, CL_MEM_READ_WRITE, &fmt, &desc, NULL, &err);
+		CL(err);
+
+		CL(clSetKernelArg(kiwa, 0, sizeof(ba), &ba));
+		CL(clEnqueueNDRangeKernel(q, kiwa, 3, NULL, reg, NULL, 0, NULL, NULL));
+		CL(clEnqueueReadImage(q, ba, CL_TRUE, org, reg, 0, 0, got, 0, NULL, NULL));
+		for (bad = i = 0; i < 8 * 8 * 4; i++)
+			bad += got[4 * i] != i % 8 || got[4 * i + 1] != i / 8 % 8 ||
+			       got[4 * i + 2] != i / 64 || got[4 * i + 3] != 0xaa;
+		check("2D array image write", bad);
 	}
 
 	printf("%d failed\n", failed);

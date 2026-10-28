@@ -532,10 +532,36 @@ index 6baad35..309b825 100644
                 I->imm = compact;
                 BITSET_SET(replaced, v);
 diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
-index 6236c3c..fd563c3 100644
+index 6236c3c..ad3e6b2 100644
 --- a/src/asahi/compiler/agx_pack.c
 +++ b/src/asahi/compiler/agx_pack.c
-@@ -779,6 +779,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -553,6 +553,25 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
+    }
+ }
+ 
++/* G11 texture dimension, bits 9:8 of samples and writes. Arrays add a
++ * coordinate.
++ *
++ * ponytail: multisampling is not known, only sample 0 works
++ */
++static const uint8_t agx_g11_dims[] = {
++   [AGX_DIM_1D] = 0,       [AGX_DIM_1D_ARRAY] = 0, [AGX_DIM_2D] = 1,
++   [AGX_DIM_2D_ARRAY] = 1, [AGX_DIM_2D_MS] = 1,    [AGX_DIM_3D] = 2,
++   [AGX_DIM_CUBE] = 3,     [AGX_DIM_CUBE_ARRAY] = 3,
++   [AGX_DIM_2D_MS_ARRAY] = 1,
++};
++
++static bool
++agx_g11_array(enum agx_dim dim)
++{
++   return dim == AGX_DIM_1D_ARRAY || dim == AGX_DIM_2D_ARRAY ||
++          dim == AGX_DIM_CUBE_ARRAY;
++}
++
+ static void
+ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+                agx_instr *I, enum u_tristate needs_g13x_coherency)
+@@ -779,6 +798,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O =
           agx_pack_local_index(I, is_load ? I->src[1] : I->src[2], &Ot);
  
@@ -563,7 +589,7 @@ index 6236c3c..fd563c3 100644
        uint64_t raw =
           agx_opcodes_info[I->op].encoding.exact | (Rt ? BITFIELD64_BIT(8) : 0) |
           ((R & BITFIELD_MASK(6)) << 9) | (L ? BITFIELD64_BIT(15) : 0) |
-@@ -827,6 +848,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -827,6 +867,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
     }
  
     case AGX_OPCODE_LOCAL_ATOMIC: {
@@ -595,7 +621,7 @@ index 6236c3c..fd563c3 100644
        bool L = true; /* TODO: Don't force */
  
        unsigned At;
-@@ -872,6 +918,42 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -872,6 +937,34 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O = agx_pack_sample_compare_offset(I, I->src[5]);
        unsigned D = agx_pack_lod(I, I->src[1], &lod_mode);
  
@@ -605,24 +631,16 @@ index 6236c3c..fd563c3 100644
 +          * G13. Ten bytes, always a sample: loads come as samples at pixel
 +          * centres through the txf sampler.
 +          */
-+         /* ponytail: multisampling is not known, only sample 0 works */
-+         static const uint8_t dims[] = {
-+            [AGX_DIM_1D] = 0,   [AGX_DIM_1D_ARRAY] = 0, [AGX_DIM_2D] = 1,
-+            [AGX_DIM_2D_ARRAY] = 1, [AGX_DIM_2D_MS] = 1, [AGX_DIM_3D] = 2,
-+            [AGX_DIM_CUBE] = 3, [AGX_DIM_CUBE_ARRAY] = 3,
-+            [AGX_DIM_2D_MS_ARRAY] = 1,
-+         };
-+
 +         pack_assert(I, Tt == 0 && T < 16 && !St && S < 16 && U == 0);
 +         pack_assert(I, !Cs && (C & 1) == 0 && C < 128 && R < 256);
 +         pack_assert(I, !I->shadow && !I->query_lod && !I->offset);
 +         pack_assert(I, !I->gather && !I->sparse && lod_mode < 8);
 +
-+         bool array = I->dim == AGX_DIM_1D_ARRAY || I->dim == AGX_DIM_2D_ARRAY ||
-+                      I->dim == AGX_DIM_CUBE_ARRAY;
++         bool array = agx_g11_array(I->dim);
 +         bool three = I->dim == AGX_DIM_3D || I->dim == AGX_DIM_CUBE || array;
 +         uint64_t raw =
-+            0x21 | ((I->dim == AGX_DIM_3D || array) ? 0x80 : 0) | (dims[I->dim] << 8) |
++            0x21 | ((I->dim == AGX_DIM_3D || array) ? 0x80 : 0) |
++            (agx_g11_dims[I->dim] << 8) |
 +            ((R & BITFIELD_MASK(6)) << 10) | (T << 16) | (S << 20) |
 +            (Rt ? BITFIELD_BIT(24) : 0) | (((C >> 1) & BITFIELD_MASK(5)) << 25) |
 +            (((uint64_t)I->scoreboard) << 31) | (((uint64_t)I->mask) << 32) |
@@ -638,7 +656,7 @@ index 6236c3c..fd563c3 100644
        unsigned q1 = I->shadow;
        unsigned q2 = I->query_lod ? 2 : 0;
        unsigned q3 = 0xc; // XXX
-@@ -963,6 +1045,30 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -963,6 +1056,46 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
  
        unsigned coherency = I->coherent ? 0xf : 0x9;
  
@@ -652,11 +670,27 @@ index 6236c3c..fd563c3 100644
 +         pack_assert(I, Tt == 0 && T < 256 && U == 0 && C < 256);
 +         pack_assert(I, Rt && !Cs && Dt && D == 0);
 +
-+         uint64_t raw = 0x31 | BITFIELD_BIT(8) | ((R & BITFIELD_MASK(6)) << 10) |
++         /* Arrays take the sample's 0x80 and two-byte tail with three
++          * coordinates. Without them a write to an array writes nothing.
++          *
++          * ponytail: 3D is assumed to match the sample, untested
++          */
++         bool three = I->dim == AGX_DIM_3D || agx_g11_array(I->dim);
++         uint64_t raw = 0x31 | (three ? 0x80 : 0) | (agx_g11_dims[I->dim] << 8) |
++                        ((R & BITFIELD_MASK(6)) << 10) |
 +                        ((C & 0xf) << 16) | ((T & 0xf) << 20) | (0x09u << 24) |
 +                        (((uint64_t)T >> 4) << 32) | (((uint64_t)C >> 4) << 36) |
 +                        (((uint64_t)coherency) << 44) |
 +                        (((uint64_t)I->dim) << 48);
++
++         if (three) {
++            uint16_t raw2 = (R >> 6) | ((C >> 6) << 2) | (3 << 4);
++
++            raw |= BITFIELD64_BIT(63);
++            memcpy(util_dynarray_grow_bytes(emission, 1, 8), &raw, 8);
++            memcpy(util_dynarray_grow_bytes(emission, 1, 2), &raw2, 2);
++            break;
++         }
 +
 +         /* ponytail: Apple's kernels only write from r0-r31, so the high data
 +          * register bits are a guess at G13's place.
@@ -1184,6 +1218,25 @@ index d8266b6..712568a 100644
  
     if (start_halfs & BITFIELD_BIT(8)) {
        agx_usc_pack(b, UNIFORM_HIGH, cfg) {
+diff --git a/src/asahi/libagx/texture.cl b/src/asahi/libagx/texture.cl
+index f6bf75a..c710a25 100644
+--- a/src/asahi/libagx/texture.cl
++++ b/src/asahi/libagx/texture.cl
+@@ -32,12 +32,8 @@ libagx_txs(constant struct agx_texture_packed *ptr, uint16_t lod,
+    uint3 size = (uint3)(d.width, d.height, d.depth);
+    lod += d.first_level;
+ 
+-   /* Linear 2D arrays are special.
+-    *
+-    * TODO: Optimize this, since linear 2D arrays aren't needed for APIs and
+-    * this just gets used internally for blits.
+-    */
+-   if (is_2d && is_array && d.layout == AGX_LAYOUT_LINEAR)
++   /* Linear arrays are special. G11 images use them, 1D included. */
++   if ((is_1d || is_2d) && is_array && d.layout == AGX_LAYOUT_LINEAR)
+       size.z = d.depth_linear;
+ 
+    /* 1D Arrays have their second component as the layer count */
 diff --git a/src/compiler/nir/nir_opt_shrink_vectors.c b/src/compiler/nir/nir_opt_shrink_vectors.c
 index b3b18e0..9bbb2a9 100644
 --- a/src/compiler/nir/nir_opt_shrink_vectors.c
@@ -1304,21 +1357,20 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..97e8710 100644
+index ab205bf..75d0626 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
-@@ -369,7 +369,9 @@ agx_linear_allowed(const struct agx_resource *pres)
+@@ -369,7 +369,8 @@ agx_linear_allowed(const struct agx_resource *pres)
     case PIPE_TEXTURE_2D:
     case PIPE_TEXTURE_2D_ARRAY:
     case PIPE_TEXTURE_RECT:
 -      if (pres->base.bind & PIPE_BIND_SHADER_IMAGE)
-+      /* G11 has no image atomics, so its 1D and 2D images can be linear */
-+      if ((pres->base.bind & PIPE_BIND_SHADER_IMAGE) &&
-+          !(AGX_G11 && !util_texture_is_array(pres->base.target)))
++      /* G11 has no image atomics, so its images can be linear */
++      if ((pres->base.bind & PIPE_BIND_SHADER_IMAGE) && !AGX_G11)
           return false;
  
        break;
-@@ -400,6 +402,10 @@ agx_twiddled_allowed(const struct agx_resource *pres)
+@@ -400,6 +401,10 @@ agx_twiddled_allowed(const struct agx_resource *pres)
  static bool
  agx_compression_allowed(const struct agx_resource *pres)
  {
@@ -1329,7 +1381,7 @@ index ab205bf..97e8710 100644
     /* Allow disabling compression for debugging */
     if (agx_device(pres->base.screen)->debug & AGX_DBG_NOCOMPRESS) {
        rsrc_debug(pres, "No compression: disabled\n");
-@@ -455,7 +461,9 @@ agx_select_best_modifier(const struct agx_resource *pres)
+@@ -455,7 +460,9 @@ agx_select_best_modifier(const struct agx_resource *pres)
     /* Prefer linear for staging resources, which should be as fast as possible
      * to write from the CPU.
      */
@@ -1340,7 +1392,7 @@ index ab205bf..97e8710 100644
        return DRM_FORMAT_MOD_LINEAR;
  
     /* For SCANOUT or SHARED resources with no explicit modifier selection, force
-@@ -1993,7 +2001,8 @@ agx_init_compute_caps(struct pipe_screen *pscreen)
+@@ -1993,7 +2000,8 @@ agx_init_compute_caps(struct pipe_screen *pscreen)
  
     caps->subgroup_sizes = 32;
     caps->max_variable_threads_per_block = 1024;

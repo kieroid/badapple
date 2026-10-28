@@ -219,15 +219,16 @@ same kernels built for G13 (iPhone13,2 IPSWs for iOS 16.6.1 and 18.6.2).
 | texture, PBE descriptors | as G13, but word 0 from bit 3 up sits one bit lower |
 | sampler | as G13, 8 bytes |
 | sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinates 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8, coordinate count 77:76 |
-| image write | 8 bytes: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32 |
+| image write | 8 bytes, `0x31`: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32, dimension 9:8 as for samples. Arrays: `0xb1`, bit 63 and the sample's tail with 3 coordinates, 10 bytes. Without it an array write is dropped |
 | texture_load | none; Mesa samples at the pixel centre instead |
 | bindless textures | none; descriptors are found from the state index |
 | twiddled tiles | G13's sizes, Z order starting with Y |
+| layout | images are linear, 2D arrays included |
 
 CTS kernel_image_methods, samplerless_reads, cl_read_write_images and
 cl_fill_images pass. Still wrong:
 
-- writes to twiddled 2D arrays of 2, 4 and 8-byte formats;
+- twiddled writes of 8-byte formats from 128x64 up (unused, images are linear);
 - linear filtering of float, half, snorm, sRGB and 10:10:10:2 formats.
 
 Metal's own samplers load indirectly, `0x07 | start << 8 | count << 20 |
