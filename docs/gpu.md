@@ -229,7 +229,9 @@ CTS kernel_image_methods, samplerless_reads, cl_read_write_images and
 cl_fill_images pass. Still wrong:
 
 - twiddled writes of 8-byte formats from 128x64 up (unused, images are linear);
-- linear filtering of float, half, snorm, sRGB and 10:10:10:2 formats.
+- linear filtering: only 16-bit unorm is within CTS tolerance. 8-bit, snorm,
+  half and sRGB filter with about 1/32 weights, and float32 does not filter.
+  The sampler has no precision bit.
 
 Metal's own samplers load indirectly, `0x07 | start << 8 | count << 20 |
 index << 27`, and the index is not understood. A bad sampler load breaks
