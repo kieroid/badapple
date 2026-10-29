@@ -16,12 +16,9 @@
 #            fake restore kernelcache that bootx will take
 # m1n1cache  pack m1n1 on its own, for poking registers over its proxy
 # boot       build that and hand the whole chain to a phone in pwned DFU
-# gfx-tests  clone and patch Mesa, build its OpenCL compiler for the GPU and
-#            compile tools/gfx-tests.cl for agx-test
-# agx-test   build tools/agx-test.c, which runs those tests on the GPU driver;
-#            the next kernelcache puts it in the initramfs as /bin/agx-test
-# rootfs     cross-build Mesa's Rusticl for the phone against an Alpine aarch64
-#            sysroot and pack it with tools/cl-test.c into a rootfs tarball;
+# rootfs     clone and patch Mesa, cross-build Rusticl and GLES for the phone
+#            against an Alpine aarch64 sysroot and pack them with
+#            tools/cl-test.c and tools/gl-test.c into a rootfs tarball;
 #            tools/rootfs-push.sh copies that to a booted phone
 #
 # "make check" is the only target that works on a bare checkout. The headers
@@ -72,7 +69,7 @@ IPSW_FILE ?=
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel cma=64M
 
 .PHONY: check deps patch pmgr m1n1 kernel initramfs images ticket kernelcache \
-	m1n1cache boot gfx-tests agx-test rootfs clean FORCE
+	m1n1cache boot rootfs clean FORCE
 FORCE:
 
 check: $(DTB)
@@ -264,7 +261,7 @@ $(IBOOT)/kernelcache-m1n1.img4: $(M1N1) FORCE | $(IBOOT)
 # m1n1 keeps only the last initramfs it finds, so firmware cannot be a second
 # payload. Linux reads cpio archives back to back in one stream, though, so the
 # firmware cpios go on the end of Hoolock's, inside the same gzip.
-FW_CPIOS = $(wildcard $(IBOOT)/mtfw.cpio $(IBOOT)/bcmfw.cpio build/gfx/agx-test.cpio)
+FW_CPIOS = $(wildcard $(IBOOT)/mtfw.cpio $(IBOOT)/bcmfw.cpio)
 BOOT_INITRAMFS = $(if $(FW_CPIOS),$(IBOOT)/initramfs-fw.gz,$(INITRAMFS))
 
 $(IBOOT)/initramfs-fw.gz: $(INITRAMFS) $(FW_CPIOS)
@@ -284,16 +281,15 @@ $(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(BOOT_INITRAMFS) FORCE | $(IBOOT)
 boot: $(KERNELCACHE)
 	./tools/iboot-boot.sh $(KERNELCACHE)
 
-# Mesa's asahi_clc, pinned to the commit patches/mesa-*.patch was made on.
-# Needs clang, LLVM's SPIR-V translator and libclc; LLVM_DIR points at them.
+# Mesa's build-time compilers for the host, pinned to the commit
+# patches/mesa-*.patch was made on. Needs clang, LLVM's SPIR-V translator and
+# libclc; LLVM_DIR points at them.
 MESA_SRC ?= build/mesa
 MESA_REV := 24a0a3bddf5588d7f087e8f40658ba5e17af6094
 LLVM_DIR ?= /usr/lib/llvm/22
 MESA_BIN := $(MESA_SRC)/build/src
 
-gfx-tests: build/gfx/tests.c
-
-build/gfx/tests.c: tools/gfx-tests.cl $(wildcard patches/mesa-*.patch)
+$(MESA_SRC)/build/build.ninja: $(wildcard patches/mesa-*.patch)
 	test -d $(MESA_SRC) || { git init -q $(MESA_SRC) && \
 	    git -C $(MESA_SRC) fetch -q --depth 1 https://gitlab.freedesktop.org/mesa/mesa.git $(MESA_REV) && \
 	    git -C $(MESA_SRC) checkout -q FETCH_HEAD; }
@@ -303,27 +299,7 @@ build/gfx/tests.c: tools/gfx-tests.cl $(wildcard patches/mesa-*.patch)
 	    -Dgallium-drivers= -Dvulkan-drivers= -Dplatforms= -Dglx=disabled -Degl=disabled \
 	    -Dgbm=disabled -Dopengl=false -Dgles1=disabled -Dgles2=disabled -Dtools=asahi \
 	    -Dmesa-clc=enabled -Dprecomp-compiler=enabled -Dllvm=enabled -Dbuildtype=debugoptimized
-	PATH=$(LLVM_DIR)/bin:$$PATH ninja -C $(MESA_SRC)/build src/asahi/clc/asahi_clc
-	mkdir -p build/gfx
-	PATH=$(LLVM_DIR)/bin:$$PATH $(MESA_BIN)/compiler/clc/mesa_clc -o build/gfx/tests.spv $< -- \
-	    -I$(MESA_SRC)/include -I$(MESA_SRC)/src -I$(MESA_SRC)/src/compiler/libcl \
-	    -cl-std=cl2.0 -D__OPENCL_VERSION__=200
-	$(MESA_BIN)/asahi/clc/asahi_clc build/gfx/tests.spv build/gfx/tests.h $@
-
-# Static, with the kernel's nolibc, so it needs no aarch64 libc.
-AGX_TEST := build/gfx/agx-test.cpio
-
-agx-test: $(AGX_TEST)
-
-$(AGX_TEST): tools/agx-test.c build/gfx/tests.c
-	$(MAKE) -C $(KDIR) $(KBUILD) headers
-	sed -n '/^enum libagx_program/,/^};/p' build/gfx/tests.h > build/gfx/libagx_shaders.h
-	mkdir -p build/gfx/agx-root/bin
-	clang --target=aarch64-linux-gnu -static -nostdlib -nostdinc -fuse-ld=lld -Os \
-	    -fno-stack-protector -fno-builtin -isystem $(KDIR)/tools/include/nolibc \
-	    -isystem $(KDIR)/usr/include -include nolibc.h -Ibuild/gfx \
-	    -o build/gfx/agx-root/bin/agx-test $<
-	cd build/gfx/agx-root && find . | cpio -o -H newc -R 0:0 > ../agx-test.cpio
+	touch $@
 
 # Rusticl for the phone. apk.static builds two Alpine aarch64 trees without
 # root: a sysroot with the -dev packages to build against, and the runtime
@@ -369,19 +345,22 @@ $(ALPINE)/cross.ini: tools/alpine-cross.ini | $(ALPINE)/root
 	sed -e 's|@SYSROOT@|$(abspath $(ALPINE)/root)|g' -e 's|@RUSTC@|$(abspath $(RUSTC))|g' \
 	    -e 's|@TOOLS@|$(abspath tools)|g' $< > $@
 
-$(ALPINE)/rootfs.tar: build/gfx/tests.c $(ALPINE)/cross.ini $(RUSTC) tools/cl-test.c FORCE | $(ALPINE)/rootfs
+$(ALPINE)/rootfs.tar: $(MESA_SRC)/build/build.ninja $(ALPINE)/cross.ini $(RUSTC) tools/cl-test.c tools/gl-test.c FORCE | $(ALPINE)/rootfs
 	$(HOST_PATH) ninja -C $(MESA_SRC)/build src/compiler/clc/mesa_clc src/asahi/clc/asahi_clc \
 	    src/compiler/spirv/vtn_bindgen2
 	test -d $(MESA_A12) || $(HOST_PATH) meson setup $(MESA_A12) $(MESA_SRC) \
 	    --cross-file $(ALPINE)/cross.ini -Dgallium-drivers=asahi -Dvulkan-drivers= \
 	    -Dgallium-rusticl=true -Dllvm=enabled -Dshared-llvm=enabled -Dplatforms= \
-	    -Dglx=disabled -Degl=disabled -Dgles1=disabled -Dgles2=disabled -Dopengl=false \
+	    -Dglx=disabled -Degl=enabled -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled \
+	    -Dopengl=true \
 	    -Dmesa-clc=system -Dprecomp-compiler=system -Dmesa-clc-bundle-headers=enabled \
 	    -Dstatic-libclc=all -Dbuildtype=release -Dprefix=/usr -Dlibdir=lib
 	$(HOST_PATH) ninja -C $(MESA_A12)
 	DESTDIR=$(abspath $(ALPINE)/rootfs) meson install -C $(MESA_A12) --no-rebuild --quiet --strip
 	PATH=$(LLVM_DIR)/bin:$$PATH $(A12_CC) -O2 -Wall -o $(ALPINE)/rootfs/usr/bin/cl-test \
 	    tools/cl-test.c -lOpenCL
+	PATH=$(LLVM_DIR)/bin:$$PATH $(A12_CC) -O2 -Wall -o $(ALPINE)/rootfs/usr/bin/gl-test \
+	    -I$(ALPINE)/rootfs/usr/include -L$(ALPINE)/rootfs/usr/lib tools/gl-test.c -lEGL -lGLESv2
 	tar -C $(ALPINE)/rootfs --owner=0 --group=0 -cf $@ .
 
 clean:

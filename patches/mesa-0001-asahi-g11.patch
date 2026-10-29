@@ -532,7 +532,7 @@ index 6baad35..309b825 100644
                 I->imm = compact;
                 BITSET_SET(replaced, v);
 diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
-index 6236c3c..ad3e6b2 100644
+index 6236c3c..2e3cdaa 100644
 --- a/src/asahi/compiler/agx_pack.c
 +++ b/src/asahi/compiler/agx_pack.c
 @@ -553,6 +553,25 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
@@ -561,7 +561,61 @@ index 6236c3c..ad3e6b2 100644
  static void
  agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
                 agx_instr *I, enum u_tristate needs_g13x_coherency)
-@@ -779,6 +798,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -577,6 +596,30 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+       pack_assert(I, I->explicit_coords == (coords.type == AGX_INDEX_REGISTER));
+       unsigned C = I->explicit_coords ? coords.value : 0;
+ 
++      if (AGX_G11) {
++         /*
++          * From Apple's G11 fragment shaders (st_tile 89 00 00 00 00 00 f0 ff,
++          * ld_tile f9 00 00 00 00 00 f8 ff): opcode 0x09 / 0x79, the register
++          * field one bit lower than G13, pixel offset in byte 2, mask in
++          * 55:52 with bit 51 set for loads and bit 49 for explicit
++          * coordinates (register in byte 4), sample mask in byte 7.
++          *
++          * ponytail: format kept at 27:24 (Apple's shaders all have 0 there),
++          * pixel offset assumed to be bytes << 2
++          */
++         pack_assert(I, I->pixel_offset < 0x40 && C < 0x100);
++         uint64_t raw = (load ? 0x79 : 0x09) |
++                        ((uint64_t)((D >> 1) & 0xff) << 7) |
++                        ((uint64_t)((I->pixel_offset << 2) & 0xff) << 16) |
++                        ((uint64_t)I->format << 24) | ((uint64_t)C << 32) |
++                        (I->explicit_coords ? BITFIELD64_BIT(49) : 0) |
++                        (load ? BITFIELD64_BIT(51) : 0) |
++                        ((uint64_t)I->mask << 52) | ((uint64_t)S << 56);
++
++         memcpy(util_dynarray_grow_bytes(emission, 1, 8), &raw, 8);
++         break;
++      }
++
+       uint64_t raw = agx_opcodes_info[I->op].encoding.exact |
+                      ((uint64_t)((D >> 1) & BITFIELD_MASK(7)) << 8) |
+                      (St << 22) | ((uint64_t)(I->format) << 24) |
+@@ -688,6 +731,22 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+       pack_assert(I, value.type == AGX_INDEX_REGISTER);
+       pack_assert(I, value.size == AGX_SIZE_32);
+ 
++      if (AGX_G11) {
++         /*
++          * Apple's G11 vertex shaders: opcode 0x01, bit 8 set, the
++          * immediate index flag at bit 22 (01 41 48 80 ... 81 09 4b 80). The
++          * G13 form is not an instruction there and the TA job never ends.
++          */
++         pack_assert(I, index_src.type == AGX_INDEX_IMMEDIATE);
++         uint64_t raw = 0x01 | (I->last ? (1 << 7) : 0) | (1 << 8) |
++                        ((value.value & 0x3F) << 9) |
++                        (((uint64_t)(index_src.value & 0x3F)) << 16) |
++                        (1 << 22) | ((value.value >> 6) << 24) | (0x8u << 28);
++
++         memcpy(util_dynarray_grow_bytes(emission, 1, 4), &raw, 4);
++         break;
++      }
++
+       uint64_t raw = 0x11 | (I->last ? (1 << 7) : 0) |
+                      ((value.value & 0x3F) << 9) |
+                      (((uint64_t)(index_src.value & 0x3F)) << 16) |
+@@ -779,6 +838,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O =
           agx_pack_local_index(I, is_load ? I->src[1] : I->src[2], &Ot);
  
@@ -589,7 +643,7 @@ index 6236c3c..ad3e6b2 100644
        uint64_t raw =
           agx_opcodes_info[I->op].encoding.exact | (Rt ? BITFIELD64_BIT(8) : 0) |
           ((R & BITFIELD_MASK(6)) << 9) | (L ? BITFIELD64_BIT(15) : 0) |
-@@ -827,6 +867,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -827,6 +907,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
     }
  
     case AGX_OPCODE_LOCAL_ATOMIC: {
@@ -621,7 +675,7 @@ index 6236c3c..ad3e6b2 100644
        bool L = true; /* TODO: Don't force */
  
        unsigned At;
-@@ -872,6 +937,34 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -872,6 +977,34 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O = agx_pack_sample_compare_offset(I, I->src[5]);
        unsigned D = agx_pack_lod(I, I->src[1], &lod_mode);
  
@@ -656,7 +710,7 @@ index 6236c3c..ad3e6b2 100644
        unsigned q1 = I->shadow;
        unsigned q2 = I->query_lod ? 2 : 0;
        unsigned q3 = 0xc; // XXX
-@@ -963,6 +1056,46 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -963,6 +1096,46 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
  
        unsigned coherency = I->coherent ? 0xf : 0x9;
  
@@ -1070,10 +1124,18 @@ index 1cb8fab..736568f 100644
     if (info->nr_preamble_gprs) {
        agx_usc_pack(&b, PRESHADER, cfg) {
 diff --git a/src/asahi/lib/agx_device.c b/src/asahi/lib/agx_device.c
-index f158e0e..2de2c2a 100644
+index f158e0e..c39d290 100644
 --- a/src/asahi/lib/agx_device.c
 +++ b/src/asahi/lib/agx_device.c
-@@ -541,7 +541,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
+@@ -15,6 +15,7 @@
+ #include "util/timespec.h"
+ #include "agx_abi.h"
+ #include "agx_bo.h"
++#include "asahi/genxml/agx_g11.h"
+ #include "agx_compile.h"
+ #include "agx_device_virtio.h"
+ #include "agx_scratch.h"
+@@ -541,7 +542,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
     }
     assert(params_size >= sizeof(dev->params));
  
@@ -1082,7 +1144,7 @@ index f158e0e..2de2c2a 100644
     const char *variant = " Unknown";
     switch (dev->params.gpu_variant) {
     case 'G':
-@@ -557,10 +557,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
+@@ -557,10 +558,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
        variant = " Ultra";
        break;
     }
@@ -1102,6 +1164,37 @@ index f158e0e..2de2c2a 100644
  
     /* We need a large chunk of VA space carved out for robustness. Hardware
      * loads can shift an i32 by up to 2, for a total shift of 4. If the base
+@@ -647,7 +653,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
+ 
+    simple_mtx_init(&dev->vma_lock, mtx_plain);
+    util_vma_heap_init(&dev->main_heap, user_start, user_size);
+-   util_vma_heap_init(&dev->usc_heap, dev->shader_base, shader_size);
++   /*
++    * G11: below the kernel's chunk mapping at USC base + 3GiB. Keep USC
++    * address 0 free, G11 jobs with bad state fetch from there.
++    */
++   if (AGX_G11)
++      util_vma_heap_init(&dev->usc_heap, dev->shader_base + 16384,
++                         AGX_G11_USC_SIZE - 16384);
++   else
++      util_vma_heap_init(&dev->usc_heap, dev->shader_base, shader_size);
+ 
+    dev->vm_id = vm_create.vm_id;
+ 
+diff --git a/src/asahi/lib/agx_device.h b/src/asahi/lib/agx_device.h
+index e80dd9b..7e8fd0d 100644
+--- a/src/asahi/lib/agx_device.h
++++ b/src/asahi/lib/agx_device.h
+@@ -91,6 +91,9 @@ int agx_bo_bind(struct agx_device *dev, struct agx_bo *bo, uint64_t addr,
+ int agx_bind_timestamps(struct agx_device *dev, struct agx_bo *bo,
+                         uint32_t *handle);
+ 
++/* G11 shader heap size: below the kernel's chunk mapping at USC + 3GiB */
++#define AGX_G11_USC_SIZE (2ull << 30)
++
+ struct agx_device {
+    uint32_t debug;
+ 
 diff --git a/src/asahi/lib/agx_helpers.h b/src/asahi/lib/agx_helpers.h
 index bf7dfb9..6be9363 100644
 --- a/src/asahi/lib/agx_helpers.h
@@ -1116,11 +1209,96 @@ index bf7dfb9..6be9363 100644
     }
  }
  
+diff --git a/src/asahi/lib/agx_nir_lower_tilebuffer.c b/src/asahi/lib/agx_nir_lower_tilebuffer.c
+index e20a3ca..9e63c2b 100644
+--- a/src/asahi/lib/agx_nir_lower_tilebuffer.c
++++ b/src/asahi/lib/agx_nir_lower_tilebuffer.c
+@@ -166,11 +166,44 @@ image_coords(nir_builder *b)
+    return nir_vector_insert_imm(b, xy__, nir_load_layer_id(b), 2);
+ }
+ 
++/*
++ * G11 has no bindless texture state: reach the render target's descriptors
++ * through their state registers (texture at base + 2 rt, PBE after it).
++ * They are 2D arrays, and a G11 access with another dimension does nothing,
++ * so use layer 0. The image write takes 32-bit data.
++ *
++ * ponytail: single sample, one layer, no bounds check
++ */
++static nir_def *
++g11_rt_coords(nir_builder *b)
++{
++   nir_def *xy = nir_u2u32(b, nir_load_pixel_coord(b));
++   nir_def *zero = nir_imm_int(b, 0);
++
++   return nir_vec4(b, nir_channel(b, xy, 0), nir_channel(b, xy, 1), zero, zero);
++}
++
+ static void
+ store_memory(nir_builder *b, unsigned bindless_base, unsigned nr_samples,
+              enum pipe_format format, unsigned rt, nir_def *value,
+              nir_def *samples)
+ {
++   if (AGX_G11) {
++      if (value->bit_size == 16) {
++         value = util_format_is_pure_sint(format)   ? nir_i2i32(b, value)
++                 : util_format_is_pure_uint(format) ? nir_u2u32(b, value)
++                                                    : nir_f2f32(b, value);
++      }
++
++      nir_begin_invocation_interlock(b);
++      nir_image_store(b, nir_imm_int(b, bindless_base + (2 * rt) + 1),
++                      g11_rt_coords(b), nir_undef(b, 1, 32), value,
++                      nir_imm_int(b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
++                      .image_array = true, .format = format,
++                      .src_type = nir_type_uint32);
++      return;
++   }
++
+    nir_def *image = handle_for_rt(b, bindless_base, rt, true);
+    nir_def *tex_image = handle_for_rt(b, bindless_base, rt, false);
+    nir_def *zero = nir_imm_intN_t(b, 0, 16);
+@@ -230,6 +263,15 @@ load_memory(nir_builder *b, unsigned bindless_base, unsigned nr_samples,
+             uint8_t comps, uint8_t bit_size, unsigned rt,
+             enum pipe_format format)
+ {
++   if (AGX_G11) {
++      nir_begin_invocation_interlock(b);
++      return nir_image_load(b, comps, bit_size,
++                            nir_imm_int(b, bindless_base + (2 * rt)),
++                            g11_rt_coords(b), nir_undef(b, 1, 32),
++                            nir_imm_int(b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
++                            .image_array = true, .format = format);
++   }
++
+    nir_def *image = handle_for_rt(b, bindless_base, rt, false);
+    nir_def *zero = nir_imm_intN_t(b, 0, 16);
+    nir_def *lod = zero;
+diff --git a/src/asahi/lib/agx_tilebuffer.c b/src/asahi/lib/agx_tilebuffer.c
+index f79180d..3a72efe 100644
+--- a/src/asahi/lib/agx_tilebuffer.c
++++ b/src/asahi/lib/agx_tilebuffer.c
+@@ -85,7 +85,14 @@ agx_build_tilebuffer_layout(const enum pipe_format *formats, uint8_t nr_cbufs,
+       bool fits = (new_offset_B <= MAX_BYTES_PER_SAMPLE) &&
+                   (ALIGN_POT(new_offset_B, 8) * MIN_TILE_SIZE_PX *
+                    nr_samples) <= MAX_BYTES_PER_TILE;
+-      if (fits) {
++      /*
++       * G11: keep render targets in memory. Its tile loads (ld_tile 0x79)
++       * hang the end of tile program and the block store encoding is not
++       * known, so background and fragment programs write with image stores.
++       *
++       * ponytail: no tilebuffer at all on G11; blending reads memory
++       */
++      if (fits && !AGX_G11) {
+          tib._offset_B[rt] = offset_B;
+          offset_B = new_offset_B;
+       } else {
 diff --git a/src/asahi/lib/agx_usc.h b/src/asahi/lib/agx_usc.h
-index 123208a..9db4b49 100644
+index 123208a..2940af9 100644
 --- a/src/asahi/lib/agx_usc.h
 +++ b/src/asahi/lib/agx_usc.h
-@@ -65,6 +65,21 @@ agx_usc_shared(struct agx_usc_builder *b, uint16_t local_size,
+@@ -65,6 +65,49 @@ agx_usc_shared(struct agx_usc_builder *b, uint16_t local_size,
     }
  }
  
@@ -1136,6 +1314,34 @@ index 123208a..9db4b49 100644
 +      cfg.uses_shared_memory = shared_size > 0;
 +      cfg.bytes_per_threadgroup = shared_size ? shared_size + 16 : 65536;
 +   }
++}
++
++/*
++ * G11 fragment programs describe the tilebuffer in the same word, as Metal's
++ * LoadShader::setFragmentImageBlockData does: bit 8 and bits 23:16 the local
++ * memory it takes in 256 byte chunks, 25:24 log2 samples, 31:26 a layout code
++ * for the tile size (36, the compute template's 0x9 nibble, is 1x1), 35:32
++ * bytes per sample / 8.
++ */
++static inline void
++agx_usc_shader_g11_frag(struct agx_usc_builder *b, uint32_t code,
++                        unsigned nr_gprs, unsigned sample_size_B,
++                        unsigned nr_samples, unsigned tile_size)
++{
++   unsigned bytes = sample_size_B * nr_samples * tile_size;
++   unsigned layout = tile_size == 32 * 32 ? 47 : tile_size == 32 * 16 ? 63 : 54;
++   void *word = b->head;
++   uint64_t w;
++
++   agx_usc_shader_g11(b, code, nr_gprs, 0);
++   memcpy(&w, word, 8);
++   w &= ~(BITFIELD64_BIT(8) | BITFIELD64_RANGE(16, 20));
++   w |= (uint64_t)(bytes != 0) << 8;
++   w |= (uint64_t)(DIV_ROUND_UP(bytes, 256) & 0xff) << 16;
++   w |= (uint64_t)__builtin_ctz(nr_samples) << 24;
++   w |= (uint64_t)layout << 26;
++   w |= (uint64_t)((sample_size_B / 8) & 0xf) << 32;
++   memcpy(word, &w, 8);
 +}
 +#endif
 +
@@ -1178,7 +1384,7 @@ index 3d1ccb0..c3d7ade 100644
     case AGX_USC_CONTROL_NO_PRESHADER: {
        DUMP_CL(USC_NO_PRESHADER, map, "No preshader");
 diff --git a/src/asahi/libagx/libagx_dgc.h b/src/asahi/libagx/libagx_dgc.h
-index d8266b6..712568a 100644
+index d8266b6..808fec7 100644
 --- a/src/asahi/libagx/libagx_dgc.h
 +++ b/src/asahi/libagx/libagx_dgc.h
 @@ -234,6 +234,11 @@ agx_cdm_launch(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_grid grid,
@@ -1193,7 +1399,63 @@ index d8266b6..712568a 100644
     agx_push_packed(out, launch, CDM_LAUNCH_WORD_0);
  
     agx_push(out, CDM_LAUNCH_WORD_1, cfg) {
-@@ -371,6 +376,16 @@ agx_vdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
+@@ -269,10 +274,55 @@ agx_cdm_launch(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_grid grid,
+    return out;
+ }
+ 
++#if AGX_G11
++/*
++ * G11 draw header, from Apple's PrimitiveTypeToVDMCTRLType tables: the
++ * presence bits sit elsewhere (count, instances, start 25-27, index buffer
++ * 28, indirect 23; no index buffer size) and the words follow in bit order.
++ * Non-indexed draws set index size 2 as Apple does.
++ */
++static inline GLOBAL uint32_t *
++agx_vdm_draw_g11(GLOBAL uint32_t *out, struct agx_draw draw,
++                 enum agx_primitive topology)
++{
++   uint64_t ib = draw.indexed ? agx_draw_index_buffer(draw) : 0;
++   uint32_t hdr = (3u << 29) | ((uint32_t)topology << 8);
++
++   if (agx_is_indirect(draw.b))
++      hdr |= 1u << 23;
++   else
++      hdr |= 7u << 25;
++
++   if (draw.indexed) {
++      hdr |= (1u << 28) | (uint32_t)(ib >> 32) | ((uint32_t)draw.restart << 16) |
++             ((uint32_t)draw.index_size << 17);
++   } else {
++      hdr |= 2u << 17;
++   }
++
++   *(out++) = hdr;
++   if (agx_is_indirect(draw.b)) {
++      *(out++) = draw.b.ptr >> 32;
++      *(out++) = draw.b.ptr & BITFIELD_MASK(32);
++   } else {
++      *(out++) = draw.b.count[0];
++      *(out++) = draw.b.count[1];
++      *(out++) = draw.indexed ? draw.index_bias : draw.start;
++   }
++   if (draw.indexed)
++      *(out++) = ib;
++
++   return out;
++}
++#endif
++
+ static inline GLOBAL uint32_t *
+ agx_vdm_draw(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_draw draw,
+              enum agx_primitive topology)
+ {
++#if AGX_G11
++   return agx_vdm_draw_g11(out, draw, topology);
++#endif
+    uint64_t ib = draw.indexed ? agx_draw_index_buffer(draw) : 0;
+ 
+    agx_push(out, INDEX_LIST, cfg) {
+@@ -371,6 +421,16 @@ agx_vdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
  static inline GLOBAL uint32_t *
  agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
  {
@@ -1210,7 +1472,7 @@ index d8266b6..712568a 100644
     agx_push(out, CDM_BARRIER, cfg) {
        cfg.unk_5 = true;
        cfg.unk_6 = true;
-@@ -581,6 +596,7 @@ agx_usc_uniform(struct agx_usc_builder *b, unsigned start_halfs,
+@@ -581,6 +641,7 @@ agx_usc_uniform(struct agx_usc_builder *b, unsigned start_halfs,
     assert((start_halfs + size_halfs) <= (1 << 9) && "uniform file overflow");
     assert(size_halfs <= 64 && "caller's responsibility to split");
     assert(size_halfs > 0 && "no empty uniforms");
@@ -1403,7 +1665,7 @@ index ab205bf..75d0626 100644
  
  static void
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..716751c 100644
+index 616dd6d..1614243 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
 @@ -1127,6 +1127,9 @@ target_is_array(enum pipe_texture_target target)
@@ -1527,7 +1789,31 @@ index 616dd6d..716751c 100644
     info->private_memory = 0;
     info->preferred_simd_size = 32;
     info->simd_sizes = 32;
-@@ -2889,7 +2955,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2625,6 +2691,23 @@ translate_sampler_state_count(struct agx_context *ctx, mesa_shader_stage stage)
+                                             ctx->stage[stage].custom_borders);
+ }
+ 
++/*
++ * Counts words (VDM vertex word 0, PPP fragment word 0, background/end of
++ * tile): the generic packer cannot express a count of 0, and G11 then loads
++ * state from USC address 0 (a preshader, or texture and sampler states the
++ * pipeline does not provide). Apple writes 0 for unused fields; compute
++ * clears the preshader count the same way in agx_cdm_launch().
++ */
++static inline void
++agx_g11_clear_counts(uint32_t *counts, bool textures, bool samplers)
++{
++   *counts &= ~BITFIELD_RANGE(12, 4);
++   if (!textures)
++      *counts &= ~BITFIELD_RANGE(4, 5);
++   if (!samplers)
++      *counts &= ~BITFIELD_RANGE(9, 3);
++}
++
+ static uint32_t
+ agx_nr_tex_descriptors_without_spilled_rts(const struct agx_compiled_shader *cs)
+ {
+@@ -2889,7 +2972,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
  
     mesa_shader_stage stage = cs->stage;
  
@@ -1540,7 +1826,7 @@ index 616dd6d..716751c 100644
        agx_usc_pack(&b, TEXTURE, cfg) {
           cfg.start = 0;
           cfg.count =
-@@ -2898,7 +2968,8 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2898,7 +2985,8 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -1550,30 +1836,201 @@ index 616dd6d..716751c 100644
        agx_usc_pack(&b, SAMPLER, cfg) {
           cfg.start = 0;
           cfg.count = batch->sampler_count[stage];
-@@ -2954,6 +3025,14 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2954,30 +3042,51 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
-+#if AGX_G11
-+   assert(!linked && stage == MESA_SHADER_COMPUTE && "G11 is compute only");
-+   /* Spills take the whole window, see agx_lower_spill.c */
-+   agx_usc_shader_g11(&b, agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset),
-+                      cs->b.info.nr_gprs,
-+                      cs->b.info.spill_stride ? AGX_G11_SPILL_TOP
-+                      : cs->b.info.local_size + variable_shared_mem);
-+#else
-    if (stage == MESA_SHADER_FRAGMENT) {
-       agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
+-   if (stage == MESA_SHADER_FRAGMENT) {
+-      agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
++   /* G11 takes one combined shader word for every stage (Metal's
++    * emitUscStateLoad).
++    */
++   if (AGX_G11 && stage == MESA_SHADER_FRAGMENT) {
++      struct agx_tilebuffer_layout *tib = &batch->tilebuffer_layout;
++
++      agx_usc_shader_g11_frag(&b,
++                              agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset),
++                              cs->b.info.nr_gprs, tib->sample_size_B,
++                              tib->nr_samples, tib->tile_size);
++   } else if (AGX_G11) {
++      uint32_t code =
++         agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset);
++
++      /* Spills take the whole window, see agx_lower_spill.c */
++      agx_usc_shader_g11(&b, code,
++                         cs->b.info.nr_gprs,
++                         cs->b.info.spill_stride ? AGX_G11_SPILL_TOP
++                         : cs->b.info.local_size + variable_shared_mem);
     } else {
-@@ -2980,6 +3059,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
-                              : 0;
+-      agx_usc_shared_non_fragment(&b, &cs->b.info, variable_shared_mem);
+-   }
++      if (stage == MESA_SHADER_FRAGMENT) {
++         agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
++      } else {
++         agx_usc_shared_non_fragment(&b, &cs->b.info, variable_shared_mem);
++      }
+ 
+-   if (linked) {
+-      agx_usc_push_packed(&b, SHADER, linked->shader);
+-      agx_usc_push_packed(&b, REGISTERS, linked->regs);
++      if (linked) {
++         agx_usc_push_packed(&b, SHADER, linked->shader);
++         agx_usc_push_packed(&b, REGISTERS, linked->regs);
+ 
+-      if (stage == MESA_SHADER_FRAGMENT)
+-         agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, linked->fragment_props);
+-   } else {
+-      agx_usc_pack(&b, SHADER, cfg) {
+-         cfg.code =
+-            agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset);
+-         cfg.unk_2 = 3;
+-      }
++         if (stage == MESA_SHADER_FRAGMENT)
++            agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, linked->fragment_props);
++      } else {
++         agx_usc_pack(&b, SHADER, cfg) {
++            cfg.code =
++               agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset);
++            cfg.unk_2 = 3;
++         }
+ 
+-      agx_usc_pack(&b, REGISTERS, cfg) {
+-         cfg.register_count = cs->b.info.nr_gprs;
+-         cfg.spill_size = cs->b.info.scratch_size
+-                             ? agx_scratch_get_bucket(cs->b.info.scratch_size)
+-                             : 0;
++         agx_usc_pack(&b, REGISTERS, cfg) {
++            cfg.register_count = cs->b.info.nr_gprs;
++            cfg.spill_size = cs->b.info.scratch_size
++                                ? agx_scratch_get_bucket(cs->b.info.scratch_size)
++                                : 0;
++         }
        }
     }
-+#endif
  
-    if (cs->b.info.has_preamble) {
+@@ -3206,8 +3315,6 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+       }
+    }
+ 
+-   agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
+-
+    /* Get the shader */
+    key.reserved_preamble = uniforms;
+    struct agx_device *dev = agx_device(ctx->base.screen);
+@@ -3215,13 +3322,25 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+    agx_batch_add_bo(batch, shader->bo);
+    assert(shader->info.rodata.size_16 == 0);
+ 
+-   agx_usc_pack(&b, SHADER, cfg) {
+-      cfg.code = agx_usc_addr(dev, shader->ptr + shader->info.main_offset);
+-      cfg.unk_2 = 0;
+-   }
++   if (AGX_G11) {
++      struct agx_tilebuffer_layout *tib = &batch->tilebuffer_layout;
++      uint32_t code =
++         agx_usc_addr(dev, shader->ptr + shader->info.main_offset);
+ 
+-   agx_usc_pack(&b, REGISTERS, cfg)
+-      cfg.register_count = shader->info.nr_gprs;
++      agx_usc_shader_g11_frag(&b, code, shader->info.nr_gprs,
++                              tib->sample_size_B, tib->nr_samples,
++                              tib->tile_size);
++   } else {
++      agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
++
++      agx_usc_pack(&b, SHADER, cfg) {
++         cfg.code = agx_usc_addr(dev, shader->ptr + shader->info.main_offset);
++         cfg.unk_2 = 0;
++      }
++
++      agx_usc_pack(&b, REGISTERS, cfg)
++         cfg.register_count = shader->info.nr_gprs;
++   }
+ 
+    if (shader->info.has_preamble) {
        agx_usc_pack(&b, PRESHADER, cfg) {
-@@ -5314,6 +5394,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -3242,10 +3361,14 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+       cfg.sampler_state_register_count =
+          agx_translate_sampler_state_count(needs_sampler ? 1 : 0, false);
+ 
+-      if (!store)
++      /* G11 (Apple's background programs use 2) has no such field. */
++      if (!store && !AGX_G11)
+          cfg.unknown = 0xFFFF;
+    }
+ 
++   if (AGX_G11)
++      agx_g11_clear_counts((uint32_t *)&ret.counts, nr_tex, needs_sampler);
++
+    return ret;
+ }
+ 
+@@ -3442,7 +3565,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+        IS_DIRTY(PRIM)) {
+ 
+       unsigned bindings = ctx->linked.fs->cf.nr_bindings;
+-      if (bindings) {
++      /* G11 reads the binding header even without bindings (USC 0 faults) */
++      if (bindings || AGX_G11) {
+          size_t linkage_size =
+             AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
+ 
+@@ -3466,7 +3590,40 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+       ppp_updates++;
+    }
+ 
+-   if (IS_DIRTY(VS) || varyings_dirty) {
++   if (AGX_G11 && (IS_DIRTY(VS) || varyings_dirty)) {
++      /*
++       * G11's vertex state is a fixed four word token (Metal's
++       * VDMEncoderGen2_1<G11>::VsStateToken): a header with a class for the
++       * vertex output count, the resource counts (G13's word 0 without the
++       * preshader, 0 for none), the pipeline with the register count in
++       * bits 5:2 and its length in 64 byte units in 1:0 (0: 256 bytes), and
++       * the output count.
++       */
++      unsigned outputs = vs->uvs.size;
++      unsigned regs = DIV_ROUND_UP(vs->b.info.nr_gprs, 16);
++      uint32_t *w = (uint32_t *)out;
++
++      w[0] = 0x48008040 | (outputs <= 8    ? 0x4000
++                           : outputs <= 24  ? 0x2000
++                           : outputs <= 32  ? 0x1800
++                           : outputs <= 64  ? 0x1000
++                           : outputs <= 128 ? 0x800
++                                            : 0x400);
++      agx_pack(&w[1], VDM_STATE_VERTEX_SHADER_WORD_0, cfg) {
++         cfg.uniform_register_count = vs->b.info.push_count;
++         cfg.texture_state_register_count = agx_nr_tex_descriptors(batch, vs);
++         cfg.sampler_state_register_count =
++            translate_sampler_state_count(ctx, vs->stage);
++      }
++      agx_g11_clear_counts(&w[1], agx_nr_tex_descriptors(batch, vs),
++                           ctx->stage[vs->stage].sampler_count ||
++                              vs->b.info.uses_txf);
++      w[2] = agx_build_pipeline(batch, vs, ctx->gs ? NULL : ctx->linked.vs,
++                                MESA_SHADER_VERTEX, 0, 0) |
++             ((regs == 16 ? 0 : regs) << 2);
++      w[3] = outputs & 0xff;
++      out += 16;
++   } else if (IS_DIRTY(VS) || varyings_dirty) {
+       agx_push(out, VDM_STATE, cfg) {
+          cfg.vertex_shader_word_0_present = true;
+          cfg.vertex_shader_word_1_present = true;
+@@ -3675,6 +3832,12 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+          cfg.cf_binding_count = ctx->linked.fs->cf.nr_bindings;
+       }
+ 
++      if (AGX_G11)
++         agx_g11_clear_counts((uint32_t *)ppp.head - 1,
++                              agx_nr_tex_descriptors(batch, ctx->fs),
++                              ctx->stage[MESA_SHADER_FRAGMENT].sampler_count ||
++                                 ctx->fs->b.info.uses_txf);
++
+       agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_1, cfg) {
+          cfg.pipeline = agx_build_pipeline(batch, ctx->fs, ctx->linked.fs,
+                                            MESA_SHADER_FRAGMENT, 0, 0);
+@@ -5314,6 +5477,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -1593,7 +2050,7 @@ index 616dd6d..716751c 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +5437,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +5520,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);

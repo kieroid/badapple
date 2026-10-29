@@ -1,9 +1,7 @@
 # GPU
 
-G11P. `linux-0020` boots the firmware and registers a DRM render node for
-compute. `/bin/agx-test` runs the Mesa tests through it.
-`tools/gfx-proxy.py` boots the firmware from the m1n1 proxy, for poking at it
-without Linux.
+G11P. `linux-0020` boots the firmware and registers a DRM render node.
+`make rootfs` builds Mesa for it; `cl-test` and `gl-test` run on the phone.
 
 ## Firmware
 
@@ -179,9 +177,8 @@ completes. A store's register offset is scaled by the element size.
 ## Mesa
 
 `patches/mesa-0001-asahi-g11.patch` makes Mesa's Asahi compiler and Gallium
-driver target G11, so OpenCL runs through Rusticl. `AGX_G11` is in
-`genxml/agx_g11.h`. `make gfx-tests` builds `asahi_clc` and compiles
-`tools/gfx-tests.cl` for `agx-test`.
+driver target G11, so OpenCL runs through Rusticl and GLES through EGL. `AGX_G11` is in
+`genxml/agx_g11.h`.
 
 | state word | G11 |
 |---|---|
@@ -248,12 +245,39 @@ make rootfs
 build/venv/bin/python tools/tsh.py "chroot /mnt/a env RUSTICL_ENABLE=asahi cl-test"
 ```
 
+`gl-test` draws into a 64x64 renderbuffer with EGL surfaceless and checks
+the result on the CPU (`gl-test clear` stops after the clear).
+
 Without the phone, build Mesa with `-Dtools=drm-shim` and run under
 `LD_PRELOAD=libasahi_noop_drm_shim.so ASAHI_MESA_DEBUG=trace`.
 
+### Graphics
+
+Clears work. A triangle's TA job completes and its vertex shader runs, but
+no pixels land yet, and the next TA job after a render that drew geometry
+hangs (InitBuffer done, TA started, never finished, no fault).
+
+| what | G11 |
+|---|---|
+| VDM vertex state | Apple's `VsStateToken`, 4 words, no presence bits: `0x48008040 \| class` (outputs <9 0x4000, <=24 0x2000, <=32 0x1800, <=64 0x1000, <=128 0x800, else 0x400), counts, `pipeline \| ceil(regs/8) << 2 \| length/64`, output count |
+| draw | `0x6e040000 \| prim << 8`, indexed `0x7e020000`; no size word |
+| counts | clear preshader bits 15:12, and textures 8:4 and samplers 11:9 when unused, or the USC loads state from USC 0 |
+| fragment shader word | the combined word plus imageblock: bit 8 uses local memory, 23:16 its size in 256 B, 25:24 log2 samples, 31:26 tile layout (32x32 47, 32x16 63, 16x16 54), 35:32 bytes per sample / 8 |
+| `st_var` | `0x01 \| last << 7 \| 1 << 8 \| reg << 9 \| slot << 16 \| 1 << 22 \| 0x8 << 28` |
+| `st_tile`, `ld_tile` | `0x09`, `0x79`: register 14:7, offset byte 2, coordinates byte 4 with bit 49, mask 55:52, sample mask 63:56 |
+
+The block store (`imgwblk`) encoding is unknown and `ld_tile` hangs in the
+end of tile program, so Mesa spills every render target: the background and
+fragment programs write the image directly (PBE at state register 2 rt + 1,
+2D array, layer 0, 32-bit data) and the end of tile program does nothing.
+
+The kernel side needs the hwdata power limits (0 parks the engines), the
+scene at 3D command +0x30, and the event counter written at both
+finalizes.
+
 ## DRM
 
-`linux-0020` is `drivers/gpu/drm/agx`, a compute-only render node with the
+`linux-0020` is `drivers/gpu/drm/agx`, a render node with the
 Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 
 | | |
@@ -261,10 +285,10 @@ Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 | VMs | one MMU context each, 16 to 63 |
 | VA | 16K to 0x80_0000_0000, 16K pages |
 | `usc_exec_base` | must be 0x11 << 32, the base the firmware loads |
-| submit | async, one `drm_sched` job per compute command |
+| submit | async, one `drm_sched` job per compute or render command |
 | name | `asahi`, so Mesa picks it up |
 | ignored | sampler heaps, timestamps |
-| not yet | render commands, helper programs, single-page binds |
+| not yet | helper programs, single-page binds, more than one render in flight |
 
 Every user context gets a page catalogue at init and is loaded by the
 firmware at every power-up, so a VM only fills its page tables. After a
@@ -280,10 +304,6 @@ stamp and sends 0x42 on endpoint 0x21, and the driver then signals the
 job's fence. The firmware cannot be reset, so a job that times out wedges
 the GPU until the next boot. Unbinds wait until the VM has no jobs queued
 or running.
-
-`make agx-test` builds `tools/agx-test.c` static with the kernel's nolibc,
-and the next kernelcache puts it in the initramfs. It runs the Mesa tests,
-hand-assembled image writes, async tests and a second VM.
 
 After a job times out, the driver prints the MMU fault status (RGX 0x17040).
 
