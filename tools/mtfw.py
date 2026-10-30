@@ -23,7 +23,7 @@
 #   2 rmw     addr, mask, value; flag 1 means skip the acknowledge check
 #   3 poll    addr, mask, value, timeout ms, read-on-error addr or ~0
 #
-# usage: mtfw.py <payload.plist> <out.bin> [personality]
+# usage: mtfw.py <payload.plist> <out.bin>
 # The payload comes out of the im4p with: ipsw img4 im4p extract
 
 import base64
@@ -121,9 +121,9 @@ def count_ops(blob):
 
 
 def main():
-    if len(sys.argv) not in (3, 4):
-        sys.exit('usage: mtfw.py <payload.plist> <out.bin> [personality]')
-    personality = sys.argv[3] if len(sys.argv) == 4 else 'C1R1FC1,1'
+    if len(sys.argv) != 3:
+        sys.exit('usage: mtfw.py <payload.plist> <out.bin>')
+    personality = 'C1R1FC1,1'
     firmware = parse_plist(open(sys.argv[1], encoding='utf-8').read())
     if personality not in firmware:
         sys.exit(f'no {personality} in this firmware, it has: {", ".join(firmware)}')

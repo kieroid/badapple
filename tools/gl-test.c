@@ -3,15 +3,13 @@
 //
 // GLES2 on the A12 GPU without a display: EGL surfaceless, a 64x64
 // framebuffer object, a clear and then a triangle, each read back and
-// checked on the CPU. "gl-test clear" stops after the clear, "gl-test tct"
-// clears again after the triangle.
+// checked on the CPU.
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <stdio.h>
-#include <string.h>
 
 #define W 64
 #define H 64
@@ -54,7 +52,7 @@ static GLuint shader(GLenum type, const char *src)
 	return s;
 }
 
-int main(int argc, char **argv)
+int main(void)
 {
 	static const EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
 	static const GLfloat tri[] = { -1, -1, 1, -1, -1, 1 };
@@ -93,8 +91,6 @@ int main(int argc, char **argv)
 	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
 	fail |= check("clear", W / 2, H / 2, 0xff0000ff);
 	grid();
-	if (argc > 1 && !strcmp(argv[1], "clear"))
-		goto out;
 
 	/* Lower-left half triangle in green over the red clear. */
 	prog = glCreateProgram();
@@ -114,14 +110,6 @@ int main(int argc, char **argv)
 	fail |= check("triangle", 8, 8, 0xff00ff00);
 	fail |= check("outside", W - 8, H - 8, 0xff0000ff);
 
-	if (argc > 1 && !strcmp(argv[1], "tct")) {
-		glClearColor(0, 0, 1, 1);
-		glClear(GL_COLOR_BUFFER_BIT);
-		glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
-		fail |= check("clear after triangle", W / 2, H / 2, 0xffff0000);
-	}
-
-out:
 	printf("%s\n", fail ? "FAIL" : "all ok");
 	eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 	eglTerminate(dpy);

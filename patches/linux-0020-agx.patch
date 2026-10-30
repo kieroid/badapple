@@ -49,10 +49,10 @@ index 000000000..5b8b471d7
 +agx-y := agx_drv.o agx_fw.o agx_vm.o
 diff --git a/drivers/gpu/drm/agx/agx.h b/drivers/gpu/drm/agx/agx.h
 new file mode 100644
-index 000000000..889c6831f
+index 000000000..26962adef
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx.h
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,109 @@
 +/* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 +/*
 + * Apple A12 GPU (AGX G11P). The firmware's structures are described in the
@@ -76,7 +76,6 @@ index 000000000..889c6831f
 +#define AGX_CHUNK_SIZE		SZ_8M
 +/* The chunk again in every context's GPU VA space, see agx_vm_map_chunk(). */
 +#define AGX_CHUNK_GVA		0x8000000000ULL
-+#define AGX_CHUNK_USC_GVA	(AGX_USC_BASE + 0xc0000000)
 +
 +/*
 + * GPU VAs. USC (shader) addresses are 32-bit offsets from AGX_USC_BASE,
@@ -945,10 +944,10 @@ index 000000000..3c3a930ad
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..313426ede
+index 000000000..27d314f39
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1106 @@
+@@ -0,0 +1,1084 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -1882,7 +1881,10 @@ index 000000000..313426ede
 +	return -ENOMEM;
 +}
 +
-+/* devm frees and unmaps the buffers with the device. */
++/*
++ * devm frees and unmaps the buffers with the device. Without this rtkit
++ * would dma_free_coherent() them itself.
++ */
 +static void agx_shmem_destroy(void *cookie, struct apple_rtkit_shmem *bfr)
 +{
 +}
@@ -1913,18 +1915,13 @@ index 000000000..313426ede
 +	.shmem_destroy = agx_shmem_destroy,
 +};
 +
-+
-+/*
-+ * Bring-up aid for render commands: userspace builds firmware structures in
-+ * the free end of the chunk through /dev/mem and rings doorbells here.
-+ */
 +static int agx_dbg_show(struct seq_file *m, void *v)
 +{
 +	struct agx_device *agx = m->private;
 +	int i;
 +
-+	seq_printf(m, "pa %pad va %#llx gva %#llx usc %#llx size %#x free %#x\n", &agx->pa,
-+		   AGX_CHUNK_VA, AGX_CHUNK_GVA, AGX_CHUNK_USC_GVA, AGX_CHUNK_SIZE, agx->off);
++	seq_printf(m, "pa %pad va %#llx gva %#llx size %#x free %#x\n", &agx->pa,
++		   AGX_CHUNK_VA, AGX_CHUNK_GVA, AGX_CHUNK_SIZE, agx->off);
 +	seq_printf(m, "B %#x C %#x info %#x\n", agx->B, agx->C, agx->cpq.info);
 +	for (i = 0; i < ARRAY_SIZE(agx->chan_state); i++)
 +		seq_printf(m, "chan %d state %#x ring %#x\n", i, agx->chan_state[i],
@@ -1935,31 +1932,11 @@ index 000000000..313426ede
 +}
 +DEFINE_SHOW_ATTRIBUTE(agx_dbg);
 +
-+static ssize_t agx_dbg_doorbell(struct file *f, const char __user *ubuf, size_t n,
-+				loff_t *pos)
-+{
-+	struct agx_device *agx = file_inode(f)->i_private;
-+	u32 ch;
-+	int ret = kstrtou32_from_user(ubuf, n, 0, &ch);
-+
-+	if (ret)
-+		return ret;
-+	if (ch > 0x1f)
-+		return -EINVAL;
-+	agx_doorbell(agx, ch);
-+	return n;
-+}
-+
-+static const struct file_operations agx_dbg_doorbell_fops = {
-+	.write = agx_dbg_doorbell,
-+};
-+
 +static void agx_debugfs(struct agx_device *agx)
 +{
 +	struct dentry *d = debugfs_create_dir("agx", NULL);
 +
 +	debugfs_create_file("info", 0400, d, agx, &agx_dbg_fops);
-+	debugfs_create_file("doorbell", 0200, d, agx, &agx_dbg_doorbell_fops);
 +}
 +
 +/*
@@ -2057,10 +2034,10 @@ index 000000000..313426ede
 +
 diff --git a/drivers/gpu/drm/agx/agx_vm.c b/drivers/gpu/drm/agx/agx_vm.c
 new file mode 100644
-index 000000000..de7cd227c
+index 000000000..4dc96afc9
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_vm.c
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,404 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * GPU VMs. The MMU is a PowerVR Rogue S7 with 16K pages: a page catalogue
@@ -2174,8 +2151,9 @@ index 000000000..de7cd227c
 + * The whole chunk at AGX_CHUNK_GVA in every context, for structures the
 + * firmware and the parameter manager both read. User VMs end below it.
 + */
-+static int map_chunk_at(struct agx_device *agx, u64 gva)
++int agx_vm_map_chunk(struct agx_device *agx)
 +{
++	const u64 gva = AGX_CHUNK_GVA;
 +	dma_addr_t pd_dma, pt_dma;
 +	u64 *pd, *pt;
 +	u32 i, j;
@@ -2196,14 +2174,6 @@ index 000000000..de7cd227c
 +		put_unaligned_le32((pd_dma >> 12) << 4 | 1,
 +				   agx->buf + agx->pc[i] + (gva >> 30) % PC_ENTRIES * 4);
 +	return 0;
-+}
-+
-+int agx_vm_map_chunk(struct agx_device *agx)
-+{
-+	int ret = map_chunk_at(agx, AGX_CHUNK_GVA);
-+
-+	/* ponytail: bring-up only, so a test can place shaders in the chunk */
-+	return ret ?: map_chunk_at(agx, AGX_CHUNK_USC_GVA);
 +}
 +
 +static void clear_range(struct agx_vm *vm, u64 addr, u64 range)

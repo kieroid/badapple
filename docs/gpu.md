@@ -246,7 +246,7 @@ build/venv/bin/python tools/tsh.py "chroot /mnt/a env RUSTICL_ENABLE=asahi cl-te
 ```
 
 `gl-test` draws into a 64x64 renderbuffer with EGL surfaceless and checks
-the result on the CPU (`gl-test clear` stops after the clear).
+the result on the CPU.
 
 Without the phone, build Mesa with `-Dtools=drm-shim` and run under
 `LD_PRELOAD=libasahi_noop_drm_shim.so ASAHI_MESA_DEBUG=trace`.

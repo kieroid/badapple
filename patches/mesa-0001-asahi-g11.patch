@@ -1127,7 +1127,7 @@ index 1cb8fab..736568f 100644
     if (info->nr_preamble_gprs) {
        agx_usc_pack(&b, PRESHADER, cfg) {
 diff --git a/src/asahi/lib/agx_device.c b/src/asahi/lib/agx_device.c
-index f158e0e..c39d290 100644
+index f158e0e..b23a797 100644
 --- a/src/asahi/lib/agx_device.c
 +++ b/src/asahi/lib/agx_device.c
 @@ -15,6 +15,7 @@
@@ -1167,36 +1167,17 @@ index f158e0e..c39d290 100644
  
     /* We need a large chunk of VA space carved out for robustness. Hardware
      * loads can shift an i32 by up to 2, for a total shift of 4. If the base
-@@ -647,7 +653,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
+@@ -647,7 +653,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
  
     simple_mtx_init(&dev->vma_lock, mtx_plain);
     util_vma_heap_init(&dev->main_heap, user_start, user_size);
 -   util_vma_heap_init(&dev->usc_heap, dev->shader_base, shader_size);
-+   /*
-+    * G11: below the kernel's chunk mapping at USC base + 3GiB. Keep USC
-+    * address 0 free, G11 jobs with bad state fetch from there.
-+    */
-+   if (AGX_G11)
-+      util_vma_heap_init(&dev->usc_heap, dev->shader_base + 16384,
-+                         AGX_G11_USC_SIZE - 16384);
-+   else
-+      util_vma_heap_init(&dev->usc_heap, dev->shader_base, shader_size);
++   /* G11: keep USC address 0 free, jobs with bad state fetch from there. */
++   uint64_t usc_skip = AGX_G11 ? 16384 : 0;
++   util_vma_heap_init(&dev->usc_heap, dev->shader_base + usc_skip,
++                      shader_size - usc_skip);
  
     dev->vm_id = vm_create.vm_id;
- 
-diff --git a/src/asahi/lib/agx_device.h b/src/asahi/lib/agx_device.h
-index e80dd9b..7e8fd0d 100644
---- a/src/asahi/lib/agx_device.h
-+++ b/src/asahi/lib/agx_device.h
-@@ -91,6 +91,9 @@ int agx_bo_bind(struct agx_device *dev, struct agx_bo *bo, uint64_t addr,
- int agx_bind_timestamps(struct agx_device *dev, struct agx_bo *bo,
-                         uint32_t *handle);
- 
-+/* G11 shader heap size: below the kernel's chunk mapping at USC + 3GiB */
-+#define AGX_G11_USC_SIZE (2ull << 30)
-+
- struct agx_device {
-    uint32_t debug;
  
 diff --git a/src/asahi/lib/agx_helpers.h b/src/asahi/lib/agx_helpers.h
 index bf7dfb9..6be9363 100644
@@ -1382,10 +1363,10 @@ index f79180d..3a72efe 100644
           offset_B = new_offset_B;
        } else {
 diff --git a/src/asahi/lib/agx_usc.h b/src/asahi/lib/agx_usc.h
-index 123208a..2940af9 100644
+index 123208a..34459ac 100644
 --- a/src/asahi/lib/agx_usc.h
 +++ b/src/asahi/lib/agx_usc.h
-@@ -65,6 +65,49 @@ agx_usc_shared(struct agx_usc_builder *b, uint16_t local_size,
+@@ -65,6 +65,44 @@ agx_usc_shared(struct agx_usc_builder *b, uint16_t local_size,
     }
  }
  
@@ -1405,29 +1386,24 @@ index 123208a..2940af9 100644
 +
 +/*
 + * G11 fragment programs describe the tilebuffer in the same word, as Metal's
-+ * LoadShader::setFragmentImageBlockData does: bit 8 and bits 23:16 the local
-+ * memory it takes in 256 byte chunks, 25:24 log2 samples, 31:26 a layout code
-+ * for the tile size (36, the compute template's 0x9 nibble, is 1x1), 35:32
-+ * bytes per sample / 8.
++ * LoadShader::setFragmentImageBlockData does (layout in badapple's
++ * docs/gpu.md). Render targets all live in memory, so there is no
++ * imageblock: only the tile layout code, 47 for 32x32 tiles, is set.
++ *
++ * ponytail: single sample, empty tilebuffer; pack size and samples from the
++ * tilebuffer layout once render targets live in it
 + */
 +static inline void
 +agx_usc_shader_g11_frag(struct agx_usc_builder *b, uint32_t code,
-+                        unsigned nr_gprs, unsigned sample_size_B,
-+                        unsigned nr_samples, unsigned tile_size)
++                        unsigned nr_gprs)
 +{
-+   unsigned bytes = sample_size_B * nr_samples * tile_size;
-+   unsigned layout = tile_size == 32 * 32 ? 47 : tile_size == 32 * 16 ? 63 : 54;
 +   void *word = b->head;
 +   uint64_t w;
 +
 +   agx_usc_shader_g11(b, code, nr_gprs, 0);
 +   memcpy(&w, word, 8);
 +   w &= ~(BITFIELD64_BIT(8) | BITFIELD64_RANGE(16, 20));
-+   w |= (uint64_t)(bytes != 0) << 8;
-+   w |= (uint64_t)(DIV_ROUND_UP(bytes, 256) & 0xff) << 16;
-+   w |= (uint64_t)__builtin_ctz(nr_samples) << 24;
-+   w |= (uint64_t)layout << 26;
-+   w |= (uint64_t)((sample_size_B / 8) & 0xf) << 32;
++   w |= 47ull << 26;
 +   memcpy(word, &w, 8);
 +}
 +#endif
@@ -1824,7 +1800,7 @@ index ab205bf..75d0626 100644
  
  static void
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..9a99a73 100644
+index 616dd6d..5381ab0 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
 @@ -370,8 +370,12 @@ agx_create_rs_state(struct pipe_context *ctx,
@@ -2146,7 +2122,7 @@ index 616dd6d..9a99a73 100644
        agx_usc_pack(&b, SAMPLER, cfg) {
           cfg.start = 0;
           cfg.count = batch->sampler_count[stage];
-@@ -2954,30 +3086,57 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2954,30 +3086,53 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -2156,16 +2132,12 @@ index 616dd6d..9a99a73 100644
 +    * emitUscStateLoad).
 +    */
 +   if (AGX_G11 && stage == MESA_SHADER_FRAGMENT) {
-+      struct agx_tilebuffer_layout *tib = &batch->tilebuffer_layout;
-+
 +      /* The linked program has the prolog and epilog (colour output) */
 +      agx_usc_shader_g11_frag(&b,
 +                              linked ? agx_usc_addr(dev, linked->bo->va->addr)
 +                                     : agx_usc_addr(dev, cs->bo->va->addr +
 +                                                            cs->b.info.main_offset),
-+                              linked ? linked->nr_gprs : cs->b.info.nr_gprs,
-+                              tib->sample_size_B, tib->nr_samples,
-+                              tib->tile_size);
++                              linked ? linked->nr_gprs : cs->b.info.nr_gprs);
 +   } else if (AGX_G11) {
 +      /* The linked VS has the prolog that loads vertex attributes */
 +      uint32_t code =
@@ -2224,7 +2196,7 @@ index 616dd6d..9a99a73 100644
        }
     }
  
-@@ -3206,8 +3365,6 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3206,8 +3361,6 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
        }
     }
  
@@ -2233,7 +2205,7 @@ index 616dd6d..9a99a73 100644
     /* Get the shader */
     key.reserved_preamble = uniforms;
     struct agx_device *dev = agx_device(ctx->base.screen);
-@@ -3215,13 +3372,25 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3215,13 +3368,21 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
     agx_batch_add_bo(batch, shader->bo);
     assert(shader->info.rodata.size_16 == 0);
  
@@ -2242,15 +2214,9 @@ index 616dd6d..9a99a73 100644
 -      cfg.unk_2 = 0;
 -   }
 +   if (AGX_G11) {
-+      struct agx_tilebuffer_layout *tib = &batch->tilebuffer_layout;
-+      uint32_t code =
-+         agx_usc_addr(dev, shader->ptr + shader->info.main_offset);
- 
--   agx_usc_pack(&b, REGISTERS, cfg)
--      cfg.register_count = shader->info.nr_gprs;
-+      agx_usc_shader_g11_frag(&b, code, shader->info.nr_gprs,
-+                              tib->sample_size_B, tib->nr_samples,
-+                              tib->tile_size);
++      agx_usc_shader_g11_frag(
++         &b, agx_usc_addr(dev, shader->ptr + shader->info.main_offset),
++         shader->info.nr_gprs);
 +   } else {
 +      agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
 +
@@ -2258,14 +2224,16 @@ index 616dd6d..9a99a73 100644
 +         cfg.code = agx_usc_addr(dev, shader->ptr + shader->info.main_offset);
 +         cfg.unk_2 = 0;
 +      }
-+
+ 
+-   agx_usc_pack(&b, REGISTERS, cfg)
+-      cfg.register_count = shader->info.nr_gprs;
 +      agx_usc_pack(&b, REGISTERS, cfg)
 +         cfg.register_count = shader->info.nr_gprs;
 +   }
  
     if (shader->info.has_preamble) {
        agx_usc_pack(&b, PRESHADER, cfg) {
-@@ -3242,10 +3411,14 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3242,10 +3403,14 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
        cfg.sampler_state_register_count =
           agx_translate_sampler_state_count(needs_sampler ? 1 : 0, false);
  
@@ -2281,40 +2249,56 @@ index 616dd6d..9a99a73 100644
     return ret;
  }
  
-@@ -3313,11 +3486,12 @@ agx_batch_init_state(struct agx_batch *batch)
+@@ -3313,27 +3478,30 @@ agx_batch_init_state(struct agx_batch *batch)
        cfg.usc_cache_inval = true;
     }
  
-+   /* G11 has only the W clamp of these (AGXMetalA12 uses 1e-20) */
-    struct AGX_PPP_HEADER present = {
-       .w_clamp = true,
+-   struct AGX_PPP_HEADER present = {
+-      .w_clamp = true,
 -      .occlusion_query_2 = true,
 -      .output_unknown = true,
 -      .varying_word_2 = true,
-+      .occlusion_query_2 = !AGX_G11,
-+      .output_unknown = !AGX_G11,
-+      .varying_word_2 = !AGX_G11,
-       .viewport_count = 1, /* irrelevant */
-    };
+-      .viewport_count = 1, /* irrelevant */
+-   };
++   /* G11 sends the W clamp with every draw, see agx_g11_encode_ppp */
++   if (!AGX_G11) {
++      struct AGX_PPP_HEADER present = {
++         .w_clamp = true,
++         .occlusion_query_2 = true,
++         .output_unknown = true,
++         .varying_word_2 = true,
++         .viewport_count = 1, /* irrelevant */
++      };
  
-@@ -3327,10 +3501,12 @@ agx_batch_init_state(struct agx_batch *batch)
-    struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
+-   size_t size = agx_ppp_update_size(&present);
+-   struct agx_ptr T =
+-      agx_pool_alloc_aligned(&batch->pool, size, AGX_PPP_HEADER_ALIGN);
+-   struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
++      size_t size = agx_ppp_update_size(&present);
++      struct agx_ptr T =
++         agx_pool_alloc_aligned(&batch->pool, size, AGX_PPP_HEADER_ALIGN);
++      struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
  
-    /* clang-format off */
+-   /* clang-format off */
 -   agx_ppp_push(&ppp, W_CLAMP, cfg) cfg.w_clamp = 1e-10;
 -   agx_ppp_push(&ppp, FRAGMENT_OCCLUSION_QUERY_2, cfg);
 -   agx_ppp_push(&ppp, OUTPUT_UNKNOWN, cfg);
 -   agx_ppp_push(&ppp, VARYING_2, cfg);
-+   agx_ppp_push(&ppp, W_CLAMP, cfg) cfg.w_clamp = AGX_G11 ? 1e-20 : 1e-10;
-+   if (!AGX_G11) {
+-   /* clang-format on */
++      /* clang-format off */
++      agx_ppp_push(&ppp, W_CLAMP, cfg) cfg.w_clamp = 1e-10;
 +      agx_ppp_push(&ppp, FRAGMENT_OCCLUSION_QUERY_2, cfg);
 +      agx_ppp_push(&ppp, OUTPUT_UNKNOWN, cfg);
 +      agx_ppp_push(&ppp, VARYING_2, cfg);
-+   }
-    /* clang-format on */
++      /* clang-format on */
  
-    agx_ppp_fini(&out, &ppp);
-@@ -3416,9 +3592,171 @@ agx_point_object_type(struct agx_rasterizer *rast)
+-   agx_ppp_fini(&out, &ppp);
++      agx_ppp_fini(&out, &ppp);
++   }
+    batch->vdm.current = out;
+ 
+    /* Mark it as initialized now, since agx_batch_writes() will check this. */
+@@ -3416,9 +3584,171 @@ agx_point_object_type(struct agx_rasterizer *rast)
               : AGX_OBJECT_TYPE_POINT_SPRITE_UV10;
  }
  
@@ -2487,7 +2471,7 @@ index 616dd6d..9a99a73 100644
  static uint8_t *
  agx_encode_state(struct agx_batch *batch, uint8_t *out)
  {
-@@ -3442,7 +3780,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3442,7 +3772,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
         IS_DIRTY(PRIM)) {
  
        unsigned bindings = ctx->linked.fs->cf.nr_bindings;
@@ -2497,7 +2481,7 @@ index 616dd6d..9a99a73 100644
           size_t linkage_size =
              AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
  
-@@ -3457,6 +3796,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3457,6 +3788,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                      : 0,
                                   &batch->generate_primitive_id);
  
@@ -2508,7 +2492,7 @@ index 616dd6d..9a99a73 100644
           batch->varyings = agx_usc_addr(dev, t.gpu);
        } else {
           batch->varyings = 0;
-@@ -3466,7 +3809,44 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3466,7 +3801,44 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ppp_updates++;
     }
  
@@ -2554,7 +2538,7 @@ index 616dd6d..9a99a73 100644
        agx_push(out, VDM_STATE, cfg) {
           cfg.vertex_shader_word_0_present = true;
           cfg.vertex_shader_word_1_present = true;
-@@ -3511,8 +3891,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3511,8 +3883,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ctx->dirty |= AGX_DIRTY_SCISSOR_ZBIAS;
     }
  
@@ -2565,7 +2549,7 @@ index 616dd6d..9a99a73 100644
  
        agx_upload_viewport_scissor(pool, batch, &out, ctx->viewport,
                                    ctx->rast->base.scissor ? ctx->scissor : NULL,
-@@ -3533,6 +3913,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3533,6 +3905,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                        : is_lines ? AGX_OBJECT_TYPE_LINE
                                                   : AGX_OBJECT_TYPE_TRIANGLE;
  
@@ -2587,7 +2571,7 @@ index 616dd6d..9a99a73 100644
     struct AGX_PPP_HEADER dirty = {
        .fragment_control =
           IS_DIRTY(ZS) || IS_DIRTY(RS) || IS_DIRTY(PRIM) || IS_DIRTY(QUERY),
-@@ -5314,6 +5709,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5314,6 +5701,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -2607,7 +2591,7 @@ index 616dd6d..9a99a73 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +5752,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +5744,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);

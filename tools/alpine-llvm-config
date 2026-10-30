@@ -2,8 +2,7 @@
 # llvm-config for the Alpine aarch64 sysroot in build/alpine/root, whose own
 # llvm-config is an aarch64 binary. Answers what meson asks when it looks
 # for LLVM; component names come from LLVM 21's build.
-L=$(dirname "$(readlink -f "$0")")/../build/alpine/root/usr/lib/llvm21
-L=$(readlink -f "$L")
+L=$(readlink -f "$(dirname "$(readlink -f "$0")")/../build/alpine/root/usr/lib/llvm21")
 F="-I$L/include -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS"
 for a; do
 	case $a in
@@ -23,7 +22,6 @@ for a; do
 	--assertion-mode) echo OFF ;;
 	--targets-built) echo AArch64 AMDGPU ARM AVR BPF Hexagon Lanai LoongArch Mips MSP430 NVPTX PowerPC RISCV Sparc SPIRV SystemZ VE WebAssembly X86 XCore ;;
 	--components) /usr/lib/llvm/22/bin/llvm-config --components ;;
-	--link-shared|--link-static) ;;
 	*) ;;
 	esac
 done
