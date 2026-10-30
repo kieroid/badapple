@@ -253,27 +253,54 @@ Without the phone, build Mesa with `-Dtools=drm-shim` and run under
 
 ### Graphics
 
-Clears work. A triangle's TA job completes and its vertex shader runs, but
-no pixels land yet, and the next TA job after a render that drew geometry
-hangs (InitBuffer done, TA started, never finished, no fault).
+Clears and flat triangles draw. Layouts are from AGXMetalA12
+(`RenderContext<G11>::encodeAndEmitRenderState` and the state it builds).
 
 | what | G11 |
 |---|---|
-| VDM vertex state | Apple's `VsStateToken`, 4 words, no presence bits: `0x48008040 \| class` (outputs <9 0x4000, <=24 0x2000, <=32 0x1800, <=64 0x1000, <=128 0x800, else 0x400), counts, `pipeline \| ceil(regs/8) << 2 \| length/64`, output count |
-| draw | `0x6e040000 \| prim << 8`, indexed `0x7e020000`; no size word |
+| VDM vertex state | Apple's `VsStateToken`, 4 words, no presence bits: `0x48000000 \| class` (outputs <9 0x4000, <=24 0x2000, <=32 0x1800, <=64 0x1000, <=128 0x800, else 0x400), plus 0x8040 with rasterization off, counts, `pipeline \| ceil(regs/8) << 2 \| length/64`, output count |
+| draw | `0x6e040000 \| prim << 8`, then count, instances, start; indexed `0x7e020000` |
 | counts | clear preshader bits 15:12, and textures 8:4 and samplers 11:9 when unused, or the USC loads state from USC 0 |
 | fragment shader word | the combined word plus imageblock: bit 8 uses local memory, 23:16 its size in 256 B, 25:24 log2 samples, 31:26 tile layout (32x32 47, 32x16 63, 16x16 54), 35:32 bytes per sample / 8 |
-| `st_var` | `0x01 \| last << 7 \| 1 << 8 \| reg << 9 \| slot << 16 \| 1 << 22 \| 0x8 << 28` |
+| `st_var` | `0x01 \| last << 7 \| 1 << 8 \| reg halves << 10 \| slot << 16 \| 1 << 22 \| 0x8 << 28` |
 | `st_tile`, `ld_tile` | `0x09`, `0x79`: register 14:7, offset byte 2, coordinates byte 4 with bit 49, mask 55:52, sample mask 63:56 |
+| scissor | 8 bytes, G13's without the Z range |
+
+PPP state goes in one block per group, in this order. The header bits are
+not G13's: G11 reads G13's depth bias/scissor bit 8 as half of the fragment
+shader.
+
+| header | words |
+|---|---|
+| 0x180 | fragment shader: counts, `pipeline \| ceil(regs/8) << 2`, varying table, varying count |
+| 0x20000 | output select, bit 16 always set |
+| 0x1f | fragment control, front face, front stencil, back face, back stencil |
+| 0xc00 \| (n - 1) << 12 | region clips, then viewports, no viewport control word |
+| 0x210000 | W clamp (1e-20), cull |
+| 0x20 | scissor \| depth bias << 16 |
+
+| word | bits |
+|---|---|
+| fragment control | 13:0 visibility index (offset / 4), 14 boolean, 15 visibility on, 16 scissor, 17 depth bias, 18 and 19 stencil, 21 tag write off, 26 tri merging off |
+| face | 7:0 stencil reference, 15:8 line width, 19:17 depth compare, 21 depth write off, 26:24 pass type, 31:28 object type (5 and 6 line and point filled triangles) |
+| stencil | as G13 |
+| cull | as G13, clamp W in bit 5, no cull 2 |
+| shader counts | as G13 up to bit 11; from 15 the tilebuffer words the shader writes, 0 while every render target is spilled |
 
 The block store (`imgwblk`) encoding is unknown and `ld_tile` hangs in the
 end of tile program, so Mesa spills every render target: the background and
 fragment programs write the image directly (PBE at state register 2 rt + 1,
 2D array, layer 0, 32-bit data) and the end of tile program does nothing.
 
+Not checked yet: varyings, depth and stencil tests, points, GL's last
+provoking vertex (the vertex token's p4).
+
 The kernel side needs the hwdata power limits (0 parks the engines), the
-scene at 3D command +0x30, and the event counter written at both
-finalizes.
+scene at 3D command +0x30, the event counter written at both finalizes, and
+the kext's tiling sizes: region headers `5 * macrotiles * utiles / 4`
+dwords, the region array and TPC in 4K pages at 0x50 and 0x80 bytes per
+macrotile utile, and a buffer manager whose block list entries are eight
+16K chunks.
 
 ## DRM
 

@@ -318,7 +318,7 @@ RUST_VER  := 1.98.1
 RUSTC     := $(RUST_DIR)/rustup/toolchains/$(RUST_VER)-x86_64-unknown-linux-gnu/bin/rustc
 MESA_A12  := $(MESA_SRC)/build-a12
 A12_CC    := clang --target=aarch64-alpine-linux-musl --sysroot=$(ALPINE)/root -fuse-ld=lld
-HOST_PATH := PATH=$(abspath $(MESA_BIN))/compiler/clc:$(abspath $(MESA_BIN))/asahi/clc:$(abspath $(MESA_BIN))/compiler/spirv:$(LLVM_DIR)/bin:$$PATH
+HOST_PATH := PKG_CONFIG_PATH=$(LLVM_DIR)/lib64/pkgconfig PATH=$(abspath $(dir $(RUSTC))):$(abspath $(MESA_BIN))/compiler/clc:$(abspath $(MESA_BIN))/asahi/clc:$(abspath $(MESA_BIN))/compiler/spirv:$(LLVM_DIR)/bin:$$PATH
 
 rootfs: $(ALPINE)/rootfs.tar
 

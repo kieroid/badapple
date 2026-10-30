@@ -945,10 +945,10 @@ index 000000000..3c3a930ad
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..d369c0258
+index 000000000..313426ede
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1094 @@
+@@ -0,0 +1,1106 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -1431,10 +1431,15 @@ index 000000000..d369c0258
 +}
 +
 +struct rn_tiling {
-+	u32 tiles_x, tiles_y, tpm_x, tpm_y, tpm, rgn, tpc_stride;
++	u32 tiles_x, tiles_y, tpm_x, tpm_y, tpm, rgn, rgn_pages, tpc_pages;
 +};
 +
-+/* Asahi's tiling parameters (queue/render.rs), 32x32 pixel tiles. */
++/*
++ * G11 tiling parameters, kext AGXRenderTargetMemoryG11 (FUN_fffffff0084d1ce0),
++ * 32x32 pixel tiles: rgn is the region headers per layer in dwords (5 per
++ * macrotile utile), rgn_pages and tpc_pages the region array and the TPC
++ * per layer in 4K pages (0x50 and 0x80 bytes per macrotile utile).
++ */
 +static void rn_tiling(u32 w, u32 h, u32 uw, u32 uh, struct rn_tiling *t)
 +{
 +	u32 upt = (32 / uw) * (32 / uh);
@@ -1444,8 +1449,9 @@ index 000000000..d369c0258
 +	t->tpm_x = ALIGN(DIV_ROUND_UP(t->tiles_x, 4), 4);
 +	t->tpm_y = ALIGN(DIV_ROUND_UP(t->tiles_y, 4), 4);
 +	t->tpm = t->tpm_x * t->tpm_y;
-+	t->rgn = ALIGN(5 * t->tpm * upt, 4) / 4;
-+	t->tpc_stride = 8 * upt * t->tpm / 4;
++	t->rgn = 5 * t->tpm * upt / 4;
++	t->rgn_pages = DIV_ROUND_UP(0x50 * t->tpm * upt, SZ_4K);
++	t->tpc_pages = DIV_ROUND_UP(0x80 * t->tpm * upt, SZ_4K);
 +}
 +
 +static void agx_render_init(struct agx_device *agx)
@@ -1458,8 +1464,8 @@ index 000000000..d369c0258
 +	agx->rn.frag = agx_alloc(agx, 0xd00, 0x100);	/* cmd, evc +0xa00, useq +0xb00 */
 +	agx->rn.scratch = agx_alloc(agx, 0x100, 0x100);
 +	agx->rn.init = agx_alloc(agx, 0x40, 0x40);
-+	agx->rn.tilemap = agx_alloc(agx, 4 * t.rgn * 16, AGX_PAGE);
-+	agx->rn.tpc = agx_alloc(agx, 4 * t.tpc_stride * 16, AGX_PAGE);
++	agx->rn.tilemap = agx_alloc(agx, t.rgn_pages * SZ_4K, AGX_PAGE);
++	agx->rn.tpc = agx_alloc(agx, t.tpc_pages * SZ_4K, AGX_PAGE);
 +	agx->rn.heapmeta = agx_alloc(agx, AGX_PAGE, AGX_PAGE);
 +	agx->rn.pre = agx_alloc(agx, 3 * AGX_PAGE, AGX_PAGE);
 +	bmd = agx->rn.bmd = agx_alloc(agx, 0x100, 0x100);
@@ -1469,9 +1475,12 @@ index 000000000..d369c0258
 +	blist = agx_alloc(agx, 0x20 * RN_MAX_BLOCKS, 0x100);
 +	bctl = agx_alloc(agx, 0x40, 0x40);
 +
-+	/* The firmware expands the block list into the page list: PA >> 12. */
-+	for (i = 0; i < RN_BLOCKS; i++)
-+		put32(agx, blist + i * 0x20, (agx->pa + pages) / SZ_4K + i * 32);
++	/*
++	 * The firmware expands the block list into the page list: each 0x20
++	 * byte entry is eight 16K chunks of a 128K block, PA >> 12.
++	 */
++	for (i = 0; i < RN_BLOCKS * 8; i++)
++		put32(agx, blist + i * 4, (agx->pa + pages) / SZ_4K + i * 4);
 +	put32(agx, bctl, RN_BLOCKS);
 +	put32(agx, bctl + 4, RN_BLOCKS);
 +
@@ -1483,7 +1492,9 @@ index 000000000..d369c0258
 +	put32(agx, bmd + 0x2c, RN_MAX_BLOCKS);
 +	put64(agx, bmd + 0x38, gva(blist));
 +	put64(agx, bmd + 0x40, fw_va(bctl));
-+	put32(agx, bmd + 0x58, SZ_128K);
++	/* G11 kext (FUN_fffffff0084df7dc): +0x48 -1, +0x58 the page size */
++	put32(agx, bmd + 0x48, -1);
++	put32(agx, bmd + 0x58, SZ_16K);
 +	put64(agx, bmd + 0x64, fw_va(agx_alloc(agx, 0x40, 0x40)));
 +	put32(agx, bmd + 0x7c, 1);
 +	put32(agx, bmd + 0x80, RN_MAX_BLOCKS * 32);
@@ -1493,9 +1504,9 @@ index 000000000..d369c0258
 +	 * Buffer manager slot 0, which is Asahi's Scene too: PM state buffers
 +	 * at +0xa0..+0xb0, stats at +0xbc (zeroed at every 3D retire).
 +	 */
-+	i = agx_alloc(agx, SZ_64K, AGX_PAGE);
-+	put64(agx, bms + 0xa0, gva(i));
-+	put64(agx, bms + 0xa8, gva(i));
++	/* MTileArray, MList and VHeap table (kext "Parameter Scene Allocations") */
++	put64(agx, bms + 0xa0, gva(agx_alloc(agx, SZ_64K, AGX_PAGE)));
++	put64(agx, bms + 0xa8, gva(agx_alloc(agx, SZ_64K, AGX_PAGE)));
 +	put64(agx, bms + 0xb0, gva(agx_alloc(agx, SZ_64K, AGX_PAGE)));
 +	put64(agx, bms + 0xbc, fw_va(agx_alloc(agx, 0x100, 0x40)));
 +}
@@ -1531,17 +1542,17 @@ index 000000000..d369c0258
 +	u32 stats = rn_stats(agx, 0x170) + 4, fin = useq + 0x88, i;
 +	const u64 r64[] = {
 +		0x200, 0x1e3ce5081e3ce508, gva(agx->rn.tilemap), gva(agx->rn.tpc), utile,
-+		r->ppp_multisamplectl, gva(agx->rn.heapmeta) | BIT_ULL(63),
++		r->ppp_multisamplectl, gva(agx->rn.heapmeta),
 +		gva(agx->rn.pre), gva(agx->rn.pre + AGX_PAGE), 1,
 +		gva(agx->rn.pre + 2 * AGX_PAGE), r->vdm_ctrl_stream_base, 0,
 +	};
 +	const u32 r32[] = {
-+		t->rgn | 0x20000, 0x88, r->ppp_ctrl | 2,
++		t->rgn_pages | 0x20000, 0x88, r->ppp_ctrl | 2,
 +		(r->width_px - 1) | (r->height_px - 1) << 16,
 +		(t->tiles_y - 1) << 12 | (t->tiles_x - 1),
 +		3 * t->tpm_x | 2 * t->tpm_x << 9 | t->tpm_x << 18,
 +		3 * t->tpm_y | 2 * t->tpm_y << 9 | t->tpm_y << 18,
-+		t->tpm, t->tpc_stride, 0x100, 0x8000,
++		t->tpm, t->tpc_pages, 0x100, 0x8000,
 +	};
 +
 +	memset(agx->buf + cmd, 0, 0x900);
@@ -1626,8 +1637,8 @@ index 000000000..d369c0258
 +		r->stencil.comp_base, r->stencil.comp_stride,
 +		r->stencil.comp_base, r->stencil.comp_stride,
 +		gva(agx->rn.tilemap), gva(agx->rn.heapmeta),
-+		/* layer stride in dwords, macrotile stride (rgn_size) */
-+		16 * t->rgn | (u64)t->rgn << 32,
++		/* region headers in dwords, region size in pages */
++		t->rgn | (u64)t->rgn_pages << 32,
 +		0x280 | (r->flags & DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES ? 0x10000 : 0), 0,
 +	};
 +	const u32 r32[] = {
@@ -1919,6 +1930,7 @@ index 000000000..d369c0258
 +		seq_printf(m, "chan %d state %#x ring %#x\n", i, agx->chan_state[i],
 +			   agx->chan_ring[i]);
 +	seq_printf(m, "ctx %*pb\n", AGX_NR_CTX, agx->ctx_used);
++	seq_printf(m, "rn ta %#x frag %#x\n", agx->rn.ta, agx->rn.frag);
 +	return 0;
 +}
 +DEFINE_SHOW_ATTRIBUTE(agx_dbg);

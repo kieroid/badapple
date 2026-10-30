@@ -59,7 +59,7 @@ often fails and the phone retries, so give it a minute.
 
 | Display | Touch | USB | Storage | SMP | cpufreq | Wifi | Bluetooth | Audio | Cellular | GPU |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :x: |
+| :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :construction: |
 
 Full list in [docs](docs/README.md#status).
 

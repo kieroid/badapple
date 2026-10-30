@@ -13,7 +13,7 @@ Registers, gotchas, and things that turned out wrong.
 | [touch.md](touch.md) | touch controller, SPI, firmware |
 | [cpufreq.md](cpufreq.md) | DVFS, voltage, thermal |
 | [wireless.md](wireless.md) | PCIe, wifi, Bluetooth |
-| [gpu.md](gpu.md) | GPU coprocessor, MMU, compute |
+| [gpu.md](gpu.md) | GPU coprocessor, MMU, compute, graphics |
 | [debugging.md](debugging.md) | tips and corrections |
 
 ## Status
@@ -35,7 +35,9 @@ Registers, gotchas, and things that turned out wrong.
 | Boost, cpuidle | :x: |
 | PCIe, wifi, Bluetooth | :white_check_mark: |
 | Audio, cellular, camera | :x: |
-| GPU | compute: OpenCL through Rusticl on a DRM render node with the Asahi uAPI |
+| GPU compute, OpenCL through Rusticl | :white_check_mark: |
+| GPU graphics, GLES clears and flat triangles | :white_check_mark: |
+| GPU varyings, depth, display output | :x: |
 
 - Wifi joins WPA2 networks on 2.4 and 5 GHz, with Alpine's `iw` and
   `wpa_supplicant` brought in by hand.
@@ -50,4 +52,5 @@ Registers, gotchas, and things that turned out wrong.
 4. Touch has no power off and no force sensor.
 5. Wifi and Bluetooth need their tools brought in. Bluetooth pairing is
    untested, it needs `bluetoothd`.
-6. GPU: compute only (OpenCL through Rusticl), no graphics.
+6. GPU graphics draws flat triangles only, offscreen. Varyings, depth and
+   stencil are untested, and there is no display output.
