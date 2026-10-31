@@ -253,7 +253,7 @@ Without the phone, build Mesa with `-Dtools=drm-shim` and run under
 
 ### Graphics
 
-Clears and flat triangles draw. Layouts are from AGXMetalA12
+Clears, triangles and smooth varyings draw. Layouts are from AGXMetalA12
 (`RenderContext<G11>::encodeAndEmitRenderState` and the state it builds).
 
 | what | G11 |
@@ -263,15 +263,18 @@ Clears and flat triangles draw. Layouts are from AGXMetalA12
 | counts | clear preshader bits 15:12, and textures 8:4 and samplers 11:9 when unused, or the USC loads state from USC 0 |
 | fragment shader word | the combined word plus imageblock: bit 8 uses local memory, 23:16 its size in 256 B, 25:24 log2 samples, 31:26 tile layout (32x32 47, 32x16 63, 16x16 54), 35:32 bytes per sample / 8 |
 | `st_var` | `0x01 \| last << 7 \| 1 << 8 \| reg halves << 10 \| slot << 16 \| 1 << 22 \| 0x8 << 28` |
+| `iter`, `iterproj` | `0x11`, `0x51` (G13's minus 0x10; 0x21 is the texture sample): destination 15:8, cf 21:16, channels 23:22, W's cf 29:24; bit 31 makes it 8 bytes |
 | `st_tile`, `ld_tile` | `0x09`, `0x79`: register 14:7, offset byte 2, coordinates byte 4 with bit 49, mask 55:52, sample mask 63:56 |
 | scissor | 8 bytes, G13's without the Z range |
 
-PPP state goes in one block per group, in this order. The header bits are
+PPP state goes in one block per group, in this order (the varying counts
+come before the vertex state). The header bits are
 not G13's: G11 reads G13's depth bias/scissor bit 8 as half of the fragment
 shader.
 
 | header | words |
 |---|---|
+| 0xc0000 | varying counts, 32 and 16 bit, sent with the vertex state |
 | 0x180 | fragment shader: counts, `pipeline \| ceil(regs/8) << 2`, varying table, varying count |
 | 0x20000 | output select, bit 16 always set |
 | 0x1f | fragment control, front face, front stencil, back face, back stencil |
@@ -292,7 +295,8 @@ end of tile program, so Mesa spills every render target: the background and
 fragment programs write the image directly (PBE at state register 2 rt + 1,
 2D array, layer 0, 32-bit data) and the end of tile program does nothing.
 
-Not checked yet: varyings, depth and stencil tests, points, GL's last
+Not checked yet: flat varyings (`ldcf`), sample and centroid
+interpolation, depth and stencil tests, points, GL's last
 provoking vertex (the vertex token's p4).
 
 The kernel side needs the hwdata power limits (0 parks the engines), the
