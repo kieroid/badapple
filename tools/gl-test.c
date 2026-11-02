@@ -3,8 +3,9 @@
 //
 // GLES2 on the A12 GPU without a display: EGL surfaceless, a 300x200
 // framebuffer object (3x2 macrotiles), a clear, a triangle, an
-// interpolated gradient, a flat varying, a point, a line, and depth and
-// stencil tests, each read back and checked on the CPU.
+// interpolated gradient, a flat varying, a point, a line, textures,
+// blending, depth and stencil tests, and 3000 draws, each read back and
+// checked on the CPU.
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -81,13 +82,15 @@ int main(void)
 	static const GLfloat mid[] = { 0, 0 };
 	/* across row 50, H / 4 */
 	static const GLfloat row[] = { -1, -0.495, 1, -0.495 };
+	/* red, green, blue and white, bottom row first */
+	static const unsigned texels[] = { 0xff0000ff, 0xff00ff00, 0xffff0000, 0xffffffff };
 	PFNEGLGETPLATFORMDISPLAYEXTPROC get_display =
 		(void *)eglGetProcAddress("eglGetPlatformDisplayEXT");
 	EGLDisplay dpy = get_display(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
 	EGLContext ctx;
 	EGLConfig cfg;
 	EGLint n;
-	GLuint fb, rb, db, sb, prog;
+	GLuint fb, rb, db, sb, tex, prog;
 	GLint z, c;
 	int fail = 0;
 
@@ -191,6 +194,48 @@ int main(void)
 	fail |= check("line edge", W / 2, H / 4 + 1, 0xff0000ff, 0);
 
 	/*
+	 * A 2x2 texture over the whole target: nearest gives one texel per
+	 * quadrant, linear blends all four in the middle.
+	 */
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, texels);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	program("attribute vec2 p; varying vec2 v;"
+		"void main() { v = p * 0.5 + 0.5; gl_Position = vec4(p, 0, 1); }",
+		"precision mediump float; uniform sampler2D t; varying vec2 v;"
+		"void main() { gl_FragColor = texture2D(t, v); }");
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, full);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	for (int i = 0; i < 4; i++)
+		fail |= check("texture", (1 + i % 2 * 2) * W / 4, (1 + i / 2 * 2) * H / 4,
+			      texels[i], 0);
+
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("linear", W / 2, H / 2, 0xff808080, 2);
+
+	/* Half transparent blue blended over the red clear. */
+	program("attribute vec2 p; void main() { gl_Position = vec4(p, 0, 1); }",
+		"void main() { gl_FragColor = vec4(0, 0, 1, 0.5); }");
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glDisable(GL_BLEND);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("blend", W / 2, H / 2, 0xbf800080, 1);
+
+	/*
 	 * Depth, LESS against a clear to 0.7: a near green triangle (depth
 	 * 0.5) lands, a far blue full screen one (0.75) nowhere. A second
 	 * render loads the stored depth and draws white at 0.625, only
@@ -265,6 +310,18 @@ int main(void)
 	grid();
 	fail |= check("stencil load", 8, 8, 0xffffffff, 0);
 	fail |= check("stencil fail", W - 8, H - 8, 0xffff0000, 0);
+
+	/* 3000 draws in one render, so their pipelines span several pool slabs. */
+	glDisable(GL_STENCIL_TEST);
+	for (int i = 0; i < 3000; i++) {
+		glUniform4f(c, i % 2, i % 3 / 2.0, 0, 1);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
+	glUniform4f(c, 0, 1, 1, 1);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("draws", W / 2, H / 2, 0xffffff00, 0);
 
 	printf("%s\n", fail ? "FAIL" : "all ok");
 	eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

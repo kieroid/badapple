@@ -213,7 +213,7 @@ same kernels built for G13 (iPhone13,2 IPSWs for iOS 16.6.1 and 18.6.2).
 
 | what | G11 |
 |---|---|
-| texture, PBE descriptors | as G13, but word 0 from bit 3 up sits one bit lower |
+| texture, PBE descriptors | as G13, but word 0 from bit 3 up sits one bit lower; texture word 1 bit 38 (G13's mipmapped bit, PBE bit 57) says a companion buffer follows in word 2 |
 | sampler | as G13, 8 bytes |
 | sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinates 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8, coordinate count 77:76 |
 | image write | 8 bytes, `0x31`: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32, dimension 9:8 as for samples. Arrays: `0xb1`, bit 63 and the sample's tail with 3 coordinates, 10 bytes. Without it an array write is dropped |
@@ -258,8 +258,8 @@ Without the phone, build Mesa with `-Dtools=drm-shim` and run under
 
 ### Graphics
 
-Clears, triangles, points, lines, smooth and flat varyings, and depth and
-stencil tests draw. Layouts are from AGXMetalA12
+Clears, triangles, points, lines, smooth and flat varyings, textures,
+blending, and depth and stencil tests draw. Layouts are from AGXMetalA12
 (`RenderContext<G11>::encodeAndEmitRenderState` and the state it builds).
 
 | what | G11 |
@@ -300,6 +300,8 @@ The block store (`imgwblk`) encoding is unknown and `ld_tile` hangs in the
 end of tile program, so Mesa spills every render target: the background and
 fragment programs write the image directly (PBE at state register 2 rt + 1,
 2D array, layer 0, 32-bit data) and the end of tile program does nothing.
+For the same reason Mesa's compute blitter, which stores through `imgwblk`,
+is off: blits and `glGenerateMipmap` draw.
 
 Depth and stencil need little new: G11's ZLS control word and the depth and
 stencil load and store registers are G13's (AGXMetalA12 `Framebuffer<G11>`
@@ -310,6 +312,12 @@ the integer: the float clears to the wrong depth. With a stencil attachment
 Apple also sets ZLS bits 62 and 63; without them loading stencil hangs the
 3D pass.
 
+Mip levels do not work: every level samples as level 0, and rendering to
+level 1 lands on level 0. The level fields, sampler and level offsets match
+AGXMetalA12 (`TextureGen3<G11>::texBaseAddressesUpdated`,
+`SamplerStateEncoderGen3<G11>`, `PBEStateEncoderGen5<G11>`,
+`Texture<G11>::getLevelOffset`), so something else gates them.
+
 Not checked yet: multisampling, so sample and centroid interpolation
 (centroid never shows up in Apple's code; Mesa uses G13's value).
 
@@ -319,7 +327,9 @@ utiles per macrotile in 3D register 0x16038 (without it only the first
 macrotile renders), and the kext's tiling sizes: region headers
 `5 * macrotiles * utiles / 4` dwords, the region array and TPC in 4K pages
 at 0x50 and 0x80 bytes per macrotile utile, and a buffer manager whose block
-list entries are eight 16K chunks.
+list entries are eight 16K chunks. The parameter heap behind it is 8 MB of
+its own; 1 MB ran out at 3000 full screen triangles. There are no partial
+renders yet, so a frame that fills the heap hangs the TA.
 
 ## DRM
 

@@ -944,10 +944,10 @@ index 000000000..3c3a930ad
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..36c818d1d
+index 000000000..512eacd9a
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1087 @@
+@@ -0,0 +1,1093 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -1413,16 +1413,15 @@ index 000000000..36c818d1d
 +/*
 + * Render: a TA (tiling) job on the TA queue, then a 3D (fragment) job on the
 + * 3D queue, kicked by agx_complete() once the TA stamp lands. Both use one
-+ * buffer manager (the parameter manager's heap) and one tiling buffer set
-+ * sized for the largest target, in the chunk, which every context maps at
-+ * AGX_CHUNK_GVA. Layouts: kext FUN_fffffff0084d22c8 (TA registers),
++ * buffer manager (the parameter manager's heap, outside the chunk) and one
++ * tiling buffer set sized for the largest target, in the chunk, which every
++ * context maps at AGX_CHUNK_GVA. Layouts: kext FUN_fffffff0084d22c8 (TA registers),
 + * FUN_fffffff0084cd07c (3D registers), firmware FUN_00017018 (microsequence).
 + */
 +#define RN_MAX_W	2048
 +#define RN_MAX_H	4096
-+#define RN_PAGES	256		/* 4K heap pages, in 128K blocks */
-+#define RN_BLOCKS	(RN_PAGES / 32)
-+#define RN_MAX_BLOCKS	64
++#define RN_BLOCKS	64		/* parameter heap, 128K blocks */
++#define RN_MAX_BLOCKS	128
 +
 +static u64 gva(u32 o)
 +{
@@ -1453,10 +1452,11 @@ index 000000000..36c818d1d
 +	t->tpc_pages = DIV_ROUND_UP(0x80 * t->tpm * upt, SZ_4K);
 +}
 +
-+static void agx_render_init(struct agx_device *agx)
++static int agx_render_init(struct agx_device *agx)
 +{
 +	struct rn_tiling t;
-+	u32 bmd, bms, pages, plist, blist, bctl, i;
++	u32 bmd, bms, plist, blist, bctl, i;
++	dma_addr_t pages;
 +
 +	rn_tiling(RN_MAX_W, RN_MAX_H, 16, 16, &t);
 +	agx->rn.ta = agx_alloc(agx, 0x900, 0x100);	/* cmd, evc +0x600, useq +0x700 */
@@ -1470,16 +1470,19 @@ index 000000000..36c818d1d
 +	bmd = agx->rn.bmd = agx_alloc(agx, 0x100, 0x100);
 +	bms = agx->rn.bms = agx_alloc(agx, 0x100, 0x100);
 +	plist = agx_alloc(agx, RN_MAX_BLOCKS * 32 * 4, AGX_PAGE);
-+	pages = agx_alloc(agx, RN_PAGES * SZ_4K, SZ_128K);
 +	blist = agx_alloc(agx, 0x20 * RN_MAX_BLOCKS, 0x100);
 +	bctl = agx_alloc(agx, 0x40, 0x40);
++
++	/* 8M of heap is too much for the chunk; 1M ran out at 3000 draws */
++	if (!dmam_alloc_coherent(agx->dev, RN_BLOCKS * SZ_128K, &pages, GFP_KERNEL))
++		return -ENOMEM;
 +
 +	/*
 +	 * The firmware expands the block list into the page list: each 0x20
 +	 * byte entry is eight 16K chunks of a 128K block, PA >> 12.
 +	 */
 +	for (i = 0; i < RN_BLOCKS * 8; i++)
-+		put32(agx, blist + i * 4, (agx->pa + pages) / SZ_4K + i * 4);
++		put32(agx, blist + i * 4, pages / SZ_4K + i * 4);
 +	put32(agx, bctl, RN_BLOCKS);
 +	put32(agx, bctl + 4, RN_BLOCKS);
 +
@@ -1508,6 +1511,7 @@ index 000000000..36c818d1d
 +	put64(agx, bms + 0xa8, gva(agx_alloc(agx, SZ_64K, AGX_PAGE)));
 +	put64(agx, bms + 0xb0, gva(agx_alloc(agx, SZ_64K, AGX_PAGE)));
 +	put64(agx, bms + 0xbc, fw_va(agx_alloc(agx, 0x100, 0x40)));
++	return 0;
 +}
 +
 +int agx_fw_render_check(const struct drm_asahi_cmd_render *r)
@@ -2015,7 +2019,9 @@ index 000000000..36c818d1d
 +		agx->slot[i].useq = agx_alloc(agx, 0x200, 0x100);
 +		agx->slot[i].scratch = agx_alloc(agx, 0x100, 0x100);
 +	}
-+	agx_render_init(agx);
++	ret = agx_render_init(agx);
++	if (ret)
++		return ret;
 +	agx_debugfs(agx);
 +	dev_info(dev, "firmware up, chunk at %pad\n", &agx->pa);
 +	return 0;
