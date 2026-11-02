@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0+ OR MIT
 // Copyright (c) 2026 kiki <kieran@lavato.net>
 //
-// GLES2 on the A12 GPU without a display: EGL surfaceless, a 64x64
-// framebuffer object, a clear, a triangle and an interpolated gradient,
-// each read back and checked on the CPU.
+// GLES2 on the A12 GPU without a display: EGL surfaceless, a 300x200
+// framebuffer object (3x2 macrotiles), a clear, a triangle, an
+// interpolated gradient, a flat varying, a point, a line, and depth and
+// stencil tests, each read back and checked on the CPU.
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -11,16 +12,16 @@
 #include <GLES2/gl2ext.h>
 #include <stdio.h>
 
-#define W 64
-#define H 64
+#define W 300
+#define H 200
 
 static unsigned px[W * H];
 
-/* Every 8th pixel of every 8th row, to see where writes land. */
+/* An 8x8 grid of samples, to see where writes land. */
 static void grid(void)
 {
-	for (int y = 4; y < H; y += 8) {
-		for (int x = 4; x < W; x += 8)
+	for (int y = H / 16; y < H; y += H / 8) {
+		for (int x = W / 16; x < W; x += W / 8)
 			printf(" %08x", px[y * W + x]);
 		printf("\n");
 	}
@@ -59,7 +60,7 @@ static GLuint shader(GLenum type, const char *src)
 	return s;
 }
 
-static void program(const char *vs, const char *fs)
+static GLuint program(const char *vs, const char *fs)
 {
 	GLuint prog = glCreateProgram();
 
@@ -68,6 +69,7 @@ static void program(const char *vs, const char *fs)
 	glBindAttribLocation(prog, 0, "p");
 	glLinkProgram(prog);
 	glUseProgram(prog);
+	return prog;
 }
 
 int main(void)
@@ -75,15 +77,22 @@ int main(void)
 	static const EGLint ctx_attr[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
 	static const GLfloat tri[] = { -1, -1, 1, -1, -1, 1 };
 	static const GLfloat full[] = { -1, -1, 3, -1, -1, 3 };
+	static const GLfloat rgb[] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+	static const GLfloat mid[] = { 0, 0 };
+	/* across row 50, H / 4 */
+	static const GLfloat row[] = { -1, -0.495, 1, -0.495 };
 	PFNEGLGETPLATFORMDISPLAYEXTPROC get_display =
 		(void *)eglGetProcAddress("eglGetPlatformDisplayEXT");
 	EGLDisplay dpy = get_display(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
 	EGLContext ctx;
 	EGLConfig cfg;
 	EGLint n;
-	GLuint fb, rb;
+	GLuint fb, rb, db, sb, prog;
+	GLint z, c;
 	int fail = 0;
 
+	/* unbuffered, so a GPU hang shows which check it stopped at */
+	setvbuf(stdout, NULL, _IONBF, 0);
 	if (!eglInitialize(dpy, NULL, NULL) || !eglBindAPI(EGL_OPENGL_ES_API)) {
 		fprintf(stderr, "EGL init failed\n");
 		return 1;
@@ -141,6 +150,121 @@ int main(void)
 
 		fail |= check("gradient", x, y, 0xff800000 | g << 8 | r, 2);
 	}
+
+	/*
+	 * A flat varying: red, green and blue corners come out all blue, the
+	 * last vertex's (GL's provoking vertex).
+	 */
+	program("#version 300 es\n"
+		"layout(location = 0) in vec2 p; layout(location = 1) in vec3 k; flat out vec3 v;"
+		"void main() { v = k; gl_Position = vec4(p, 0, 1); }",
+		"#version 300 es\n"
+		"precision mediump float; flat in vec3 v; out vec4 o;"
+		"void main() { o = vec4(v, 1); }");
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, rgb);
+	glEnableVertexAttribArray(1);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glDisableVertexAttribArray(1);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("flat", 8, 8, 0xffff0000, 0);
+	fail |= check("flat", W - 8, H - 8, 0xffff0000, 0);
+
+	/*
+	 * A yellow 16 pixel point in the middle and a line along row 50, the
+	 * colour through a varying (the point size goes after varyings).
+	 */
+	program("attribute vec2 p; varying vec4 v;"
+		"void main() { v = vec4(1, 1, 0, 1); gl_PointSize = 16.0; gl_Position = vec4(p, 0, 1); }",
+		"precision mediump float; varying vec4 v; void main() { gl_FragColor = v; }");
+	glClear(GL_COLOR_BUFFER_BIT);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, mid);
+	glDrawArrays(GL_POINTS, 0, 1);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, row);
+	glDrawArrays(GL_LINES, 0, 2);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("point", W / 2 - 8, H / 2 + 7, 0xff00ffff, 0);
+	fail |= check("point edge", W / 2 + 8, H / 2, 0xff0000ff, 0);
+	fail |= check("line", 3, H / 4, 0xff00ffff, 0);
+	fail |= check("line", W - 3, H / 4, 0xff00ffff, 0);
+	fail |= check("line edge", W / 2, H / 4 + 1, 0xff0000ff, 0);
+
+	/*
+	 * Depth, LESS against a clear to 0.7: a near green triangle (depth
+	 * 0.5) lands, a far blue full screen one (0.75) nowhere. A second
+	 * render loads the stored depth and draws white at 0.625, only
+	 * outside the triangle.
+	 */
+	glGenRenderbuffers(1, &db);
+	glBindRenderbuffer(GL_RENDERBUFFER, db);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, W, H);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, db);
+	prog = program("attribute vec2 p; uniform float z; void main() { gl_Position = vec4(p, z, 1); }",
+		       "precision mediump float; uniform vec4 c; void main() { gl_FragColor = c; }");
+	z = glGetUniformLocation(prog, "z");
+	c = glGetUniformLocation(prog, "c");
+	glEnable(GL_DEPTH_TEST);
+	glClearDepthf(0.7);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glUniform1f(z, 0);
+	glUniform4f(c, 0, 1, 0, 1);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, tri);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glUniform1f(z, 0.5);
+	glUniform4f(c, 0, 0, 1, 1);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, full);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("depth near", 8, 8, 0xff00ff00, 0);
+	fail |= check("depth far", W - 8, H - 8, 0xff0000ff, 0);
+
+	glUniform1f(z, 0.25);
+	glUniform4f(c, 1, 1, 1, 1);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("depth load", 8, 8, 0xff00ff00, 0);
+	fail |= check("depth pass", W - 8, H - 8, 0xffffffff, 0);
+
+	/*
+	 * Stencil, cleared to 3: the triangle increments it to 4, then blue
+	 * lands where it is still 3. A second render loads it and draws white
+	 * where it is 4.
+	 */
+	glDisable(GL_DEPTH_TEST);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, 0);
+	glGenRenderbuffers(1, &sb);
+	glBindRenderbuffer(GL_RENDERBUFFER, sb);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_STENCIL_INDEX8, W, H);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, sb);
+	glEnable(GL_STENCIL_TEST);
+	glClearStencil(3);
+	glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+	glUniform1f(z, 0);
+	glStencilFunc(GL_ALWAYS, 0, 0xff);
+	glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+	glUniform4f(c, 0, 1, 0, 1);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, tri);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glStencilFunc(GL_EQUAL, 3, 0xff);
+	glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+	glUniform4f(c, 0, 0, 1, 1);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, full);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("stencil write", 8, 8, 0xff00ff00, 0);
+	fail |= check("stencil clear", W - 8, H - 8, 0xffff0000, 0);
+
+	glStencilFunc(GL_EQUAL, 4, 0xff);
+	glUniform4f(c, 1, 1, 1, 1);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("stencil load", 8, 8, 0xffffffff, 0);
+	fail |= check("stencil fail", W - 8, H - 8, 0xffff0000, 0);
 
 	printf("%s\n", fail ? "FAIL" : "all ok");
 	eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

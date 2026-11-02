@@ -944,10 +944,10 @@ index 000000000..3c3a930ad
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..27d314f39
+index 000000000..36c818d1d
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1084 @@
+@@ -0,0 +1,1087 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -1642,7 +1642,10 @@ index 000000000..27d314f39
 +	};
 +	const u32 r32[] = {
 +		r->eot.rsrc_spec, r->eot.usc, 0, 0, r->isp_merge_upper_x,
-+		r->isp_merge_upper_y, 0, 0, 0, tib, r->isp_bgobjdepth, r->isp_bgobjvals,
++		r->isp_merge_upper_y, 0, 0,
++		/* utiles per macrotile, G13 JobParameters2 +0x20 */
++		t->tpm_y * 32 / r->utile_height_px | t->tpm_x * 32 / r->utile_width_px << 16,
++		tib, r->isp_bgobjdepth, r->isp_bgobjvals,
 +		/* kext constants 0xfffffff0070cd8a0 */
 +		0x1f, 0, 0, 1, 0,
 +	};

@@ -245,25 +245,31 @@ make rootfs
 build/venv/bin/python tools/tsh.py "chroot /mnt/a env RUSTICL_ENABLE=asahi cl-test"
 ```
 
-`gl-test` draws into a 64x64 renderbuffer with EGL surfaceless and checks
-the result on the CPU.
+`gl-test` draws into a 300x200 renderbuffer, 3x2 macrotiles, with EGL
+surfaceless and checks the result on the CPU. Run it detached, since a
+command left running when `tsh.py` disconnects is killed:
+
+```sh
+build/venv/bin/python tools/tsh.py "setsid chroot /mnt/a gl-test > /mnt/a/tmp/gl.txt 2>&1 < /dev/null &"
+```
 
 Without the phone, build Mesa with `-Dtools=drm-shim` and run under
 `LD_PRELOAD=libasahi_noop_drm_shim.so ASAHI_MESA_DEBUG=trace`.
 
 ### Graphics
 
-Clears, triangles and smooth varyings draw. Layouts are from AGXMetalA12
+Clears, triangles, points, lines, smooth and flat varyings, and depth and
+stencil tests draw. Layouts are from AGXMetalA12
 (`RenderContext<G11>::encodeAndEmitRenderState` and the state it builds).
 
 | what | G11 |
 |---|---|
-| VDM vertex state | Apple's `VsStateToken`, 4 words, no presence bits: `0x48000000 \| class` (outputs <9 0x4000, <=24 0x2000, <=32 0x1800, <=64 0x1000, <=128 0x800, else 0x400), plus 0x8040 with rasterization off, counts, `pipeline \| ceil(regs/8) << 2 \| length/64`, output count |
+| VDM vertex state | Apple's `VsStateToken`, 4 words, no presence bits: `0x48000000 \| class` (outputs <9 0x4000, <=24 0x2000, <=32 0x1800, <=64 0x1000, <=128 0x800, else 0x400), plus 0x8040 with rasterization off and the provoking vertex in 2:1, counts, `pipeline \| ceil(regs/8) << 2 \| length/64`, output count |
 | draw | `0x6e040000 \| prim << 8`, then count, instances, start; indexed `0x7e020000` |
 | counts | clear preshader bits 15:12, and textures 8:4 and samplers 11:9 when unused, or the USC loads state from USC 0 |
 | fragment shader word | the combined word plus imageblock: bit 8 uses local memory, 23:16 its size in 256 B, 25:24 log2 samples, 31:26 tile layout (32x32 47, 32x16 63, 16x16 54), 35:32 bytes per sample / 8 |
 | `st_var` | `0x01 \| last << 7 \| 1 << 8 \| reg halves << 10 \| slot << 16 \| 1 << 22 \| 0x8 << 28` |
-| `iter`, `iterproj` | `0x11`, `0x51` (G13's minus 0x10; 0x21 is the texture sample): destination 15:8, cf 21:16, channels 23:22, W's cf 29:24; bit 31 makes it 8 bytes |
+| `iter`, `iterproj`, `ldcf` | `0x11`, `0x51`, `0x91` (G13's minus 0x10; 0x21 is the texture sample): destination 15:8, cf 21:16, channels 23:22, W's cf 29:24; bit 31 adds G13's upper word (sample index, interpolation) |
 | `st_tile`, `ld_tile` | `0x09`, `0x79`: register 14:7, offset byte 2, coordinates byte 4 with bit 49, mask 55:52, sample mask 63:56 |
 | scissor | 8 bytes, G13's without the Z range |
 
@@ -276,7 +282,7 @@ shader.
 |---|---|
 | 0xc0000 | varying counts, 32 and 16 bit, sent with the vertex state |
 | 0x180 | fragment shader: counts, `pipeline \| ceil(regs/8) << 2`, varying table, varying count |
-| 0x20000 | output select, bit 16 always set |
+| 0x20000 | output select, bit 16 always set, 31:24 the point size's output word plus one |
 | 0x1f | fragment control, front face, front stencil, back face, back stencil |
 | 0xc00 \| (n - 1) << 12 | region clips, then viewports, no viewport control word |
 | 0x210000 | W clamp (1e-20), cull |
@@ -295,16 +301,25 @@ end of tile program, so Mesa spills every render target: the background and
 fragment programs write the image directly (PBE at state register 2 rt + 1,
 2D array, layer 0, 32-bit data) and the end of tile program does nothing.
 
-Not checked yet: flat varyings (`ldcf`), sample and centroid
-interpolation, depth and stencil tests, points, GL's last
-provoking vertex (the vertex token's p4).
+Depth and stencil need little new: G11's ZLS control word and the depth and
+stencil load and store registers are G13's (AGXMetalA12 `Framebuffer<G11>`
+and the kext's copy into the 3D command), and the depth compare in the face
+word is Metal's compare function, the same order as G13. AGXMetalA12 passes
+a Z16 clear depth as `(float)(int)(depth * 65535)`, but the register wants
+the integer: the float clears to the wrong depth. With a stencil attachment
+Apple also sets ZLS bits 62 and 63; without them loading stencil hangs the
+3D pass.
+
+Not checked yet: multisampling, so sample and centroid interpolation
+(centroid never shows up in Apple's code; Mesa uses G13's value).
 
 The kernel side needs the hwdata power limits (0 parks the engines), the
-scene at 3D command +0x30, the event counter written at both finalizes, and
-the kext's tiling sizes: region headers `5 * macrotiles * utiles / 4`
-dwords, the region array and TPC in 4K pages at 0x50 and 0x80 bytes per
-macrotile utile, and a buffer manager whose block list entries are eight
-16K chunks.
+scene at 3D command +0x30, the event counter written at both finalizes, the
+utiles per macrotile in 3D register 0x16038 (without it only the first
+macrotile renders), and the kext's tiling sizes: region headers
+`5 * macrotiles * utiles / 4` dwords, the region array and TPC in 4K pages
+at 0x50 and 0x80 bytes per macrotile utile, and a buffer manager whose block
+list entries are eight 16K chunks.
 
 ## DRM
 
