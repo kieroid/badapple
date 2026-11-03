@@ -265,12 +265,13 @@ blending, and depth and stencil tests draw. Layouts are from AGXMetalA12
 | what | G11 |
 |---|---|
 | VDM vertex state | Apple's `VsStateToken`, 4 words, no presence bits: `0x48000000 \| class` (outputs <9 0x4000, <=24 0x2000, <=32 0x1800, <=64 0x1000, <=128 0x800, else 0x400), plus 0x8040 with rasterization off and the provoking vertex in 2:1, counts, `pipeline \| ceil(regs/8) << 2 \| length/64`, output count |
-| draw | `0x6e040000 \| prim << 8`, then count, instances, start; indexed `0x7e020000` |
+| draw | `0x6e040000 \| prim << 8`, then count, instances, start; indexed `0x7e020000 \| index size << 17 \| buffer hi`, then the buffer's low word, count, instances, base vertex |
 | counts | clear preshader bits 15:12, and textures 8:4 and samplers 11:9 when unused, or the USC loads state from USC 0 |
 | fragment shader word | the combined word plus imageblock: bit 8 uses local memory, 23:16 its size in 256 B, 25:24 log2 samples, 31:26 tile layout (32x32 47, 32x16 63, 16x16 54), 35:32 bytes per sample / 8 |
 | `st_var` | `0x01 \| last << 7 \| 1 << 8 \| reg halves << 10 \| slot << 16 \| 1 << 22 \| 0x8 << 28` |
 | `iter`, `iterproj`, `ldcf` | `0x11`, `0x51`, `0x91` (G13's minus 0x10; 0x21 is the texture sample): destination 15:8, cf 21:16, channels 23:22, W's cf 29:24; bit 31 adds G13's upper word (sample index, interpolation) |
 | `st_tile`, `ld_tile` | `0x09`, `0x79`: register 14:7, offset byte 2, coordinates byte 4 with bit 49, mask 55:52, sample mask 63:56 |
+| `zs_emit` | `0x41`, G13's with the sample mask a bit higher (immediate 9, low bits 15:10) and the depth/stencil register two bits higher (23:18) |
 | scissor | 8 bytes, G13's without the Z range |
 
 PPP state goes in one block per group, in this order (the varying counts
@@ -301,7 +302,12 @@ end of tile program, so Mesa spills every render target: the background and
 fragment programs write the image directly (PBE at state register 2 rt + 1,
 2D array, layer 0, 32-bit data) and the end of tile program does nothing.
 For the same reason Mesa's compute blitter, which stores through `imgwblk`,
-is off: blits and `glGenerateMipmap` draw.
+is off: blits and `glGenerateMipmap` draw. The blend epilog reads the render
+target through Mesa's txf sampler, so the fragment pipeline loads samplers
+whenever render targets spill, even when the shader has none of its own.
+
+A12 has no BC (S3TC, RGTC, BPTC) or ASTC HDR decoding; sampling S3TC hangs
+it. Mesa decompresses those formats on upload instead.
 
 Depth and stencil need little new: G11's ZLS control word and the depth and
 stencil load and store registers are G13's (AGXMetalA12 `Framebuffer<G11>`

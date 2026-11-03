@@ -3,8 +3,8 @@
 //
 // GLES2 on the A12 GPU without a display: EGL surfaceless, a 300x200
 // framebuffer object (3x2 macrotiles), a clear, a triangle, an
-// interpolated gradient, a flat varying, a point, a line, textures,
-// blending, depth and stencil tests, and 3000 draws, each read back and
+// interpolated gradient, a flat varying, a point, a line, blending,
+// textures, depth and stencil tests, and 3000 draws, each read back and
 // checked on the CPU.
 
 #include <EGL/egl.h>
@@ -194,6 +194,22 @@ int main(void)
 	fail |= check("line edge", W / 2, H / 4 + 1, 0xff0000ff, 0);
 
 	/*
+	 * Half transparent blue blended over the red clear, before any sampler
+	 * is bound: G11 reads the render target through Mesa's own one.
+	 */
+	program("attribute vec2 p; void main() { gl_Position = vec4(p, 0, 1); }",
+		"void main() { gl_FragColor = vec4(0, 0, 1, 0.5); }");
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glClear(GL_COLOR_BUFFER_BIT);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, full);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glDisable(GL_BLEND);
+	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	grid();
+	fail |= check("blend", W / 2, H / 2, 0xbf800080, 1);
+
+	/*
 	 * A 2x2 texture over the whole target: nearest gives one texel per
 	 * quadrant, linear blends all four in the middle.
 	 */
@@ -223,17 +239,6 @@ int main(void)
 	grid();
 	fail |= check("linear", W / 2, H / 2, 0xff808080, 2);
 
-	/* Half transparent blue blended over the red clear. */
-	program("attribute vec2 p; void main() { gl_Position = vec4(p, 0, 1); }",
-		"void main() { gl_FragColor = vec4(0, 0, 1, 0.5); }");
-	glEnable(GL_BLEND);
-	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	glClear(GL_COLOR_BUFFER_BIT);
-	glDrawArrays(GL_TRIANGLES, 0, 3);
-	glDisable(GL_BLEND);
-	glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
-	grid();
-	fail |= check("blend", W / 2, H / 2, 0xbf800080, 1);
 
 	/*
 	 * Depth, LESS against a clear to 0.7: a near green triangle (depth
