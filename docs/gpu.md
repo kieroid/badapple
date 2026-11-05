@@ -218,8 +218,9 @@ same kernels built for G13 (iPhone13,2 IPSWs for iOS 16.6.1 and 18.6.2).
 | texture, PBE descriptors | as G13, but word 0 from bit 3 up sits one bit lower. Texture bit 63 (PBE 51) is set when the texture has more than one level, and the sample count sits at 65:64 (PBE 57:56). Texture word 1 bit 38 (G13's mipmapped bit) says a companion buffer follows in word 2 |
 | sampler | as G13, 8 bytes |
 | sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinates 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8, high register bits from 64, bit 77 set |
-| image write | 8 bytes, `0x31`: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32, dimension 9:8 as for samples. Arrays: `0xb1`, bit 63 and a 2-byte tail with `0x30` in bits 69:68, 10 bytes. Without it an array write is dropped |
-| texture_load | none; Mesa samples at the pixel centre instead |
+| image write | 8 bytes, `0x31`: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32, dimension 9:8 as for samples. Arrays: `0xb1`, bit 63 and a 2-byte tail with `0x30` in bits 69:68, 10 bytes. Without it an array write is dropped. With it the write lands but the thread stops there, so nothing after it runs |
+| sample offsets, compare | G13's packed offsets or depth reference in a register at 71:64 in place of the high register bits, bit 78 for offsets (as in Apple's kernels), 79 for compare (found on the phone) |
+| texture_load | none; Mesa samples at the pixel centre instead. That sampler takes pixel coordinates, which ignore mip levels, so texelFetch above level 0 reads level 0 |
 | bindless textures | none; descriptors are found from the state index |
 | twiddled tiles | G13's sizes, but upright for 2, 8 and 32 byte formats: 64x128, 32x64, 16x32 (`Texture<G11>::sumLevelSizesTiled`). Z order starting with Y, extra bits of the long side on top |
 | layout | images are linear, 2D arrays included |
@@ -305,7 +306,9 @@ shader.
 The block store (`imgwblk`) encoding is unknown and `ld_tile` hangs in the
 end of tile program, so Mesa spills every render target: the background and
 fragment programs write the image directly (PBE at state register 2 rt + 1,
-2D array, layer 0, 32-bit data) and the end of tile program does nothing.
+32-bit data) and the end of tile program does nothing. Render targets are
+bound as 2D at their first layer: the array write ends the thread, which
+dropped every render target after the first.
 For the same reason Mesa's compute blitter, which stores through `imgwblk`,
 is off: blits and `glGenerateMipmap` draw. The blend epilog reads the render
 target through Mesa's txf sampler, so the fragment pipeline loads samplers
