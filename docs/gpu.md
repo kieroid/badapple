@@ -203,7 +203,8 @@ Other G11 differences, from Apple's G11 shaders and the CTS:
 | stack | G13's stack instructions kill the thread |
 
 Private memory lives in a global buffer allocated per launch, indexed from
-the grid position. Register spills go to the top of a full 32 KB threadgroup
+the grid position. Graphics stages have none, so Mesa keeps their arrays in
+registers. Register spills go to the top of a full 32 KB threadgroup
 window, one slice per thread from r3l, which caps the threadgroup size.
 
 ### Images
@@ -213,19 +214,20 @@ same kernels built for G13 (iPhone13,2 IPSWs for iOS 16.6.1 and 18.6.2).
 
 | what | G11 |
 |---|---|
-| texture, PBE descriptors | as G13, but word 0 from bit 3 up sits one bit lower; texture word 1 bit 38 (G13's mipmapped bit, PBE bit 57) says a companion buffer follows in word 2 |
+| texture, PBE descriptors | as G13, but word 0 from bit 3 up sits one bit lower. Texture bit 63 (PBE 51) is set when the texture has more than one level, and the sample count sits at 65:64 (PBE 57:56). Texture word 1 bit 38 (G13's mipmapped bit) says a companion buffer follows in word 2 |
 | sampler | as G13, 8 bytes |
-| sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinates 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8, coordinate count 77:76 |
-| image write | 8 bytes, `0x31`: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32, dimension 9:8 as for samples. Arrays: `0xb1`, bit 63 and the sample's tail with 3 coordinates, 10 bytes. Without it an array write is dropped |
+| sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinates 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8, high register bits from 64, bit 77 set |
+| image write | 8 bytes, `0x31`: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32, dimension 9:8 as for samples. Arrays: `0xb1`, bit 63 and a 2-byte tail with `0x30` in bits 69:68, 10 bytes. Without it an array write is dropped |
 | texture_load | none; Mesa samples at the pixel centre instead |
 | bindless textures | none; descriptors are found from the state index |
-| twiddled tiles | G13's sizes, Z order starting with Y |
+| twiddled tiles | G13's sizes, but upright for 2, 8 and 32 byte formats: 64x128, 32x64, 16x32 (`Texture<G11>::sumLevelSizesTiled`). Z order starting with Y, extra bits of the long side on top |
 | layout | images are linear, 2D arrays included |
 
 CTS kernel_image_methods, samplerless_reads, cl_read_write_images and
 cl_fill_images pass. Still wrong:
 
-- twiddled writes of 8-byte formats from 128x64 up (unused, images are linear);
+- twiddled writes of 8-byte formats from 128x64 up, seen before ail had the
+  upright tiles and not checked since (unused, images are linear);
 - linear filtering: only 16-bit unorm is within CTS tolerance. 8-bit, snorm,
   half and sRGB filter with about 1/32 weights, and float32 does not filter.
   The sampler has no precision bit.
@@ -272,6 +274,7 @@ blending, and depth and stencil tests draw. Layouts are from AGXMetalA12
 | `iter`, `iterproj`, `ldcf` | `0x11`, `0x51`, `0x91` (G13's minus 0x10; 0x21 is the texture sample): destination 15:8, cf 21:16, channels 23:22, W's cf 29:24; bit 31 adds G13's upper word (sample index, interpolation) |
 | `st_tile`, `ld_tile` | `0x09`, `0x79`: register 14:7, offset byte 2, coordinates byte 4 with bit 49, mask 55:52, sample mask 63:56 |
 | `zs_emit` | `0x41`, G13's with the sample mask a bit higher (immediate 9, low bits 15:10) and the depth/stencil register two bits higher (23:18) |
+| `sample_mask` | `0xc1`, the samples as for `zs_emit`, then the value: immediate 17, low bits 23:18. Apple's discard is `c1fe0603` |
 | scissor | 8 bytes, G13's without the Z range |
 
 PPP state goes in one block per group, in this order (the varying counts
@@ -305,6 +308,9 @@ For the same reason Mesa's compute blitter, which stores through `imgwblk`,
 is off: blits and `glGenerateMipmap` draw. The blend epilog reads the render
 target through Mesa's txf sampler, so the fragment pipeline loads samplers
 whenever render targets spill, even when the shader has none of its own.
+The texture unit does not see what the clear or earlier draws wrote in the
+same pass, so a draw that blends, masks or reads the framebuffer after them
+starts a new pass. That is slow, and overlap within one draw is still wrong.
 
 A12 has no BC (S3TC, RGTC, BPTC) or ASTC HDR decoding; sampling S3TC hangs
 it. Mesa decompresses those formats on upload instead.
@@ -318,11 +324,13 @@ the integer: the float clears to the wrong depth. With a stencil attachment
 Apple also sets ZLS bits 62 and 63; without them loading stencil hangs the
 3D pass.
 
-Mip levels do not work: every level samples as level 0, and rendering to
-level 1 lands on level 0. The level fields, sampler and level offsets match
-AGXMetalA12 (`TextureGen3<G11>::texBaseAddressesUpdated`,
-`SamplerStateEncoderGen3<G11>`, `PBEStateEncoderGen5<G11>`,
-`Texture<G11>::getLevelOffset`), so something else gates them.
+Mip levels need texture word 0 bit 63, which AGXMetalA12 sets when the
+texture has more than one level (`TextureGen3<G11>` keeps Metal's
+`mipmapLevelCount` at 0x84). Without it every level samples as level 0.
+Apple sets PBE bit 51 the same way, but with it Mesa's image writes lose
+level 0, so Mesa leaves it clear. The image write takes level 0 from the
+instruction, so to render into a level Mesa points the PBE at that level,
+with its size and one level.
 
 Not checked yet: multisampling, so sample and centroid interpolation
 (centroid never shows up in Apple's code; Mesa uses G13's value).

@@ -1,5 +1,5 @@
 diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
-index e131bcf..c9c6ca4 100644
+index e131bcf..0290a09 100644
 --- a/src/asahi/compiler/agx_compile.c
 +++ b/src/asahi/compiler/agx_compile.c
 @@ -977,7 +977,7 @@ translate_atomic_opcode(nir_atomic_op op)
@@ -287,6 +287,26 @@ index e131bcf..c9c6ca4 100644
           /* In a self-test, disassemble again to get something the user can look
            * at to figure out what went wrong.
            */
+@@ -3592,9 +3774,16 @@ agx_preprocess_nir(nir_shader *nir)
+ 
+    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+ 
+-   /* Lower large arrays to scratch and small arrays to csel */
+-   NIR_PASS(_, nir, nir_lower_vars_to_scratch, 256,
+-            glsl_get_natural_size_align_bytes, glsl_get_word_size_align_bytes);
++   /*
++    * Lower large arrays to scratch and small arrays to csel. G11 has scratch
++    * only for compute (in global memory); the G13 stack instructions graphics
++    * would get hang it, so keep every array in registers there.
++    */
++   if (!AGX_G11 || nir->info.stage == MESA_SHADER_COMPUTE ||
++       nir->info.stage == MESA_SHADER_KERNEL)
++      NIR_PASS(_, nir, nir_lower_vars_to_scratch, 256,
++               glsl_get_natural_size_align_bytes,
++               glsl_get_word_size_align_bytes);
+    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
+             nir_var_function_temp, ~0);
+    NIR_PASS(_, nir, nir_split_var_copies);
 diff --git a/src/asahi/compiler/agx_compile.h b/src/asahi/compiler/agx_compile.h
 index 4b10423..072e1e5 100644
 --- a/src/asahi/compiler/agx_compile.h
@@ -532,7 +552,7 @@ index 6baad35..309b825 100644
                 I->imm = compact;
                 BITSET_SET(replaced, v);
 diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
-index 6236c3c..7f29bd7 100644
+index 6236c3c..36d8a0f 100644
 --- a/src/asahi/compiler/agx_pack.c
 +++ b/src/asahi/compiler/agx_pack.c
 @@ -553,6 +553,25 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
@@ -592,7 +612,30 @@ index 6236c3c..7f29bd7 100644
        uint64_t raw = agx_opcodes_info[I->op].encoding.exact |
                       ((uint64_t)((D >> 1) & BITFIELD_MASK(7)) << 8) |
                       (St << 22) | ((uint64_t)(I->format) << 24) |
-@@ -662,6 +705,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -605,6 +648,22 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+                      ((T & BITFIELD_MASK(6)) << 9) | ((S & 0xff) << 16) |
+                      ((T >> 6) << 24) | ((S >> 8) << 26);
+ 
++      /*
++       * G11 moves the operands up as for zs_emit: T a bit, S two with its
++       * immediate flag in bit 17 (Apple's RenderBox discard, c1fe0603:
++       * immediate 255 and immediate 1). Where the high bits of an immediate
++       * S go is unknown, but at most 4 samples exist so the low ones do.
++       */
++      if (AGX_G11) {
++         bool St = I->src[1].type == AGX_INDEX_IMMEDIATE;
++         unsigned Sv = I->src[1].value & (St ? 0xf : ~0);
++
++         pack_assert(I, Sv < 64);
++         raw = 0xc1 | (Tt ? BITFIELD_BIT(9) : 0) |
++               ((T & BITFIELD_MASK(6)) << 10) | (St ? BITFIELD_BIT(17) : 0) |
++               (Sv << 18) | ((T >> 6) << 24);
++      }
++
+       unsigned size = 4;
+       memcpy(util_dynarray_grow_bytes(emission, 1, size), &raw, size);
+       break;
+@@ -662,6 +721,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        bool kill = false;    // TODO: optimize
        bool forward = false; // TODO: optimize
  
@@ -624,7 +667,7 @@ index 6236c3c..7f29bd7 100644
        uint64_t raw =
           0x21 | (flat ? (1 << 7) : 0) | (perspective ? (1 << 6) : 0) |
           ((D & 0xFF) << 7) | (1ull << 15) | /* XXX */
-@@ -688,6 +756,25 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -688,6 +772,25 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        pack_assert(I, value.type == AGX_INDEX_REGISTER);
        pack_assert(I, value.size == AGX_SIZE_32);
  
@@ -650,7 +693,7 @@ index 6236c3c..7f29bd7 100644
        uint64_t raw = 0x11 | (I->last ? (1 << 7) : 0) |
                       ((value.value & 0x3F) << 9) |
                       (((uint64_t)(index_src.value & 0x3F)) << 16) |
-@@ -779,6 +866,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -779,6 +882,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O =
           agx_pack_local_index(I, is_load ? I->src[1] : I->src[2], &Ot);
  
@@ -678,7 +721,7 @@ index 6236c3c..7f29bd7 100644
        uint64_t raw =
           agx_opcodes_info[I->op].encoding.exact | (Rt ? BITFIELD64_BIT(8) : 0) |
           ((R & BITFIELD_MASK(6)) << 9) | (L ? BITFIELD64_BIT(15) : 0) |
-@@ -827,6 +935,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -827,6 +951,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
     }
  
     case AGX_OPCODE_LOCAL_ATOMIC: {
@@ -710,7 +753,7 @@ index 6236c3c..7f29bd7 100644
        bool L = true; /* TODO: Don't force */
  
        unsigned At;
-@@ -872,6 +1005,34 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -872,6 +1021,33 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O = agx_pack_sample_compare_offset(I, I->src[5]);
        unsigned D = agx_pack_lod(I, I->src[1], &lod_mode);
  
@@ -726,7 +769,6 @@ index 6236c3c..7f29bd7 100644
 +         pack_assert(I, !I->gather && !I->sparse && lod_mode < 8);
 +
 +         bool array = agx_g11_array(I->dim);
-+         bool three = I->dim == AGX_DIM_3D || I->dim == AGX_DIM_CUBE || array;
 +         uint64_t raw =
 +            0x21 | ((I->dim == AGX_DIM_3D || array) ? 0x80 : 0) |
 +            (agx_g11_dims[I->dim] << 8) |
@@ -735,7 +777,7 @@ index 6236c3c..7f29bd7 100644
 +            (((uint64_t)I->scoreboard) << 31) | (((uint64_t)I->mask) << 32) |
 +            (((uint64_t)lod_mode) << 40) | (0x18ull << 43) |
 +            (((uint64_t)D & BITFIELD_MASK(8)) << 48) | BITFIELD64_BIT(63);
-+         uint16_t raw2 = (R >> 6) | ((C >> 6) << 2) | ((three ? 3 : 2) << 4);
++         uint16_t raw2 = (R >> 6) | ((C >> 6) << 2) | BITFIELD_BIT(13);
 +
 +         memcpy(util_dynarray_grow_bytes(emission, 1, 8), &raw, 8);
 +         memcpy(util_dynarray_grow_bytes(emission, 1, 2), &raw2, 2);
@@ -745,7 +787,7 @@ index 6236c3c..7f29bd7 100644
        unsigned q1 = I->shadow;
        unsigned q2 = I->query_lod ? 2 : 0;
        unsigned q3 = 0xc; // XXX
-@@ -963,6 +1124,46 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -963,6 +1139,46 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
  
        unsigned coherency = I->coherent ? 0xf : 0x9;
  
@@ -792,7 +834,7 @@ index 6236c3c..7f29bd7 100644
        uint64_t raw = agx_opcodes_info[I->op].encoding.exact |
                       (Rt ? (1 << 8) : 0) | ((R & BITFIELD_MASK(6)) << 9) |
                       ((C & BITFIELD_MASK(6)) << 16) | (Ct ? (1 << 22) : 0) |
-@@ -1047,10 +1248,16 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -1047,10 +1263,16 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
  
        pack_assert(I, I->zs >= 1 && I->zs <= 3);
  
@@ -878,7 +920,7 @@ index 2f238f2..1c3294f 100644
  #include "util/bitpack_helpers.h"
  
 diff --git a/src/asahi/genxml/cmdbuf.xml b/src/asahi/genxml/cmdbuf.xml
-index c2979f9..9d882f6 100644
+index c2979f9..6dd0b71 100644
 --- a/src/asahi/genxml/cmdbuf.xml
 +++ b/src/asahi/genxml/cmdbuf.xml
 @@ -221,24 +221,27 @@
@@ -916,17 +958,17 @@ index c2979f9..9d882f6 100644
 +    <field name="Swizzle A" size="2" start="21" type="Channel"/>
 +    <field name="Width" size="14" start="23" type="uint" modifier="minus(1)"/>
 +    <field name="Height" size="14" start="37" type="uint" modifier="minus(1)"/>
-+    <field name="Unk 52" size="1" start="51" type="bool"/>
++    <!-- Set by Metal with more than one level, as for Texture -->
++    <field name="Unk mipmapped" size="1" start="51" type="bool"/>
 +    <field name="Rotate 90" size="1" start="52" type="bool"/>
 +    <field name="Flip vertical" size="1" start="53" type="bool"/>
-+    <field name="Samples" size="1" start="55" type="Sample Count"/>
-+    <field name="Unk mipmapped" size="1" start="57" type="bool"/>
++    <field name="Samples" size="2" start="56" type="Sample Count"/>
 +    <field name="Compressed" size="1" start="58" type="bool"/>
 +    <field name="Mode" size="2" start="59" type="Image Mode"/>
      <field name="Buffer" size="36" start="64" type="address" modifier="shr(4)"/>
      <field name="Level" size="4" start="100" type="uint"/>
  
-@@ -280,20 +283,22 @@
+@@ -280,25 +283,26 @@
      <field name="Buffer offset (sw)" size="32" start="128" type="uint"/>
    </struct>
  
@@ -958,11 +1000,19 @@ index c2979f9..9d882f6 100644
 +    <field name="Height" size="14" start="41" type="uint" modifier="minus(1)"/>
 +    <field name="First level" size="4" start="55" type="uint"/>
 +    <field name="Last level" size="4" start="59" type="uint"/>
-+    <field name="Samples" size="1" start="63" type="Sample Count"/>
++    <!-- Set by Metal when the texture has more than one level. Without it
++         the sampler only sees the first level. -->
++    <field name="Unk mipmapped" size="1" start="63" type="bool"/>
++    <field name="Samples" size="2" start="64" type="Sample Count"/>
      <field name="Address" size="36" start="66" type="hex" modifier="shr(4)"/>
-     <!-- Unknown bit set by Metal when mipmapping. Might relate to a mechanism
-     to switch tile size (or disable tiling altogether?) at small mip levels to
-@@ -637,17 +642,19 @@
+-    <!-- Unknown bit set by Metal when mipmapping. Might relate to a mechanism
+-    to switch tile size (or disable tiling altogether?) at small mip levels to
+-    reduce wasted memory due to padding. Causing test flakiness when set. -->
+-    <field name="Unk mipmapped" size="1" start="102" type="bool"/>
+     <field name="Compressed" size="1" start="103" type="bool"/>
+     <field name="Mode" size="2" start="104" type="Image Mode"/>
+     <field name="Compression" size="2" start="106" type="hex"/> <!-- 0 for uncompressed -->
+@@ -637,17 +641,19 @@
    <!-- PPP state ends -->
  
    <!-- USC state starts -->
@@ -986,7 +1036,7 @@ index c2979f9..9d882f6 100644
    </enum>
  
    <struct name="USC Uniform" size="8">
-@@ -664,20 +671,22 @@
+@@ -664,20 +670,22 @@
      <field name="Buffer" size="38" start="0:26" type="address" modifier="shr(2)"/>
    </struct>
  
@@ -1015,7 +1065,7 @@ index c2979f9..9d882f6 100644
    </struct>
  
    <enum name="Shared layout">
-@@ -705,6 +714,17 @@
+@@ -705,6 +713,17 @@
      <field name="Code" size="32" start="16" type="address"/>
    </struct>
  
@@ -1033,7 +1083,7 @@ index c2979f9..9d882f6 100644
    <struct name="USC Registers" size="4">
      <field name="Tag" size="8" start="0" type="USC Control" exact="Registers"/>
      <field name="Register count" size="5" start="8" type="uint" modifier="groups(8)"/>
-@@ -715,11 +735,12 @@
+@@ -715,11 +734,12 @@
  
    <struct name="USC No Preshader" size="2">
      <field name="Tag" size="8" start="0" type="USC Control" exact="No preshader"/>
@@ -1047,7 +1097,7 @@ index c2979f9..9d882f6 100644
      <field name="Code" size="32" start="32" type="address"/>
    </struct>
  
-@@ -996,12 +1017,15 @@
+@@ -996,12 +1016,15 @@
    <!-- VDM commands end -->
  
    <!-- CDM commands start -->
@@ -1066,7 +1116,7 @@ index c2979f9..9d882f6 100644
    </enum>
  
    <enum name="CDM Mode">
-@@ -1020,6 +1044,8 @@
+@@ -1020,6 +1043,8 @@
    </enum>
  
    <struct name="CDM Launch Word 0" size="4">
@@ -1088,8 +1138,39 @@ index f3e6733..2fd210d 100644
    </ins>
  
    <ins name="trap" length="2">
+diff --git a/src/asahi/layout/layout.c b/src/asahi/layout/layout.c
+index 4ff4529..a271a25 100644
+--- a/src/asahi/layout/layout.c
++++ b/src/asahi/layout/layout.c
+@@ -3,6 +3,7 @@
+  * SPDX-License-Identifier: MIT
+  */
+ 
++#include "asahi/genxml/agx_g11.h"
+ #include "layout.h"
+ #include "util/format/u_format.h"
+ #include "util/u_math.h"
+@@ -35,6 +36,18 @@ ail_initialize_linear(struct ail_layout *layout)
+ struct ail_tile
+ ail_get_max_tile_size(unsigned blocksize_B)
+ {
++   /* G11 has the oblong tiles the other way up (AGXMetalA12
++    * Texture<G11>::sumLevelSizesTiled)
++    */
++   if (AGX_G11) {
++      switch (blocksize_B) {
++      case 2: return (struct ail_tile){64, 128};
++      case 8: return (struct ail_tile){32, 64};
++      case 32: return (struct ail_tile){16, 32};
++      default: break;
++      }
++   }
++
+    /* clang-format off */
+    switch (blocksize_B) {
+    case  1: return (struct ail_tile) { 128, 128 };
 diff --git a/src/asahi/layout/tiling.cc b/src/asahi/layout/tiling.cc
-index 084d727..8bd8d07 100644
+index 084d727..1a0f529 100644
 --- a/src/asahi/layout/tiling.cc
 +++ b/src/asahi/layout/tiling.cc
 @@ -9,6 +9,7 @@
@@ -1121,7 +1202,7 @@ index 084d727..8bd8d07 100644
  template <typename T, bool is_store>
  void
  memcpy_small(void *_tiled, void *_linear, const struct ail_layout *tiled_layout,
-@@ -74,12 +89,25 @@ memcpy_small(void *_tiled, void *_linear, const struct ail_layout *tiled_layout,
+@@ -74,12 +89,26 @@ memcpy_small(void *_tiled, void *_linear, const struct ail_layout *tiled_layout,
     struct ail_tile tile_size = tiled_layout->tilesize_el[level];
     unsigned tile_area_el = tile_size.width_el * tile_size.height_el;
     unsigned tiles_per_row = DIV_ROUND_UP(stride_el, tile_size.width_el);
@@ -1132,16 +1213,17 @@ index 084d727..8bd8d07 100644
     unsigned space_mask_x = ail_space_mask(tile_size.width_el);
     unsigned space_mask_y = ail_space_mask(tile_size.height_el) << 1;
 +
-+   /* G11 interleaves with Y in the low bit (checked on the phone with
-+    * square tiles), any extra X bits of wide tiles staying on top.
++   /* G11 interleaves with Y in the low bit (checked on the phone), any extra
++    * bits of the long side of oblong tiles staying on top.
 +    */
 +   if (AGX_G11) {
-+      unsigned h_bits = util_logbase2(tile_size.height_el);
++      unsigned side = MIN2(tile_size.width_el, tile_size.height_el);
++      unsigned top = 2 * util_logbase2(side);
 +
-+      space_mask_y = ail_space_mask(tile_size.height_el);
-+      space_mask_x = (space_mask_y << 1) |
-+                     ((tile_size.width_el / tile_size.height_el - 1)
-+                      << (2 * h_bits));
++      space_mask_y = ail_space_mask(side) |
++                     ((tile_size.height_el / side - 1) << top);
++      space_mask_x = (ail_space_mask(side) << 1) |
++                     ((tile_size.width_el / side - 1) << top);
 +   }
 +
 +   unsigned y_offs_el =
@@ -1908,24 +1990,21 @@ index ab205bf..f4fc224 100644
  
     /* Try to open an AGX device */
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..63d1fe4 100644
+index 616dd6d..9cd2ab4 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
-@@ -702,7 +702,12 @@ agx_pack_texture(void *out, struct agx_resource *rsrc,
-       }
+@@ -231,6 +231,10 @@ agx_create_blend_state(struct pipe_context *ctx,
  
-       cfg.srgb = (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB);
--      cfg.unk_mipmapped = rsrc->mipmapped;
-+      /*
-+       * G11 has no such bit: there it says a companion buffer follows in
-+       * word 2 (AGXMetalA12 TextureGen3::texBaseAddressesUpdated), and
-+       * mipmapped textures read VA 0.
-+       */
-+      cfg.unk_mipmapped = rsrc->mipmapped && !AGX_G11;
-       cfg.srgb_2_channel = cfg.srgb && util_format_colormask(desc) == 0x3;
+       if (rt.colormask)
+          so->store |= (PIPE_CLEAR_COLOR0 << i);
++
++      if (rt.colormask && (state->logicop_enable || rt.blend_enable ||
++                           rt.colormask != 0xf))
++         so->reads |= BITFIELD_BIT(i);
+    }
  
-       cfg.compressed = rsrc->layout.compressed;
-@@ -933,7 +938,32 @@ agx_get_scissor_extents(const struct pipe_viewport_state *vp,
+    return so;
+@@ -933,7 +937,32 @@ agx_get_scissor_extents(const struct pipe_viewport_state *vp,
     }
  }
  
@@ -1958,7 +2037,7 @@ index 616dd6d..63d1fe4 100644
  agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
                              uint8_t **out, const struct pipe_viewport_state *vp,
                              const struct pipe_scissor_state *ss,
-@@ -946,9 +976,11 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -946,9 +975,11 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
     unsigned count = multi_viewport ? AGX_MAX_VIEWPORTS : 1;
  
     /* Allocate scissor descriptors */
@@ -1973,7 +2052,7 @@ index 616dd6d..63d1fe4 100644
  
     unsigned minx[AGX_MAX_VIEWPORTS], miny[AGX_MAX_VIEWPORTS];
     unsigned maxx[AGX_MAX_VIEWPORTS], maxy[AGX_MAX_VIEWPORTS];
-@@ -961,7 +993,8 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -961,7 +992,8 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
        float minz, maxz;
        util_viewport_zmin_zmax(vp, clip_halfz, &minz, &maxz);
  
@@ -1983,7 +2062,7 @@ index 616dd6d..63d1fe4 100644
           cfg.min_x = minx[i];
           cfg.min_y = miny[i];
           cfg.min_z = minz;
-@@ -969,11 +1002,21 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -969,11 +1001,21 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
           cfg.max_y = maxy[i];
           cfg.max_z = maxz;
        }
@@ -2006,7 +2085,7 @@ index 616dd6d..63d1fe4 100644
        .region_clip = true,
        .viewport = true,
        .viewport_count = count,
-@@ -984,17 +1027,13 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -984,17 +1026,13 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
        agx_pool_alloc_aligned(&batch->pool, size, AGX_PPP_HEADER_ALIGN);
     struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
  
@@ -2028,7 +2107,7 @@ index 616dd6d..63d1fe4 100644
           cfg.min_x = minx[i] / 32;
           cfg.min_y = miny[i] / 32;
           cfg.max_x = DIV_ROUND_UP(MAX2(maxx[i], 1), 32);
-@@ -1002,8 +1041,10 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -1002,8 +1040,10 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
        }
     }
  
@@ -2041,7 +2120,7 @@ index 616dd6d..63d1fe4 100644
  
     /* Upload viewports */
     for (unsigned i = 0; i < count; ++i) {
-@@ -1023,6 +1064,7 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -1023,6 +1063,7 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
     }
  
     agx_ppp_fini(out, &ppp);
@@ -2049,7 +2128,7 @@ index 616dd6d..63d1fe4 100644
  }
  
  static void
-@@ -1127,6 +1169,9 @@ target_is_array(enum pipe_texture_target target)
+@@ -1127,6 +1168,9 @@ target_is_array(enum pipe_texture_target target)
     }
  }
  
@@ -2059,17 +2138,17 @@ index 616dd6d..63d1fe4 100644
  static void
  agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
                       struct pipe_image_view *view, bool block_access,
-@@ -1177,7 +1222,8 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1177,7 +1221,8 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
        }
  
        cfg.buffer = agx_map_texture_gpu(tex, layer);
 -      cfg.unk_mipmapped = tex->mipmapped;
-+      /* Not on G11, as for textures (PBEStateEncoderGen5<G11>) */
++      /* Apple sets it on G11 too, but Mesa's image writes then drop level 0 */
 +      cfg.unk_mipmapped = tex->mipmapped && !AGX_G11;
  
        if (is_buffer) {
           unsigned size_el =
-@@ -1190,7 +1236,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1190,7 +1235,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
           cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
           cfg.height = DIV_ROUND_UP(size_el, cfg.width);
           cfg.level = 0;
@@ -2078,7 +2157,7 @@ index 616dd6d..63d1fe4 100644
           cfg.layers = 1;
           cfg.levels = 1;
        } else if (util_res_sample_count(&tex->base) > 1 && !block_access) {
-@@ -1209,7 +1255,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1209,7 +1254,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
           cfg.layout = AGX_LAYOUT_LINEAR;
           cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
           cfg.height = DIV_ROUND_UP(size_px, cfg.width);
@@ -2087,7 +2166,7 @@ index 616dd6d..63d1fe4 100644
           cfg.layers = 1;
           cfg.levels = 1;
  
-@@ -1235,7 +1281,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1235,7 +1280,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
           }
  
           if (tex->layout.tiling == AIL_TILING_LINEAR) {
@@ -2096,7 +2175,23 @@ index 616dd6d..63d1fe4 100644
              cfg.levels = 1;
           } else {
              cfg.page_aligned_layers = tex->layout.page_aligned_layers;
-@@ -1435,6 +1481,55 @@ agx_nir_lower_point_sprite_zw(nir_builder *b, nir_intrinsic_instr *intr,
+@@ -1244,6 +1289,15 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+ 
+          if (tex->base.nr_samples > 1)
+             cfg.samples = agx_translate_sample_count(tex->base.nr_samples);
++
++         /* G11 image writes take level 0, so point at the level itself */
++         if (AGX_G11 && level) {
++            cfg.buffer += ail_get_level_offset_B(&tex->layout, level);
++            cfg.width = u_minify(cfg.width, level);
++            cfg.height = u_minify(cfg.height, level);
++            cfg.level = 0;
++            cfg.levels = 1;
++         }
+       }
+ 
+       if (tex->layout.compressed && !emrt) {
+@@ -1435,6 +1489,55 @@ agx_nir_lower_point_sprite_zw(nir_builder *b, nir_intrinsic_instr *intr,
   * shader key should have already been applied. agx_compile_variant may call
   * this multiple times if there are auxiliary shaders.
   */
@@ -2152,7 +2247,7 @@ index 616dd6d..63d1fe4 100644
  static struct agx_compiled_shader *
  agx_compile_nir(struct agx_device *dev, nir_shader *nir,
                  struct util_debug_callback *debug, mesa_shader_stage stage,
-@@ -1463,6 +1558,13 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
+@@ -1463,6 +1566,13 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
         nir->info.fs.uses_sample_shading)
        key.fs.inside_sample_loop = true;
  
@@ -2166,7 +2261,7 @@ index 616dd6d..63d1fe4 100644
     if (internal_kernel) {
        key.reserved_preamble = 8;
     } else if (!secondary) {
-@@ -1535,7 +1637,11 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
+@@ -1535,7 +1645,11 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
        }
  
        if (key->hw) {
@@ -2179,7 +2274,7 @@ index 616dd6d..63d1fe4 100644
           NIR_PASS(_, nir, nir_lower_clip_halfz_dynamic);
  
           NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
-@@ -1998,6 +2104,13 @@ agx_get_compute_state_info(struct pipe_context *pctx, void *cso,
+@@ -1998,6 +2112,13 @@ agx_get_compute_state_info(struct pipe_context *pctx, void *cso,
  
     info->max_threads =
        agx_occupancy_for_register_count(so->b.info.nr_gprs).max_threads;
@@ -2193,7 +2288,7 @@ index 616dd6d..63d1fe4 100644
     info->private_memory = 0;
     info->preferred_simd_size = 32;
     info->simd_sizes = 32;
-@@ -2625,6 +2738,23 @@ translate_sampler_state_count(struct agx_context *ctx, mesa_shader_stage stage)
+@@ -2625,6 +2746,23 @@ translate_sampler_state_count(struct agx_context *ctx, mesa_shader_stage stage)
                                              ctx->stage[stage].custom_borders);
  }
  
@@ -2217,7 +2312,7 @@ index 616dd6d..63d1fe4 100644
  static uint32_t
  agx_nr_tex_descriptors_without_spilled_rts(const struct agx_compiled_shader *cs)
  {
-@@ -2889,7 +3019,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2889,7 +3027,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
  
     mesa_shader_stage stage = cs->stage;
  
@@ -2230,7 +2325,7 @@ index 616dd6d..63d1fe4 100644
        agx_usc_pack(&b, TEXTURE, cfg) {
           cfg.start = 0;
           cfg.count =
-@@ -2898,7 +3032,17 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2898,7 +3040,17 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -2249,7 +2344,7 @@ index 616dd6d..63d1fe4 100644
        agx_usc_pack(&b, SAMPLER, cfg) {
           cfg.start = 0;
           cfg.count = batch->sampler_count[stage];
-@@ -2954,30 +3098,53 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2954,30 +3106,53 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -2323,7 +2418,7 @@ index 616dd6d..63d1fe4 100644
        }
     }
  
-@@ -3206,8 +3373,6 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3206,8 +3381,6 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
        }
     }
  
@@ -2332,7 +2427,7 @@ index 616dd6d..63d1fe4 100644
     /* Get the shader */
     key.reserved_preamble = uniforms;
     struct agx_device *dev = agx_device(ctx->base.screen);
-@@ -3215,13 +3380,21 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3215,13 +3388,21 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
     agx_batch_add_bo(batch, shader->bo);
     assert(shader->info.rodata.size_16 == 0);
  
@@ -2360,7 +2455,7 @@ index 616dd6d..63d1fe4 100644
  
     if (shader->info.has_preamble) {
        agx_usc_pack(&b, PRESHADER, cfg) {
-@@ -3242,10 +3415,14 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3242,10 +3423,14 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
        cfg.sampler_state_register_count =
           agx_translate_sampler_state_count(needs_sampler ? 1 : 0, false);
  
@@ -2376,7 +2471,7 @@ index 616dd6d..63d1fe4 100644
     return ret;
  }
  
-@@ -3313,27 +3490,30 @@ agx_batch_init_state(struct agx_batch *batch)
+@@ -3313,27 +3498,30 @@ agx_batch_init_state(struct agx_batch *batch)
        cfg.usc_cache_inval = true;
     }
  
@@ -2425,7 +2520,7 @@ index 616dd6d..63d1fe4 100644
     batch->vdm.current = out;
  
     /* Mark it as initialized now, since agx_batch_writes() will check this. */
-@@ -3416,9 +3596,179 @@ agx_point_object_type(struct agx_rasterizer *rast)
+@@ -3416,9 +3604,179 @@ agx_point_object_type(struct agx_rasterizer *rast)
               : AGX_OBJECT_TYPE_POINT_SPRITE_UV10;
  }
  
@@ -2606,7 +2701,7 @@ index 616dd6d..63d1fe4 100644
  static uint8_t *
  agx_encode_state(struct agx_batch *batch, uint8_t *out)
  {
-@@ -3442,7 +3792,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3442,7 +3800,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
         IS_DIRTY(PRIM)) {
  
        unsigned bindings = ctx->linked.fs->cf.nr_bindings;
@@ -2616,7 +2711,7 @@ index 616dd6d..63d1fe4 100644
           size_t linkage_size =
              AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
  
-@@ -3457,6 +3808,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3457,6 +3816,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                      : 0,
                                   &batch->generate_primitive_id);
  
@@ -2627,7 +2722,7 @@ index 616dd6d..63d1fe4 100644
           batch->varyings = agx_usc_addr(dev, t.gpu);
        } else {
           batch->varyings = 0;
-@@ -3466,7 +3821,59 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3466,7 +3829,59 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ppp_updates++;
     }
  
@@ -2688,7 +2783,7 @@ index 616dd6d..63d1fe4 100644
        agx_push(out, VDM_STATE, cfg) {
           cfg.vertex_shader_word_0_present = true;
           cfg.vertex_shader_word_1_present = true;
-@@ -3511,8 +3918,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3511,8 +3926,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ctx->dirty |= AGX_DIRTY_SCISSOR_ZBIAS;
     }
  
@@ -2699,7 +2794,7 @@ index 616dd6d..63d1fe4 100644
  
        agx_upload_viewport_scissor(pool, batch, &out, ctx->viewport,
                                    ctx->rast->base.scissor ? ctx->scissor : NULL,
-@@ -3533,6 +3940,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3533,6 +3948,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                        : is_lines ? AGX_OBJECT_TYPE_LINE
                                                   : AGX_OBJECT_TYPE_TRIANGLE;
  
@@ -2721,7 +2816,31 @@ index 616dd6d..63d1fe4 100644
     struct AGX_PPP_HEADER dirty = {
        .fragment_control =
           IS_DIRTY(ZS) || IS_DIRTY(RS) || IS_DIRTY(PRIM) || IS_DIRTY(QUERY),
-@@ -5314,6 +5736,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -4919,6 +5349,23 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+    agx_legalize_xfb(ctx);
+ 
+    struct agx_batch *batch = agx_get_batch(ctx);
++
++   /*
++    * G11's blend epilog reads spilled render targets through the texture
++    * unit, and nothing makes that see what the PBE or the clear wrote earlier
++    * in the pass (Apple's G11 shaders have no fence there; they blend in the
++    * tilebuffer). A new pass starts with a clean texture cache.
++    *
++    * ponytail: one pass per such draw, slow; the tilebuffer is the real fix
++    * and overlap within one draw is still wrong
++    */
++   if (AGX_G11 && ((batch->draw | batch->clear) & PIPE_CLEAR_COLOR) &&
++       ((ctx->blend->reads & BITFIELD_MASK(ctx->framebuffer.nr_cbufs)) ||
++        ctx->stage[MESA_SHADER_FRAGMENT].shader->info.uses_fbfetch)) {
++      agx_flush_batch_for_reason(ctx, batch, "G11 render target read");
++      batch = agx_get_batch(ctx);
++   }
++
+    uint64_t ib = 0;
+    size_t ib_extent = 0;
+ 
+@@ -5314,6 +5761,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -2741,7 +2860,7 @@ index 616dd6d..63d1fe4 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +5779,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +5804,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);
@@ -2754,7 +2873,7 @@ index 616dd6d..63d1fe4 100644
  
     agx_launch_internal(batch, grid, wg, launch, stage, usc);
 diff --git a/src/gallium/drivers/asahi/agx_state.h b/src/gallium/drivers/asahi/agx_state.h
-index 967cd2b..756e7d3 100644
+index 967cd2b..d865313 100644
 --- a/src/gallium/drivers/asahi/agx_state.h
 +++ b/src/gallium/drivers/asahi/agx_state.h
 @@ -168,6 +168,9 @@ struct PACKED agx_draw_uniforms {
@@ -2777,6 +2896,16 @@ index 967cd2b..756e7d3 100644
     /* Uniforms the driver must push */
     unsigned push_range_count;
     struct agx_push_range push[AGX_MAX_PUSH_RANGES];
+@@ -478,6 +484,9 @@ struct agx_blend {
+ 
+    /* PIPE_CLEAR_* bitmask corresponding to this blend state */
+    uint32_t store;
++
++   /* Render targets the blend or mask reads back */
++   uint8_t reads;
+ };
+ 
+ struct asahi_vs_shader_key {
 diff --git a/src/util/u_thread.c b/src/util/u_thread.c
 index d6b3a07..921e88e 100644
 --- a/src/util/u_thread.c
