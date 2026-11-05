@@ -201,6 +201,7 @@ Other G11 differences, from Apple's G11 shaders and the CTS:
 | threadgroup atomics | the device atomic with address space 2 in bits 29:28 |
 | thread index in threadgroup | built from position and size; Apple's code never reads it |
 | stack | G13's stack instructions kill the thread |
+| uniforms | 256 halves; how u256 and up are encoded is unknown, so Mesa promotes no further |
 
 Private memory lives in a global buffer allocated per launch, indexed from
 the grid position. Graphics stages have none, so Mesa keeps their arrays in
@@ -268,10 +269,11 @@ blending, and depth and stencil tests draw. Layouts are from AGXMetalA12
 |---|---|
 | VDM vertex state | Apple's `VsStateToken`, 4 words, no presence bits: `0x48000000 \| class` (outputs <9 0x4000, <=24 0x2000, <=32 0x1800, <=64 0x1000, <=128 0x800, else 0x400), plus 0x8040 with rasterization off and the provoking vertex in 2:1, counts, `pipeline \| ceil(regs/8) << 2 \| length/64`, output count |
 | draw | `0x6e040000 \| prim << 8`, then count, instances, start; indexed `0x7e020000 \| index size << 17 \| buffer hi`, then the buffer's low word, count, instances, base vertex |
+| restart | before each indexed draw: `0x50000000 \| vertex state header & 0x7ffffdf \| enable << 5`, then the index (`drawIndexedPrimitives`). G13's restart state wedges now and then |
 | counts | clear preshader bits 15:12, and textures 8:4 and samplers 11:9 when unused, or the USC loads state from USC 0 |
 | fragment shader word | the combined word plus imageblock: bit 8 uses local memory, 23:16 its size in 256 B, 25:24 log2 samples, 31:26 tile layout (32x32 47, 32x16 63, 16x16 54), 35:32 bytes per sample / 8 |
-| `st_var` | `0x01 \| last << 7 \| 1 << 8 \| reg halves << 10 \| slot << 16 \| 1 << 22 \| 0x8 << 28` |
-| `iter`, `iterproj`, `ldcf` | `0x11`, `0x51`, `0x91` (G13's minus 0x10; 0x21 is the texture sample): destination 15:8, cf 21:16, channels 23:22, W's cf 29:24; bit 31 adds G13's upper word (sample index, interpolation) |
+| `st_var` | `0x01 \| last << 7 \| 1 << 8 \| reg halves << 10 \| slot << 16 \| 1 << 22 \| 0x8 << 28`, high register bits at 24 and slot bits at 26 as on G13. Immediate slots only |
+| `iter`, `iterproj`, `ldcf` | `0x11`, `0x51`, `0x91` (G13's minus 0x10; 0x21 is the texture sample): destination 15:8, cf 21:16, channels 23:22, W's cf 29:24; bit 31 adds G13's upper word (sample index, interpolation, destination bits 9:8 at 56). Immediate cf only, so Mesa lowers indexed varyings |
 | `st_tile`, `ld_tile` | `0x09`, `0x79`: register 14:7, offset byte 2, coordinates byte 4 with bit 49, mask 55:52, sample mask 63:56 |
 | `zs_emit` | `0x41`, G13's with the sample mask a bit higher (immediate 9, low bits 15:10) and the depth/stencil register two bits higher (23:18) |
 | `sample_mask` | `0xc1`, the samples as for `zs_emit`, then the value: immediate 17, low bits 23:18. Apple's discard is `c1fe0603` |
@@ -295,7 +297,7 @@ shader.
 | word | bits |
 |---|---|
 | fragment control | 13:0 visibility index (offset / 4), 14 boolean, 15 visibility on, 16 scissor, 17 depth bias, 18 and 19 stencil, 21 tag write off, 26 tri merging off |
-| face | 7:0 stencil reference, 15:8 line width, 19:17 depth compare, 21 depth write off, 26:24 pass type, 31:28 object type (5 and 6 line and point filled triangles) |
+| face | 7:0 stencil reference, 15:8 line width, 19:17 depth compare, 20 shader writes depth (without it the test uses the interpolated depth), 21 depth write off, 26:24 pass type, 31:28 object type (5 and 6 line and point filled triangles) |
 | stencil | as G13 |
 | cull | as G13, clamp W in bit 5, no cull 2 |
 | shader counts | as G13 up to bit 11; from 15 the tilebuffer words the shader writes, 0 while every render target is spilled |
@@ -342,7 +344,8 @@ macrotile renders), and the kext's tiling sizes: region headers
 `5 * macrotiles * utiles / 4` dwords, the region array and TPC in 4K pages
 at 0x50 and 0x80 bytes per macrotile utile, and a buffer manager whose block
 list entries are eight 16K chunks. The parameter heap behind it is 8 MB of
-its own; 1 MB ran out at 3000 full screen triangles. There are no partial
+its own; 1 MB ran out at 3000 full screen triangles. The tiling buffers are
+sized for 16384x4096 worth of macrotiles, in any shape up to 16384 a side. There are no partial
 renders yet, so a frame that fills the heap hangs the TA.
 
 ## DRM

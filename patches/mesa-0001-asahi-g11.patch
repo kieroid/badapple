@@ -308,7 +308,7 @@ index e131bcf..0290a09 100644
              nir_var_function_temp, ~0);
     NIR_PASS(_, nir, nir_split_var_copies);
 diff --git a/src/asahi/compiler/agx_compile.h b/src/asahi/compiler/agx_compile.h
-index 4b10423..072e1e5 100644
+index 4b10423..ebe0c7b 100644
 --- a/src/asahi/compiler/agx_compile.h
 +++ b/src/asahi/compiler/agx_compile.h
 @@ -5,6 +5,7 @@
@@ -352,8 +352,24 @@ index 4b10423..072e1e5 100644
     .lower_pack_half_2x16 = true,
     .lower_pack_unorm_2x16 = true,
     .lower_pack_snorm_2x16 = true,
+@@ -395,10 +408,13 @@ static const nir_shader_compiler_options agx_nir_options = {
+    .lower_int64_options =
+       (nir_lower_int64_options) ~(nir_lower_iadd64 | nir_lower_imul_2x32_64),
+    .lower_doubles_options = (nir_lower_doubles_options)(~0),
++   /* G11's iter and st_vary take immediate indices only */
+    .support_indirect_inputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL) |
+                               BITFIELD_BIT(MESA_SHADER_TESS_EVAL) |
+-                              BITFIELD_BIT(MESA_SHADER_FRAGMENT),
+-   .support_indirect_outputs = (uint8_t)BITFIELD_MASK(MESA_SHADER_STAGES),
++                              (AGX_G11 ? 0 : BITFIELD_BIT(MESA_SHADER_FRAGMENT)),
++   .support_indirect_outputs =
++      (uint8_t)(BITFIELD_MASK(MESA_SHADER_STAGES) &
++                ~(AGX_G11 ? BITFIELD_BIT(MESA_SHADER_VERTEX) : 0)),
+    .max_samples = 4,
+    .lower_fquantize2f16 = true,
+    .compact_arrays = true,
 diff --git a/src/asahi/compiler/agx_compiler.h b/src/asahi/compiler/agx_compiler.h
-index 4546093..b21ff6c 100644
+index 4546093..ee265af 100644
 --- a/src/asahi/compiler/agx_compiler.h
 +++ b/src/asahi/compiler/agx_compiler.h
 @@ -6,6 +6,7 @@
@@ -364,6 +380,16 @@ index 4546093..b21ff6c 100644
  #include "asahi/isa/agx_minifloat.h"
  #include "compiler/nir/nir.h"
  #include "util/bitset.h"
+@@ -24,7 +25,8 @@ extern "C" {
+ #define AGX_NUM_REGS (256)
+ 
+ /* u0-u255 inclusive, as pairs of 16-bits */
+-#define AGX_NUM_UNIFORMS (512)
++/* G11 uniforms past 255 need an encoding we do not know */
++#define AGX_NUM_UNIFORMS (AGX_G11 ? 256 : 512)
+ 
+ /* Semi-arbitrary limit for spill slot allocation */
+ #define AGX_NUM_MODELED_REGS_LOG2 (11)
 diff --git a/src/asahi/compiler/agx_insert_waits.c b/src/asahi/compiler/agx_insert_waits.c
 index 75bfd00..f11a26a 100644
 --- a/src/asahi/compiler/agx_insert_waits.c
@@ -521,6 +547,19 @@ index 616d0b0..c3effd9 100644
        nir_imm_bool(b, false /* lower LOD */), lod,
        nir_imm_bool(b, false /* lower min LOD */), lod,
        nir_imm_bool(b, true /* lower layer */), layer, nir_channel(b, coord, 0));
+diff --git a/src/asahi/compiler/agx_nir_opt_preamble.c b/src/asahi/compiler/agx_nir_opt_preamble.c
+index 3eb80e9..c8740d8 100644
+--- a/src/asahi/compiler/agx_nir_opt_preamble.c
++++ b/src/asahi/compiler/agx_nir_opt_preamble.c
+@@ -318,7 +318,7 @@ static const nir_opt_preamble_options preamble_options = {
+     * hot constants so we don't end up rematerializing all over the place.
+     * 480 seems to be a sweetspot, based on a few minutes of shader-db.
+     */
+-   .preamble_storage_size[nir_preamble_class_general] = 480,
++   .preamble_storage_size[nir_preamble_class_general] = AGX_G11 ? 224 : 480,
+ 
+    /* We have at least 32 texture state registers. TODO: check for more? */
+    .preamble_storage_size[nir_preamble_class_image] = 32,
 diff --git a/src/asahi/compiler/agx_opcodes.py b/src/asahi/compiler/agx_opcodes.py
 index f5afa46..7cd478a 100644
 --- a/src/asahi/compiler/agx_opcodes.py
@@ -552,7 +591,7 @@ index 6baad35..309b825 100644
                 I->imm = compact;
                 BITSET_SET(replaced, v);
 diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
-index 6236c3c..36d8a0f 100644
+index 6236c3c..81e9059 100644
 --- a/src/asahi/compiler/agx_pack.c
 +++ b/src/asahi/compiler/agx_pack.c
 @@ -553,6 +553,25 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
@@ -635,7 +674,7 @@ index 6236c3c..36d8a0f 100644
        unsigned size = 4;
        memcpy(util_dynarray_grow_bytes(emission, 1, size), &raw, size);
        break;
-@@ -662,6 +721,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -662,6 +721,32 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        bool kill = false;    // TODO: optimize
        bool forward = false; // TODO: optimize
  
@@ -648,17 +687,18 @@ index 6236c3c..36d8a0f 100644
 +          * 21:16, channels at 23:22, W's cf at 29:24 (always 0 in Apple's).
 +          * Bit 31 adds G13's upper word: sample index and interpolation.
 +          * Centroid never shows up in Apple's code, so its value is G13's.
-+          * G13's 0x61 iterproj runs as a sample of a junk address and wedges
-+          * the GPU.
++          * The upper word also holds the destination's high bits at 56, as
++          * on G13 (Apple's iter to r55). G13's 0x61 iterproj runs as a sample
++          * of a junk address and wedges the GPU.
 +          */
 +         pack_assert(I, src_I.type == AGX_INDEX_IMMEDIATE);
-+         pack_assert(I, D < 0x100 && cf_I < 64 && cf_J < 64);
-+         bool L = interp != AGX_INTERPOLATION_CENTER;
-+         uint64_t raw = (flat ? 0x91 : perspective ? 0x51 : 0x11) | (D << 8) |
-+                        (cf_I << 16) | (channels << 22) | (cf_J << 24) |
-+                        (L ? BITFIELD_BIT(31) : 0) |
++         pack_assert(I, D < 0x400 && cf_I < 64 && cf_J < 64);
++         bool L = interp != AGX_INTERPOLATION_CENTER || D >= 0x100;
++         uint64_t raw = (flat ? 0x91 : perspective ? 0x51 : 0x11) |
++                        ((D & 0xff) << 8) | (cf_I << 16) | (channels << 22) |
++                        (cf_J << 24) | (L ? BITFIELD_BIT(31) : 0) |
 +                        ((uint64_t)sample_index.value << 32) |
-+                        ((uint64_t)interp << 48);
++                        ((uint64_t)interp << 48) | ((uint64_t)(D >> 8) << 56);
 +
 +         memcpy(util_dynarray_grow_bytes(emission, 1, L ? 8 : 4), &raw, L ? 8 : 4);
 +         break;
@@ -667,7 +707,7 @@ index 6236c3c..36d8a0f 100644
        uint64_t raw =
           0x21 | (flat ? (1 << 7) : 0) | (perspective ? (1 << 6) : 0) |
           ((D & 0xFF) << 7) | (1ull << 15) | /* XXX */
-@@ -688,6 +772,25 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -688,6 +773,26 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        pack_assert(I, value.type == AGX_INDEX_REGISTER);
        pack_assert(I, value.size == AGX_SIZE_32);
  
@@ -677,14 +717,15 @@ index 6236c3c..36d8a0f 100644
 +          * register in 16-bit halves at bits 15:10 (ds.g11p@0x11540 stores
 +          * x, y, z, w from r0, r2, r3, r1 as 0x00, 0x08, 0x0c, 0x04 in bits
 +          * 15:9), the immediate index flag at bit 22. The G13 form is not
-+          * an instruction there and the TA job never ends.
++          * an instruction there and the TA job never ends. The high bits of
++          * both sit where G13 has them: Apple's st_vary from r37 sets bit 24.
 +          */
 +         pack_assert(I, index_src.type == AGX_INDEX_IMMEDIATE);
-+         pack_assert(I, value.value < 64);
 +         uint64_t raw = 0x01 | (I->last ? (1 << 7) : 0) | (1 << 8) |
-+                        (value.value << 10) |
++                        ((value.value & 0x3F) << 10) |
 +                        (((uint64_t)(index_src.value & 0x3F)) << 16) |
-+                        (1 << 22) | (0x8u << 28);
++                        (1 << 22) | ((value.value >> 6) << 24) |
++                        ((index_src.value >> 6) << 26) | (0x8u << 28);
 +
 +         memcpy(util_dynarray_grow_bytes(emission, 1, 4), &raw, 4);
 +         break;
@@ -693,7 +734,7 @@ index 6236c3c..36d8a0f 100644
        uint64_t raw = 0x11 | (I->last ? (1 << 7) : 0) |
                       ((value.value & 0x3F) << 9) |
                       (((uint64_t)(index_src.value & 0x3F)) << 16) |
-@@ -779,6 +882,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -779,6 +884,27 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O =
           agx_pack_local_index(I, is_load ? I->src[1] : I->src[2], &Ot);
  
@@ -721,7 +762,7 @@ index 6236c3c..36d8a0f 100644
        uint64_t raw =
           agx_opcodes_info[I->op].encoding.exact | (Rt ? BITFIELD64_BIT(8) : 0) |
           ((R & BITFIELD_MASK(6)) << 9) | (L ? BITFIELD64_BIT(15) : 0) |
-@@ -827,6 +951,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -827,6 +953,31 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
     }
  
     case AGX_OPCODE_LOCAL_ATOMIC: {
@@ -753,7 +794,7 @@ index 6236c3c..36d8a0f 100644
        bool L = true; /* TODO: Don't force */
  
        unsigned At;
-@@ -872,6 +1021,33 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -872,6 +1023,33 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
        unsigned O = agx_pack_sample_compare_offset(I, I->src[5]);
        unsigned D = agx_pack_lod(I, I->src[1], &lod_mode);
  
@@ -787,7 +828,7 @@ index 6236c3c..36d8a0f 100644
        unsigned q1 = I->shadow;
        unsigned q2 = I->query_lod ? 2 : 0;
        unsigned q3 = 0xc; // XXX
-@@ -963,6 +1139,46 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -963,6 +1141,46 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
  
        unsigned coherency = I->coherent ? 0xf : 0x9;
  
@@ -834,7 +875,7 @@ index 6236c3c..36d8a0f 100644
        uint64_t raw = agx_opcodes_info[I->op].encoding.exact |
                       (Rt ? (1 << 8) : 0) | ((R & BITFIELD_MASK(6)) << 9) |
                       ((C & BITFIELD_MASK(6)) << 16) | (Ct ? (1 << 22) : 0) |
-@@ -1047,10 +1263,16 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
+@@ -1047,10 +1265,16 @@ agx_pack_instr(struct util_dynarray *emission, struct util_dynarray *fixups,
  
        pack_assert(I, I->zs >= 1 && I->zs <= 3);
  
@@ -1558,7 +1599,7 @@ index 123208a..34459ac 100644
  agx_usc_immediates(struct agx_usc_builder *b, const struct agx_rodata *ro,
                     uint64_t base_addr)
 diff --git a/src/asahi/lib/decode.c b/src/asahi/lib/decode.c
-index 3d1ccb0..b9811df 100644
+index 3d1ccb0..76c8308 100644
 --- a/src/asahi/lib/decode.c
 +++ b/src/asahi/lib/decode.c
 @@ -27,7 +27,8 @@ static void
@@ -1630,10 +1671,17 @@ index 3d1ccb0..b9811df 100644
  
        for (unsigned i = 0; i < hdr.viewport_count; ++i) {
           DUMP_CL(VIEWPORT, map, "Viewport");
-@@ -654,6 +689,15 @@ agxdecode_vdm(struct agxdecode_ctx *ctx, const uint8_t *map, uint64_t *link,
+@@ -654,6 +689,22 @@ agxdecode_vdm(struct agxdecode_ctx *ctx, const uint8_t *map, uint64_t *link,
     }
  
     case AGX_VDM_BLOCK_TYPE_VDM_STATE_UPDATE: {
++      /* G11's restart token is class 0x50, its vertex state token 0x48 */
++      if (AGX_G11 && (*(const uint32_t *)map >> 27) == 0xa) {
++         const uint32_t *w = (const uint32_t *)map;
++         fprintf(agxdecode_dump_stream, "G11 restart %08x %08x\n", w[0], w[1]);
++         return 8;
++      }
++
 +      if (AGX_G11) {
 +         const uint32_t *w = (const uint32_t *)map;
 +         fprintf(agxdecode_dump_stream, "G11 vertex state %08x %08x %08x %08x\n",
@@ -1646,7 +1694,7 @@ index 3d1ccb0..b9811df 100644
        size_t length = AGX_VDM_STATE_LENGTH;
        agx_unpack(agxdecode_dump_stream, map, VDM_STATE, hdr);
        map += AGX_VDM_STATE_LENGTH;
-@@ -700,6 +744,17 @@ agxdecode_vdm(struct agxdecode_ctx *ctx, const uint8_t *map, uint64_t *link,
+@@ -700,6 +751,17 @@ agxdecode_vdm(struct agxdecode_ctx *ctx, const uint8_t *map, uint64_t *link,
     }
  
     case AGX_VDM_BLOCK_TYPE_INDEX_LIST: {
@@ -1665,7 +1713,7 @@ index 3d1ccb0..b9811df 100644
        agx_unpack(agxdecode_dump_stream, map, INDEX_LIST, hdr);
        DUMP_UNPACKED(INDEX_LIST, hdr, "Index List\n");
 diff --git a/src/asahi/libagx/libagx_dgc.h b/src/asahi/libagx/libagx_dgc.h
-index d8266b6..e849b6f 100644
+index d8266b6..42858f7 100644
 --- a/src/asahi/libagx/libagx_dgc.h
 +++ b/src/asahi/libagx/libagx_dgc.h
 @@ -234,6 +234,11 @@ agx_cdm_launch(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_grid grid,
@@ -1690,7 +1738,7 @@ index d8266b6..e849b6f 100644
 + * presence bits sit elsewhere (count, instances, start 25-27, index buffer
 + * 28, indirect 23; no index buffer size). The index buffer's low word comes
 + * first (SampledRenderContext<G11>::drawIndexedPrimitives). Non-indexed draws
-+ * set index size 2 as Apple does.
++ * set index size 2 as Apple does. Restart goes in a token before the draw.
 + */
 +static inline GLOBAL uint32_t *
 +agx_vdm_draw_g11(GLOBAL uint32_t *out, struct agx_draw draw,
@@ -1705,7 +1753,7 @@ index d8266b6..e849b6f 100644
 +      hdr |= 7u << 25;
 +
 +   if (draw.indexed) {
-+      hdr |= (1u << 28) | (uint32_t)(ib >> 32) | ((uint32_t)draw.restart << 16) |
++      hdr |= (1u << 28) | (uint32_t)(ib >> 32) |
 +             ((uint32_t)draw.index_size << 17);
 +   } else {
 +      hdr |= 2u << 17;
@@ -1916,7 +1964,7 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..f4fc224 100644
+index ab205bf..f1cf6c8 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
 @@ -369,7 +369,8 @@ agx_linear_allowed(const struct agx_resource *pres)
@@ -1961,7 +2009,15 @@ index ab205bf..f4fc224 100644
  }
  
  static void
-@@ -2253,6 +2261,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
+@@ -2182,7 +2190,6 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+       BITFIELD_BIT(MESA_PRIM_TRIANGLES_ADJACENCY) |
+       BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) |
+       BITFIELD_BIT(MESA_PRIM_PATCHES);
+-
+    caps->map_unsynchronized_thread_safe = true;
+ 
+    caps->vs_layer_viewport = true;
+@@ -2253,6 +2260,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
        if (!ail_is_valid_pixel_format(tex_format))
           return false;
  
@@ -1981,7 +2037,7 @@ index ab205bf..f4fc224 100644
        /* RGB32, luminance/alpha/intensity emulated for texture buffers only */
        if ((ent.channels == AGX_CHANNELS_R32G32B32_EMULATED ||
             util_format_is_luminance(tex_format) ||
-@@ -2437,6 +2458,7 @@ agx_screen_create(int fd, struct renderonly *ro,
+@@ -2437,6 +2457,7 @@ agx_screen_create(int fd, struct renderonly *ro,
  
     agx_screen->dev.fd = fd;
     agx_screen->dev.ro = ro;
@@ -1990,7 +2046,7 @@ index ab205bf..f4fc224 100644
  
     /* Try to open an AGX device */
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..9cd2ab4 100644
+index 616dd6d..8af1395 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
 @@ -231,6 +231,10 @@ agx_create_blend_state(struct pipe_context *ctx,
@@ -2520,7 +2576,7 @@ index 616dd6d..9cd2ab4 100644
     batch->vdm.current = out;
  
     /* Mark it as initialized now, since agx_batch_writes() will check this. */
-@@ -3416,9 +3604,179 @@ agx_point_object_type(struct agx_rasterizer *rast)
+@@ -3416,9 +3604,183 @@ agx_point_object_type(struct agx_rasterizer *rast)
               : AGX_OBJECT_TYPE_POINT_SPRITE_UV10;
  }
  
@@ -2635,6 +2691,7 @@ index 616dd6d..9cd2ab4 100644
 +
 +      /*
 +       * Face: stencil reference 7:0, line width 15:8, depth compare 19:17,
++       * shader writes depth 20 (else the test uses the interpolated depth),
 +       * depth write disable 21, pass type 26:24, object type 31:28 (5 line
 +       * and 6 point filled triangles; encodeISPPrimitiveType).
 +       */
@@ -2647,6 +2704,9 @@ index 616dd6d..9cd2ab4 100644
 +      uint32_t face = (rast->line_width << 8) | (((depth >> 24) & 7) << 17) |
 +                      (depth & BITFIELD_BIT(21)) |
 +                      (((fs_control >> 29) & 7) << 24) | (type << 28);
++
++      if (ctx->fs->b.info.depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED)
++         face |= BITFIELD_BIT(20);
 +
 +      bool twosided = ctx->zs->base.stencil[1].enabled;
 +
@@ -2701,7 +2761,7 @@ index 616dd6d..9cd2ab4 100644
  static uint8_t *
  agx_encode_state(struct agx_batch *batch, uint8_t *out)
  {
-@@ -3442,7 +3800,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3442,7 +3804,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
         IS_DIRTY(PRIM)) {
  
        unsigned bindings = ctx->linked.fs->cf.nr_bindings;
@@ -2711,7 +2771,7 @@ index 616dd6d..9cd2ab4 100644
           size_t linkage_size =
              AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
  
-@@ -3457,6 +3816,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3457,6 +3820,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                      : 0,
                                   &batch->generate_primitive_id);
  
@@ -2722,7 +2782,7 @@ index 616dd6d..9cd2ab4 100644
           batch->varyings = agx_usc_addr(dev, t.gpu);
        } else {
           batch->varyings = 0;
-@@ -3466,7 +3829,59 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3466,7 +3833,60 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ppp_updates++;
     }
  
@@ -2766,6 +2826,7 @@ index 616dd6d..9cd2ab4 100644
 +                           : outputs <= 64  ? 0x1000
 +                           : outputs <= 128 ? 0x800
 +                                            : 0x400);
++      batch->g11_vs_header = w[0];
 +      agx_pack(&w[1], VDM_STATE_VERTEX_SHADER_WORD_0, cfg) {
 +         cfg.uniform_register_count = vs->b.info.push_count;
 +         cfg.texture_state_register_count = agx_nr_tex_descriptors(batch, vs);
@@ -2783,7 +2844,7 @@ index 616dd6d..9cd2ab4 100644
        agx_push(out, VDM_STATE, cfg) {
           cfg.vertex_shader_word_0_present = true;
           cfg.vertex_shader_word_1_present = true;
-@@ -3511,8 +3926,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3511,8 +3931,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ctx->dirty |= AGX_DIRTY_SCISSOR_ZBIAS;
     }
  
@@ -2794,7 +2855,7 @@ index 616dd6d..9cd2ab4 100644
  
        agx_upload_viewport_scissor(pool, batch, &out, ctx->viewport,
                                    ctx->rast->base.scissor ? ctx->scissor : NULL,
-@@ -3533,6 +3948,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3533,6 +3953,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                        : is_lines ? AGX_OBJECT_TYPE_LINE
                                                   : AGX_OBJECT_TYPE_TRIANGLE;
  
@@ -2816,7 +2877,7 @@ index 616dd6d..9cd2ab4 100644
     struct AGX_PPP_HEADER dirty = {
        .fragment_control =
           IS_DIRTY(ZS) || IS_DIRTY(RS) || IS_DIRTY(PRIM) || IS_DIRTY(QUERY),
-@@ -4919,6 +5349,23 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+@@ -4919,6 +5354,23 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     agx_legalize_xfb(ctx);
  
     struct agx_batch *batch = agx_get_batch(ctx);
@@ -2840,7 +2901,28 @@ index 616dd6d..9cd2ab4 100644
     uint64_t ib = 0;
     size_t ib_extent = 0;
  
-@@ -5314,6 +5761,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5202,7 +5654,19 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+ 
+    uint8_t *out = agx_encode_state(batch, batch->vdm.current);
+ 
+-   if (info->index_size && info->primitive_restart) {
++   if (AGX_G11 && info->index_size) {
++      /*
++       * Apple's G11 indexed draws (SampledRenderContext<G11>::
++       * drawIndexedPrimitives) follow a restart token: the vertex state
++       * token's header as class 0x50, bit 5 to enable, then the index.
++       */
++      uint32_t *w = (uint32_t *)out;
++
++      w[0] = 0x50000000 | (batch->g11_vs_header & 0x7ffffdf) |
++             (info->primitive_restart ? BITFIELD_BIT(5) : 0);
++      w[1] = info->primitive_restart ? info->restart_index : ~0;
++      out += 8;
++   } else if (info->index_size && info->primitive_restart) {
+       agx_push(out, VDM_STATE, cfg)
+          cfg.restart_index_present = true;
+ 
+@@ -5314,6 +5778,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -2860,7 +2942,7 @@ index 616dd6d..9cd2ab4 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +5804,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +5821,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);
@@ -2873,7 +2955,7 @@ index 616dd6d..9cd2ab4 100644
  
     agx_launch_internal(batch, grid, wg, launch, stage, usc);
 diff --git a/src/gallium/drivers/asahi/agx_state.h b/src/gallium/drivers/asahi/agx_state.h
-index 967cd2b..d865313 100644
+index 967cd2b..461d222 100644
 --- a/src/gallium/drivers/asahi/agx_state.h
 +++ b/src/gallium/drivers/asahi/agx_state.h
 @@ -168,6 +168,9 @@ struct PACKED agx_draw_uniforms {
@@ -2896,7 +2978,17 @@ index 967cd2b..d865313 100644
     /* Uniforms the driver must push */
     unsigned push_range_count;
     struct agx_push_range push[AGX_MAX_PUSH_RANGES];
-@@ -478,6 +484,9 @@ struct agx_blend {
+@@ -405,6 +411,9 @@ struct agx_batch {
+    uint32_t varyings;
+    struct agx_varyings_vs linked_varyings;
+ 
++   /* G11: header of the last vertex state token, repeated by restart tokens */
++   uint32_t g11_vs_header;
++
+    struct agx_draw_uniforms uniforms;
+    struct agx_stage_uniforms stage_uniforms[MESA_SHADER_STAGES];
+ 
+@@ -478,6 +487,9 @@ struct agx_blend {
  
     /* PIPE_CLEAR_* bitmask corresponding to this blend state */
     uint32_t store;

@@ -947,7 +947,7 @@ new file mode 100644
 index 000000000..512eacd9a
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1093 @@
+@@ -0,0 +1,1101 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -1418,8 +1418,10 @@ index 000000000..512eacd9a
 + * context maps at AGX_CHUNK_GVA. Layouts: kext FUN_fffffff0084d22c8 (TA registers),
 + * FUN_fffffff0084cd07c (3D registers), firmware FUN_00017018 (microsequence).
 + */
-+#define RN_MAX_W	2048
-+#define RN_MAX_H	4096
++#define RN_MAX		16384
++/* The tiling buffers fit 16384x4096 worth of macrotiles, in any shape */
++#define RN_BUDGET_W	16384
++#define RN_BUDGET_H	4096
 +#define RN_BLOCKS	64		/* parameter heap, 128K blocks */
 +#define RN_MAX_BLOCKS	128
 +
@@ -1458,7 +1460,7 @@ index 000000000..512eacd9a
 +	u32 bmd, bms, plist, blist, bctl, i;
 +	dma_addr_t pages;
 +
-+	rn_tiling(RN_MAX_W, RN_MAX_H, 16, 16, &t);
++	rn_tiling(RN_BUDGET_W, RN_BUDGET_H, 16, 16, &t);
 +	agx->rn.ta = agx_alloc(agx, 0x900, 0x100);	/* cmd, evc +0x600, useq +0x700 */
 +	agx->rn.frag = agx_alloc(agx, 0xd00, 0x100);	/* cmd, evc +0xa00, useq +0xb00 */
 +	agx->rn.scratch = agx_alloc(agx, 0x100, 0x100);
@@ -1516,17 +1518,23 @@ index 000000000..512eacd9a
 +
 +int agx_fw_render_check(const struct drm_asahi_cmd_render *r)
 +{
++	struct rn_tiling t, b;
++
 +	if (r->flags & ~(DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES |
 +			 DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING |
 +			 DRM_ASAHI_RENDER_DBIAS_IS_INT))
 +		return -EINVAL;
 +	if (r->vertex_helper.binary || r->fragment_helper.binary || r->layers != 1 ||
-+	    !r->width_px || r->width_px > RN_MAX_W || !r->height_px ||
-+	    r->height_px > RN_MAX_H || !r->vdm_ctrl_stream_base)
++	    !r->width_px || r->width_px > RN_MAX || !r->height_px ||
++	    r->height_px > RN_MAX || !r->vdm_ctrl_stream_base)
 +		return -EINVAL;
 +	if ((r->utile_width_px != 16 && r->utile_width_px != 32) ||
 +	    (r->utile_height_px != 16 && r->utile_height_px != 32) ||
 +	    (r->samples != 1 && r->samples != 2 && r->samples != 4))
++		return -EINVAL;
++	rn_tiling(r->width_px, r->height_px, r->utile_width_px, r->utile_height_px, &t);
++	rn_tiling(RN_BUDGET_W, RN_BUDGET_H, 16, 16, &b);
++	if (t.rgn_pages > b.rgn_pages || t.tpc_pages > b.tpc_pages)
 +		return -EINVAL;
 +	return 0;
 +}
