@@ -217,10 +217,10 @@ same kernels built for G13 (iPhone13,2 IPSWs for iOS 16.6.1 and 18.6.2).
 |---|---|
 | texture, PBE descriptors | as G13, but word 0 from bit 3 up sits one bit lower. Texture bit 63 (PBE 51) is set when the texture has more than one level, and the sample count sits at 65:64 (PBE 57:56). Texture word 1 bit 38 (G13's mipmapped bit) says a companion buffer follows in word 2 |
 | sampler | as G13, 8 bytes |
-| sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinates 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8, bit 77 set. The tail's low byte is the offset/compare register, not high register bits: none of Apple's samples go above r21, and a destination at r32 and up reads garbage, so Mesa keeps shaders with samples or image writes in r0-r31 when they fit. 4-bit sampler index: 16 samplers, so with Mesa's txf sampler at 0 a shader gets 15 |
+| sample | 10 bytes, `0x21`, `0xa1` for 3D and arrays: destination halves 15:10, texture 19:16, sampler 23:20, 32-bit destination 24, coordinates 29:25, mask 35:32, LOD mode 42:40, LOD 55:48, dimension 9:8, bit 77 set. The tail's low byte is the offset/compare register, not high register bits: none of Apple's samples go above r21, and a destination at r32 and up reads garbage, so Mesa keeps shaders with samples or image writes in r0-r31 when they fit. 4-bit sampler index: 16 samplers, so with Mesa's txf sampler at 0 a shader gets 15, the last shared with texelFetch above level 0 |
 | image write | 8 bytes, `0x31`: data halves 15:10, coordinate halves 19:16 and 39:36, state 23:20 and 35:32, dimension 9:8 as for samples. Arrays: `0xb1`, bit 63 and a 2-byte tail with `0x30` in bits 69:68, 10 bytes. Without it an array write is dropped. With it the write lands but the thread stops there, so nothing after it runs |
 | sample offsets, compare | G13's packed offsets or depth reference in a register at 71:64 in place of the high register bits, bit 78 for offsets (as in Apple's kernels), 79 for compare (found on the phone) |
-| texture_load | none; Mesa samples at the pixel centre instead. That sampler takes pixel coordinates, which ignore mip levels, so texelFetch above level 0 reads level 0 |
+| texture_load | none; Mesa samples at the pixel centre instead. That sampler takes pixel coordinates, which ignore mip levels, so texelFetch above level 0 samples the texel centre in normalized coordinates with an explicit 16-bit LOD through a second internal sampler, the last of the 16 |
 | bindless textures | none; descriptors are found from the state index |
 | twiddled tiles | G13's sizes, but upright for 2, 8 and 32 byte formats: 64x128, 32x64, 16x32 (`Texture<G11>::sumLevelSizesTiled`). Z order starting with Y, extra bits of the long side on top |
 | layout | images are linear, 2D arrays included |
@@ -308,7 +308,7 @@ shader.
 | word | bits |
 |---|---|
 | fragment control | 13:0 visibility index (offset / 4), 14 boolean, 15 visibility on, 16 scissor, 17 depth bias, 18 and 19 stencil, 21 tag write off, 26 tri merging off |
-| face | 7:0 stencil reference, 15:8 line width, 19:17 depth compare, 20 shader writes depth (without it the test uses the interpolated depth), 21 depth write off, 26:24 pass type, 31:28 object type (5 and 6 line and point filled triangles) |
+| face | 7:0 stencil reference, 15:8 line width, 19:17 depth compare, 20 shader writes depth (without it the test uses the interpolated depth; the written depth is not clamped, so Mesa saturates it), 21 depth write off, 26:24 pass type, 31:28 object type (5 and 6 line and point filled triangles) |
 | stencil | as G13 |
 | cull | as G13, clamp W in bit 5, no cull 2 |
 | shader counts | as G13 up to bit 11; from 15 the tilebuffer words the shader writes, 0 while every render target is spilled |
