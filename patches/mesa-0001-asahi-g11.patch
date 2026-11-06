@@ -905,6 +905,43 @@ index 6236c3c..16937e2 100644
                         ((T.value >> 6) << 26) | ((S.value >> 6) << 24) |
                         (I->zs << 29);
  
+diff --git a/src/asahi/compiler/agx_register_allocate.c b/src/asahi/compiler/agx_register_allocate.c
+index 87a0335..f7a3597 100644
+--- a/src/asahi/compiler/agx_register_allocate.c
++++ b/src/asahi/compiler/agx_register_allocate.c
+@@ -1451,8 +1451,14 @@ agx_ra(agx_context *ctx)
+    enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
+    BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
+    unsigned max_ncomps = 1;
++   bool g11_texture = false;
+ 
+    agx_foreach_instr_global(ctx, I) {
++      g11_texture |= AGX_G11 && (I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
++                                 I->op == AGX_OPCODE_TEXTURE_LOAD ||
++                                 I->op == AGX_OPCODE_IMAGE_LOAD ||
++                                 I->op == AGX_OPCODE_IMAGE_WRITE);
++
+       /* Record collects/phis so we can coalesce when assigning */
+       if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
+           I->op == AGX_OPCODE_EXPORT || I->op == AGX_OPCODE_SPLIT) {
+@@ -1497,6 +1503,17 @@ agx_ra(agx_context *ctx)
+ 
+    max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
+ 
++   /*
++    * G11 samples and image writes reach r0-r31 only: the sample tail holds
++    * the offset or compare register, not high register bits, and none of
++    * Apple's G11 samples go above r21. Keep such shaders in r0-r31.
++    *
++    * ponytail: bigger shaders still use the full file and break; fragment
++    * shaders cannot spill on G11
++    */
++   if (g11_texture && demand <= 64)
++      max_regs = MIN2(max_regs, 64);
++
+    /* Or, we can bound tightly for debugging */
+    if (agx_compiler_debug & AGX_DBG_DEMAND)
+       max_regs = ALIGN_POT(MAX2(demand, 12), reg_file_alignment);
 diff --git a/src/asahi/drm-shim/asahi_noop.c b/src/asahi/drm-shim/asahi_noop.c
 index bfbd9c0..a37d9d8 100644
 --- a/src/asahi/drm-shim/asahi_noop.c
@@ -2053,7 +2090,7 @@ index ab205bf..f1cf6c8 100644
  
     /* Try to open an AGX device */
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..9eb7582 100644
+index 616dd6d..e7bdd69 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
 @@ -231,6 +231,10 @@ agx_create_blend_state(struct pipe_context *ctx,
@@ -2324,7 +2361,54 @@ index 616dd6d..9eb7582 100644
     if (internal_kernel) {
        key.reserved_preamble = 8;
     } else if (!secondary) {
-@@ -1535,7 +1645,11 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
+@@ -1497,6 +1607,46 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
+                                size_t data_size, bool prolog, bool epilog,
+                                unsigned cf_base, bool internal_kernel);
+ 
++/*
++ * G11's st_vary only takes an immediate slot, so the slots must be known when
++ * compiling. They depend on the fragment shader's flat and linear inputs,
++ * which the GS copy program does not know, so G11 compiles it for each.
++ */
++static struct agx_compiled_shader *
++agx_compile_gs_copy(struct agx_device *dev, struct util_debug_callback *debug,
++                    nir_shader *gs_copy, const struct agx_uncompiled_shader *so,
++                    uint64_t flat, uint64_t linear)
++{
++   /* Replace the point size write if present, but do not insert a write:
++    * the GS rast program writes point size iff we have points.
++    */
++   NIR_PASS(_, gs_copy, agx_nir_lower_point_size, false);
++
++   NIR_PASS(_, gs_copy, nir_lower_clip_halfz_dynamic);
++
++   NIR_PASS(_, gs_copy, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
++            NULL);
++   NIR_PASS(_, gs_copy, agx_nir_lower_cull_distance_vs);
++
++   if (AGX_G11) {
++      gs_copy->info.known_interpolation_qualifiers = true;
++      gs_copy->info.linear_varyings = linear;
++      gs_copy->info.perspective_varyings = ~(flat | linear);
++   }
++
++   struct agx_unlinked_uvs_layout uvs = {0};
++   NIR_PASS(_, gs_copy, agx_nir_lower_uvs, &uvs);
++
++   struct agx_compiled_shader *cs = agx_compile_nir(
++      dev, gs_copy, debug, MESA_SHADER_GEOMETRY, false, true, false, 0, NULL);
++   cs->so = so;
++   cs->stage = so->type;
++   cs->uvs = uvs;
++   cs->flat = flat;
++   cs->linear = linear;
++   return cs;
++}
++
+ /* Does not take ownership of key. Clones if necessary. */
+ static struct agx_compiled_shader *
+ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
+@@ -1535,7 +1685,11 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
        }
  
        if (key->hw) {
@@ -2337,7 +2421,60 @@ index 616dd6d..9eb7582 100644
           NIR_PASS(_, nir, nir_lower_clip_halfz_dynamic);
  
           NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
-@@ -1998,6 +2112,13 @@ agx_get_compute_state_info(struct pipe_context *pctx, void *cso,
+@@ -1631,26 +1785,16 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
+    }
+ 
+    if (gs_copy) {
+-      /* Replace the point size write if present, but do not insert a write:
+-       * the GS rast program writes point size iff we have points.
+-       */
+-      NIR_PASS(_, gs_copy, agx_nir_lower_point_size, false);
+-
+-      NIR_PASS(_, gs_copy, nir_lower_clip_halfz_dynamic);
+-
+-      NIR_PASS(_, gs_copy, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
+-               NULL);
+-      NIR_PASS(_, gs_copy, agx_nir_lower_cull_distance_vs);
+-
+-      struct agx_unlinked_uvs_layout uvs = {0};
+-      NIR_PASS(_, gs_copy, agx_nir_lower_uvs, &uvs);
++      if (AGX_G11) {
++         compiled->gs_copy_nir = nir_shader_clone(NULL, gs_copy);
++         util_dynarray_init(&compiled->gs_copies, NULL);
++      }
+ 
+       compiled->gs_copy =
+-         agx_compile_nir(dev, gs_copy, &pctx->debug, MESA_SHADER_GEOMETRY,
+-                         false, true, false, 0, NULL);
+-      compiled->gs_copy->so = so;
+-      compiled->gs_copy->stage = so->type;
+-      compiled->gs_copy->uvs = uvs;
++         agx_compile_gs_copy(dev, &pctx->debug, gs_copy, so, 0, 0);
++
++      if (AGX_G11)
++         util_dynarray_append(&compiled->gs_copies, compiled->gs_copy);
+    }
+ 
+    compiled->gs = gs_info;
+@@ -1667,12 +1811,15 @@ agx_get_shader_variant(struct agx_screen *screen, struct pipe_context *pctx,
+                        struct agx_uncompiled_shader *so,
+                        union asahi_shader_key *key)
+ {
++   /* The cache does not keep G11's GS copy NIR */
++   bool cache = !(AGX_G11 && so->type == MESA_SHADER_GEOMETRY);
+    struct agx_compiled_shader *compiled =
+-      agx_disk_cache_retrieve(screen, so, key);
++      cache ? agx_disk_cache_retrieve(screen, so, key) : NULL;
+ 
+    if (!compiled) {
+       compiled = agx_compile_variant(&screen->dev, pctx, so, key);
+-      agx_disk_cache_store(screen->disk_cache, so, key, compiled);
++      if (cache)
++         agx_disk_cache_store(screen->disk_cache, so, key, compiled);
+    }
+ 
+    /* key may be destroyed after we return, so clone it before using it as a
+@@ -1998,6 +2145,13 @@ agx_get_compute_state_info(struct pipe_context *pctx, void *cso,
  
     info->max_threads =
        agx_occupancy_for_register_count(so->b.info.nr_gprs).max_threads;
@@ -2351,7 +2488,62 @@ index 616dd6d..9eb7582 100644
     info->private_memory = 0;
     info->preferred_simd_size = 32;
     info->simd_sizes = 32;
-@@ -2625,6 +2746,23 @@ translate_sampler_state_count(struct agx_context *ctx, mesa_shader_stage stage)
+@@ -2221,6 +2375,37 @@ agx_update_gs(struct agx_context *ctx, const struct pipe_draw_info *info,
+    ctx->gs = _mesa_hash_table_next_entry(
+                 ctx->stage[MESA_SHADER_GEOMETRY].shader->variants, NULL)
+                 ->data;
++
++   /* G11: pick or compile the copy program for this fragment shader.
++    *
++    * ponytail: switches the shared GS's current copy program without a lock
++    */
++   if (ctx->gs->gs_copy_nir) {
++      struct agx_uncompiled_shader *fs = ctx->stage[MESA_SHADER_FRAGMENT].shader;
++      uint64_t flat = fs->info.inputs_flat_shaded;
++      uint64_t linear = fs->info.inputs_linear_shaded;
++      struct agx_compiled_shader *copy = NULL;
++
++      util_dynarray_foreach(&ctx->gs->gs_copies, struct agx_compiled_shader *,
++                            cs) {
++         if ((*cs)->flat == flat && (*cs)->linear == linear)
++            copy = *cs;
++      }
++
++      if (!copy) {
++         nir_shader *nir = nir_shader_clone(NULL, ctx->gs->gs_copy_nir);
++         copy = agx_compile_gs_copy(agx_device(ctx->base.screen),
++                                    &ctx->base.debug, nir, gs, flat, linear);
++         util_dynarray_append(&ctx->gs->gs_copies, copy);
++         ralloc_free(nir);
++      }
++
++      if (copy != ctx->gs->gs_copy) {
++         ctx->gs->gs_copy = copy;
++         ctx->dirty |= AGX_DIRTY_VS | AGX_DIRTY_VS_PROG;
++      }
++   }
++
+    return true;
+ }
+ 
+@@ -2435,8 +2620,15 @@ agx_delete_compiled_shader(struct agx_device *dev,
+    if (so->pre_gs)
+       agx_delete_compiled_shader(dev, so->pre_gs);
+ 
+-   if (so->gs_copy)
++   if (so->gs_copy_nir) {
++      util_dynarray_foreach(&so->gs_copies, struct agx_compiled_shader *, cs)
++         agx_delete_compiled_shader(dev, *cs);
++
++      util_dynarray_fini(&so->gs_copies);
++      ralloc_free(so->gs_copy_nir);
++   } else if (so->gs_copy) {
+       agx_delete_compiled_shader(dev, so->gs_copy);
++   }
+ 
+    free(so->b.binary);
+    agx_bo_unreference(dev, so->bo);
+@@ -2625,6 +2817,23 @@ translate_sampler_state_count(struct agx_context *ctx, mesa_shader_stage stage)
                                              ctx->stage[stage].custom_borders);
  }
  
@@ -2375,7 +2567,7 @@ index 616dd6d..9eb7582 100644
  static uint32_t
  agx_nr_tex_descriptors_without_spilled_rts(const struct agx_compiled_shader *cs)
  {
-@@ -2671,8 +2809,18 @@ agx_upload_spilled_rt_descriptors(struct agx_texture_packed *out,
+@@ -2671,8 +2880,18 @@ agx_upload_spilled_rt_descriptors(struct agx_texture_packed *out,
        struct pipe_sampler_view sampler_view = sampler_view_for_surface(surf);
        sampler_view.target = PIPE_TEXTURE_2D_ARRAY;
  
@@ -2395,7 +2587,7 @@ index 616dd6d..9eb7582 100644
     }
  }
  
-@@ -2889,7 +3037,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2889,7 +3108,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
  
     mesa_shader_stage stage = cs->stage;
  
@@ -2408,7 +2600,7 @@ index 616dd6d..9eb7582 100644
        agx_usc_pack(&b, TEXTURE, cfg) {
           cfg.start = 0;
           cfg.count =
-@@ -2898,7 +3050,17 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2898,7 +3121,17 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -2427,7 +2619,7 @@ index 616dd6d..9eb7582 100644
        agx_usc_pack(&b, SAMPLER, cfg) {
           cfg.start = 0;
           cfg.count = batch->sampler_count[stage];
-@@ -2954,30 +3116,53 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2954,30 +3187,53 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -2501,7 +2693,7 @@ index 616dd6d..9eb7582 100644
        }
     }
  
-@@ -3206,8 +3391,6 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3206,8 +3462,6 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
        }
     }
  
@@ -2510,7 +2702,7 @@ index 616dd6d..9eb7582 100644
     /* Get the shader */
     key.reserved_preamble = uniforms;
     struct agx_device *dev = agx_device(ctx->base.screen);
-@@ -3215,13 +3398,21 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3215,13 +3469,21 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
     agx_batch_add_bo(batch, shader->bo);
     assert(shader->info.rodata.size_16 == 0);
  
@@ -2538,7 +2730,7 @@ index 616dd6d..9eb7582 100644
  
     if (shader->info.has_preamble) {
        agx_usc_pack(&b, PRESHADER, cfg) {
-@@ -3242,10 +3433,14 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3242,10 +3504,14 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
        cfg.sampler_state_register_count =
           agx_translate_sampler_state_count(needs_sampler ? 1 : 0, false);
  
@@ -2554,7 +2746,7 @@ index 616dd6d..9eb7582 100644
     return ret;
  }
  
-@@ -3313,27 +3508,30 @@ agx_batch_init_state(struct agx_batch *batch)
+@@ -3313,27 +3579,30 @@ agx_batch_init_state(struct agx_batch *batch)
        cfg.usc_cache_inval = true;
     }
  
@@ -2603,7 +2795,7 @@ index 616dd6d..9eb7582 100644
     batch->vdm.current = out;
  
     /* Mark it as initialized now, since agx_batch_writes() will check this. */
-@@ -3416,9 +3614,183 @@ agx_point_object_type(struct agx_rasterizer *rast)
+@@ -3416,9 +3685,183 @@ agx_point_object_type(struct agx_rasterizer *rast)
               : AGX_OBJECT_TYPE_POINT_SPRITE_UV10;
  }
  
@@ -2788,7 +2980,7 @@ index 616dd6d..9eb7582 100644
  static uint8_t *
  agx_encode_state(struct agx_batch *batch, uint8_t *out)
  {
-@@ -3442,7 +3814,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3442,7 +3885,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
         IS_DIRTY(PRIM)) {
  
        unsigned bindings = ctx->linked.fs->cf.nr_bindings;
@@ -2798,7 +2990,7 @@ index 616dd6d..9eb7582 100644
           size_t linkage_size =
              AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
  
-@@ -3457,6 +3830,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3457,6 +3901,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                      : 0,
                                   &batch->generate_primitive_id);
  
@@ -2809,7 +3001,7 @@ index 616dd6d..9eb7582 100644
           batch->varyings = agx_usc_addr(dev, t.gpu);
        } else {
           batch->varyings = 0;
-@@ -3466,7 +3843,60 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3466,7 +3914,60 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ppp_updates++;
     }
  
@@ -2871,7 +3063,7 @@ index 616dd6d..9eb7582 100644
        agx_push(out, VDM_STATE, cfg) {
           cfg.vertex_shader_word_0_present = true;
           cfg.vertex_shader_word_1_present = true;
-@@ -3511,8 +3941,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3511,8 +4012,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ctx->dirty |= AGX_DIRTY_SCISSOR_ZBIAS;
     }
  
@@ -2882,7 +3074,7 @@ index 616dd6d..9eb7582 100644
  
        agx_upload_viewport_scissor(pool, batch, &out, ctx->viewport,
                                    ctx->rast->base.scissor ? ctx->scissor : NULL,
-@@ -3533,6 +3963,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3533,6 +4034,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                        : is_lines ? AGX_OBJECT_TYPE_LINE
                                                   : AGX_OBJECT_TYPE_TRIANGLE;
  
@@ -2904,7 +3096,7 @@ index 616dd6d..9eb7582 100644
     struct AGX_PPP_HEADER dirty = {
        .fragment_control =
           IS_DIRTY(ZS) || IS_DIRTY(RS) || IS_DIRTY(PRIM) || IS_DIRTY(QUERY),
-@@ -4919,6 +5364,23 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+@@ -4919,6 +5435,23 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     agx_legalize_xfb(ctx);
  
     struct agx_batch *batch = agx_get_batch(ctx);
@@ -2928,7 +3120,7 @@ index 616dd6d..9eb7582 100644
     uint64_t ib = 0;
     size_t ib_extent = 0;
  
-@@ -5202,7 +5664,19 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+@@ -5202,7 +5735,19 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
  
     uint8_t *out = agx_encode_state(batch, batch->vdm.current);
  
@@ -2949,7 +3141,7 @@ index 616dd6d..9eb7582 100644
        agx_push(out, VDM_STATE, cfg)
           cfg.restart_index_present = true;
  
-@@ -5314,6 +5788,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5314,6 +5859,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -2969,7 +3161,7 @@ index 616dd6d..9eb7582 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +5831,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +5902,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);
@@ -2982,10 +3174,18 @@ index 616dd6d..9eb7582 100644
  
     agx_launch_internal(batch, grid, wg, launch, stage, usc);
 diff --git a/src/gallium/drivers/asahi/agx_state.h b/src/gallium/drivers/asahi/agx_state.h
-index 967cd2b..461d222 100644
+index 967cd2b..4b02cb6 100644
 --- a/src/gallium/drivers/asahi/agx_state.h
 +++ b/src/gallium/drivers/asahi/agx_state.h
-@@ -168,6 +168,9 @@ struct PACKED agx_draw_uniforms {
+@@ -30,6 +30,7 @@
+ #include "util/disk_cache.h"
+ #include "util/hash_table.h"
+ #include "util/rwlock.h"
++#include "util/u_dynarray.h"
+ #include "util/u_range.h"
+ #include "agx_bg_eot.h"
+ #include "agx_helpers.h"
+@@ -168,6 +169,9 @@ struct PACKED agx_draw_uniforms {
      * indices. This mapping must be compatible with the fragment shader.
      */
     uint16_t uvs_index[VARYING_SLOT_MAX];
@@ -2995,7 +3195,7 @@ index 967cd2b..461d222 100644
  };
  
  struct PACKED agx_stage_uniforms {
-@@ -223,6 +226,9 @@ struct agx_compiled_shader {
+@@ -223,6 +227,9 @@ struct agx_compiled_shader {
     /* Mapped executable memory */
     struct agx_bo *bo;
  
@@ -3005,7 +3205,21 @@ index 967cd2b..461d222 100644
     /* Uniforms the driver must push */
     unsigned push_range_count;
     struct agx_push_range push[AGX_MAX_PUSH_RANGES];
-@@ -405,6 +411,9 @@ struct agx_batch {
+@@ -241,6 +248,13 @@ struct agx_compiled_shader {
+    struct agx_compiled_shader *gs_count, *pre_gs;
+    struct agx_compiled_shader *gs_copy;
+ 
++   /* G11: the copy program before its varying slots are known, and every
++    * variant compiled from it, one per fragment shader flat/linear masks
++    */
++   nir_shader *gs_copy_nir;
++   struct util_dynarray gs_copies;
++   uint64_t flat, linear;
++
+    struct poly_gs_info gs;
+ 
+    /* Logical shader stage used for descriptor access. This may differ from the
+@@ -405,6 +419,9 @@ struct agx_batch {
     uint32_t varyings;
     struct agx_varyings_vs linked_varyings;
  
@@ -3015,7 +3229,7 @@ index 967cd2b..461d222 100644
     struct agx_draw_uniforms uniforms;
     struct agx_stage_uniforms stage_uniforms[MESA_SHADER_STAGES];
  
-@@ -478,6 +487,9 @@ struct agx_blend {
+@@ -478,6 +495,9 @@ struct agx_blend {
  
     /* PIPE_CLEAR_* bitmask corresponding to this blend state */
     uint32_t store;
