@@ -310,15 +310,20 @@ APK = $(ALPINE)/sbin/apk.static --arch aarch64 --usermode --allow-untrusted --no
 	-X $(ALPINE_URL)/main -X $(ALPINE_URL)/community
 SYSROOT_PKGS := musl-dev gcc g++ libdrm-dev llvm21-dev clang21-dev clang21-libclang \
 	spirv-llvm-translator-dev spirv-tools-dev libclc-dev expat-dev zlib-dev zstd-dev \
-	elfutils-dev opencl-headers opencl-icd-loader-dev
+	elfutils-dev opencl-headers opencl-icd-loader-dev wayland-dev wayland-protocols
 ROOTFS_PKGS := alpine-baselayout busybox musl libdrm zlib zstd-libs expat spirv-tools \
-	llvm21-libs clang21-libs spirv-llvm-translator-libs libstdc++ libgcc opencl-icd-loader strace
+	llvm21-libs clang21-libs spirv-llvm-translator-libs libstdc++ libgcc opencl-icd-loader strace \
+	wayland-libs-client wayland-libs-server wayland-libs-egl
 RUST_DIR  := build/rust
 RUST_VER  := 1.98.1
 RUSTC     := $(RUST_DIR)/rustup/toolchains/$(RUST_VER)-x86_64-unknown-linux-gnu/bin/rustc
 MESA_A12  := $(MESA_SRC)/build-a12
+# Meson wants the build machine's wayland-scanner at the target's version
+WL_VER    := 1.24.0
+WL_DIR    := build/wayland-scanner
+WL_SCANNER := $(WL_DIR)/bin/wayland-scanner
 A12_CC    := clang --target=aarch64-alpine-linux-musl --sysroot=$(ALPINE)/root -fuse-ld=lld
-HOST_PATH := PKG_CONFIG_PATH=$(LLVM_DIR)/lib64/pkgconfig PATH=$(abspath $(dir $(RUSTC))):$(abspath $(MESA_BIN))/compiler/clc:$(abspath $(MESA_BIN))/asahi/clc:$(abspath $(MESA_BIN))/compiler/spirv:$(LLVM_DIR)/bin:$$PATH
+HOST_PATH := PKG_CONFIG_PATH=$(abspath $(WL_DIR))/lib/pkgconfig:$(LLVM_DIR)/lib64/pkgconfig PATH=$(abspath $(WL_DIR))/bin:$(abspath $(dir $(RUSTC))):$(abspath $(MESA_BIN))/compiler/clc:$(abspath $(MESA_BIN))/asahi/clc:$(abspath $(MESA_BIN))/compiler/spirv:$(LLVM_DIR)/bin:$$PATH
 
 rootfs: $(ALPINE)/rootfs.tar
 
@@ -345,12 +350,20 @@ $(ALPINE)/cross.ini: tools/alpine-cross.ini | $(ALPINE)/root
 	sed -e 's|@SYSROOT@|$(abspath $(ALPINE)/root)|g' -e 's|@RUSTC@|$(abspath $(RUSTC))|g' \
 	    -e 's|@TOOLS@|$(abspath tools)|g' $< > $@
 
-$(ALPINE)/rootfs.tar: $(MESA_SRC)/build/build.ninja $(ALPINE)/cross.ini $(RUSTC) tools/cl-test.c tools/gl-test.c FORCE | $(ALPINE)/rootfs
+$(WL_SCANNER):
+	mkdir -p $(WL_DIR)
+	curl -sL https://gitlab.freedesktop.org/wayland/wayland/-/releases/$(WL_VER)/downloads/wayland-$(WL_VER).tar.xz | \
+	    tar xJ -C $(WL_DIR)
+	meson setup $(WL_DIR)/build $(WL_DIR)/wayland-$(WL_VER) --prefix=$(abspath $(WL_DIR)) --libdir=lib \
+	    -Dlibraries=false -Ddocumentation=false -Dtests=false -Ddtd_validation=false
+	ninja -C $(WL_DIR)/build install
+
+$(ALPINE)/rootfs.tar: $(MESA_SRC)/build/build.ninja $(ALPINE)/cross.ini $(RUSTC) $(WL_SCANNER) tools/cl-test.c tools/gl-test.c FORCE | $(ALPINE)/rootfs
 	$(HOST_PATH) ninja -C $(MESA_SRC)/build src/compiler/clc/mesa_clc src/asahi/clc/asahi_clc \
 	    src/compiler/spirv/vtn_bindgen2
 	test -d $(MESA_A12) || $(HOST_PATH) meson setup $(MESA_A12) $(MESA_SRC) \
 	    --cross-file $(ALPINE)/cross.ini -Dgallium-drivers=asahi -Dvulkan-drivers= \
-	    -Dgallium-rusticl=true -Dllvm=enabled -Dshared-llvm=enabled -Dplatforms= \
+	    -Dgallium-rusticl=true -Dllvm=enabled -Dshared-llvm=enabled -Dplatforms=wayland \
 	    -Dglx=disabled -Degl=enabled -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled \
 	    -Dopengl=true \
 	    -Dmesa-clc=system -Dprecomp-compiler=system -Dmesa-clc-bundle-headers=enabled \
