@@ -164,10 +164,10 @@ index 000000000..26962adef
 +#endif
 diff --git a/drivers/gpu/drm/agx/agx_drv.c b/drivers/gpu/drm/agx/agx_drv.c
 new file mode 100644
-index 000000000..3c3a930ad
+index 000000000..64b2f114c
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_drv.c
-@@ -0,0 +1,774 @@
+@@ -0,0 +1,776 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * DRM driver for the Apple A12 GPU (AGX G11P). It speaks the
@@ -836,7 +836,9 @@ index 000000000..3c3a930ad
 +	.num_ioctls = ARRAY_SIZE(agx_ioctls),
 +	.fops = &agx_fops,
 +	.gem_create_object = agx_gem_create_object,
-+	DRM_GEM_SHMEM_DRIVER_OPS,
++	/* Imports map their pages for the GPU (agx_vm_bind uses the table) */
++	.gem_prime_import_sg_table = drm_gem_shmem_prime_import_sg_table,
++	.dumb_create = drm_gem_shmem_dumb_create,
 +	/* Mesa picks its driver by this name; this is the Asahi uAPI. */
 +	.name = "asahi",
 +	.desc = "Apple A12 GPU",
@@ -2051,10 +2053,10 @@ index 000000000..512eacd9a
 +
 diff --git a/drivers/gpu/drm/agx/agx_vm.c b/drivers/gpu/drm/agx/agx_vm.c
 new file mode 100644
-index 000000000..4dc96afc9
+index 000000000..afffea65b
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_vm.c
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,408 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * GPU VMs. The MMU is a PowerVR Rogue S7 with 16K pages: a page catalogue
@@ -2332,9 +2334,13 @@ index 000000000..4dc96afc9
 +	    offset >= obj->size || range > obj->size - offset)
 +		return -EINVAL;
 +
-+	sgt = drm_gem_shmem_get_pages_sgt(to_drm_gem_shmem_obj(obj));
-+	if (IS_ERR(sgt))
-+		return PTR_ERR(sgt);
++	/* Imported buffers (display scanout) come with their pages mapped */
++	if (drm_gem_is_imported(obj))
++		sgt = to_drm_gem_shmem_obj(obj)->sgt;
++	else
++		sgt = drm_gem_shmem_get_pages_sgt(to_drm_gem_shmem_obj(obj));
++	if (IS_ERR_OR_NULL(sgt))
++		return sgt ? PTR_ERR(sgt) : -EINVAL;
 +
 +	m = kzalloc(sizeof(*m), GFP_KERNEL);
 +	if (!m)

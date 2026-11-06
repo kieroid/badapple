@@ -906,10 +906,224 @@ index 6236c3c..16937e2 100644
                         (I->zs << 29);
  
 diff --git a/src/asahi/compiler/agx_register_allocate.c b/src/asahi/compiler/agx_register_allocate.c
-index 87a0335..f7a3597 100644
+index 87a0335..bc039ff 100644
 --- a/src/asahi/compiler/agx_register_allocate.c
 +++ b/src/asahi/compiler/agx_register_allocate.c
-@@ -1451,8 +1451,14 @@ agx_ra(agx_context *ctx)
+@@ -1042,6 +1042,177 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
+    }
+ }
+ 
++/*
++ * G11 samples and image writes encode their data and coordinate registers in
++ * six bits (16-bit halves), so those must sit in r0-r31. Returns the source
++ * index of such an operand, -1 for the destination, or -2 for none.
++ */
++#define G11_LOW_REGS 64
++
++static bool
++g11_low_operand(const agx_instr *I, int s)
++{
++   if (!AGX_G11)
++      return false;
++
++   switch (I->op) {
++   case AGX_OPCODE_TEXTURE_SAMPLE:
++   case AGX_OPCODE_TEXTURE_LOAD:
++   case AGX_OPCODE_IMAGE_LOAD:
++      return s == -1 || s == 0;
++   case AGX_OPCODE_IMAGE_WRITE:
++      return s == 0;
++   default:
++      return false;
++   }
++}
++
++/*
++ * Move whatever lives in [base, base + n) to free registers elsewhere,
++ * recording the copies. Fails, changing nothing, if there is no room.
++ */
++static bool
++g11_evict_range(struct ra_ctx *rctx, unsigned base, unsigned n,
++                struct util_dynarray *copies)
++{
++   BITSET_WORD *used = rctx->used_regs[RA_GPR];
++   unsigned vars[G11_LOW_REGS], homes[G11_LOW_REGS], nr = 0;
++   bool ok = true;
++
++   /* Occupants fully inside the range, since vectors are aligned to size */
++   for (unsigned r = base; r < base + n; ++r) {
++      if (!BITSET_TEST(used, r))
++         continue;
++
++      unsigned var = rctx->reg_to_ssa[r];
++      unsigned k = rctx->ncomps[var];
++      if (rctx->ssa_to_reg[var] != r || k > n)
++         return false;
++
++      vars[nr++] = var;
++      r += k - 1;
++   }
++
++   /* Find homes outside the range, reserving as we go */
++   BITSET_SET_COUNT(used, base, n);
++
++   for (unsigned i = 0; i < nr && ok; ++i) {
++      ok = find_regs_simple(rctx, RA_GPR, rctx->ncomps[vars[i]],
++                            rctx->ncomps[vars[i]], &homes[i]);
++      if (ok)
++         BITSET_SET_COUNT(used, homes[i], rctx->ncomps[vars[i]]);
++      else
++         nr = i;
++   }
++
++   BITSET_CLEAR_COUNT(used, base, n);
++
++   for (unsigned i = 0; i < nr; ++i) {
++      unsigned k = rctx->ncomps[vars[i]];
++
++      if (ok) {
++         insert_copy(rctx, copies, homes[i], vars[i]);
++         BITSET_CLEAR_COUNT(used, rctx->ssa_to_reg[vars[i]], k);
++         BITSET_SET_COUNT(used, homes[i], k);
++         set_ssa_to_reg(rctx, vars[i], homes[i]);
++      } else {
++         BITSET_CLEAR_COUNT(used, homes[i], k);
++      }
++   }
++
++   return ok;
++}
++
++/*
++ * Find an aligned range of n registers in r0-r31 avoiding the reserved
++ * registers and those in pinned, emptying it. Returns ~0 if impossible.
++ */
++static unsigned
++g11_low_range(struct ra_ctx *rctx, unsigned n, const BITSET_WORD *pinned,
++              struct util_dynarray *copies)
++{
++   unsigned best = ~0, best_used = ~0;
++   unsigned top = MIN2(G11_LOW_REGS, rctx->bound[RA_GPR]);
++
++   for (unsigned base = 0; base + n <= top; base += n) {
++      if (base < reserved_size(rctx->shader) ||
++          BITSET_TEST_RANGE(pinned, base, base + n - 1))
++         continue;
++
++      unsigned nr_used = 0;
++      for (unsigned r = base; r < base + n; ++r)
++         nr_used += BITSET_TEST(rctx->used_regs[RA_GPR], r);
++
++      if (nr_used < best_used) {
++         best = base;
++         best_used = nr_used;
++      }
++   }
++
++   if (best == ~0 || !g11_evict_range(rctx, best, n, copies))
++      return ~0;
++
++   return best;
++}
++
++/*
++ * Move the low-register sources of a G11 sample or image write into r0-r31
++ * before it. ponytail: if there is no room the operand stays high and reads
++ * the wrong register
++ */
++static void
++g11_lower_sources(struct ra_ctx *rctx, agx_instr *I, BITSET_WORD *pinned)
++{
++   struct util_dynarray copies = UTIL_DYNARRAY_INIT;
++
++   agx_foreach_ssa_src(I, s) {
++      if (!g11_low_operand(I, s) || I->src[s].memory)
++         continue;
++
++      unsigned var = I->src[s].value;
++      unsigned old = rctx->ssa_to_reg[var], n = rctx->ncomps[var];
++
++      if (old + n <= G11_LOW_REGS) {
++         BITSET_SET_COUNT(pinned, old, n);
++         continue;
++      }
++
++      unsigned reg = g11_low_range(rctx, n, pinned, &copies);
++      if (reg == ~0)
++         continue;
++
++      insert_copy(rctx, &copies, reg, var);
++      BITSET_CLEAR_COUNT(rctx->used_regs[RA_GPR], old, n);
++      BITSET_SET_COUNT(rctx->used_regs[RA_GPR], reg, n);
++      BITSET_SET_COUNT(pinned, reg, n);
++      set_ssa_to_reg(rctx, var, reg);
++   }
++
++   agx_builder b = agx_init_builder(rctx->shader, agx_before_instr(I));
++   agx_emit_parallel_copies(
++      &b, copies.data, util_dynarray_num_elements(&copies, struct agx_copy));
++   util_dynarray_fini(&copies);
++}
++
++/* Pick a destination in r0-r31 for a G11 sample, freeing one if needed */
++static unsigned
++g11_low_dest(struct ra_ctx *rctx, agx_instr *I, unsigned reg, unsigned n,
++             const BITSET_WORD *pinned)
++{
++   if (reg + n <= G11_LOW_REGS)
++      return reg;
++
++   struct util_dynarray copies = UTIL_DYNARRAY_INIT;
++   unsigned low = g11_low_range(rctx, n, pinned, &copies);
++
++   agx_builder b = agx_init_builder(rctx->shader, agx_before_instr(I));
++   agx_emit_parallel_copies(
++      &b, copies.data, util_dynarray_num_elements(&copies, struct agx_copy));
++   util_dynarray_fini(&copies);
++
++   return low == ~0 ? reg : low;
++}
++
+ /** Assign registers to SSA values in a block. */
+ 
+ static void
+@@ -1123,6 +1294,11 @@ agx_ra_assign_local(struct ra_ctx *rctx)
+          continue;
+       }
+ 
++      BITSET_DECLARE(pinned, AGX_NUM_REGS) = {0};
++      bool g11_low = g11_low_operand(I, -1) || g11_low_operand(I, 0);
++      if (g11_low)
++         g11_lower_sources(rctx, I, pinned);
++
+       /* Search for regions of contiguous killed sources to early-kill. */
+       rctx->early_killed = false;
+ 
+@@ -1155,7 +1331,22 @@ agx_ra_assign_local(struct ra_ctx *rctx)
+          if (I->op == AGX_OPCODE_PHI && I->dest[d].has_reg)
+             continue;
+ 
+-         assign_regs(rctx, I->dest[d], pick_regs(rctx, I, d));
++         unsigned reg = pick_regs(rctx, I, d);
++
++         if (g11_low && g11_low_operand(I, -1) && !rctx->early_killed) {
++            BITSET_SET_COUNT(rctx->used_regs[RA_GPR], reg,
++                             rctx->ncomps[I->dest[d].value]);
++            unsigned low = g11_low_dest(rctx, I, reg,
++                                        rctx->ncomps[I->dest[d].value], pinned);
++            BITSET_CLEAR_COUNT(rctx->used_regs[RA_GPR], reg,
++                               rctx->ncomps[I->dest[d].value]);
++            if (low != reg)
++               BITSET_CLEAR_COUNT(rctx->used_regs[RA_GPR], low,
++                                  rctx->ncomps[I->dest[d].value]);
++            reg = low;
++         }
++
++         assign_regs(rctx, I->dest[d], reg);
+       }
+ 
+       /* Free late-killed sources */
+@@ -1451,8 +1642,14 @@ agx_ra(agx_context *ctx)
     enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
     BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
     unsigned max_ncomps = 1;
@@ -924,7 +1138,7 @@ index 87a0335..f7a3597 100644
        /* Record collects/phis so we can coalesce when assigning */
        if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
            I->op == AGX_OPCODE_EXPORT || I->op == AGX_OPCODE_SPLIT) {
-@@ -1497,6 +1503,17 @@ agx_ra(agx_context *ctx)
+@@ -1497,6 +1694,17 @@ agx_ra(agx_context *ctx)
  
     max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
  
@@ -2008,7 +2222,7 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..f1cf6c8 100644
+index ab205bf..3b99018 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
 @@ -369,7 +369,8 @@ agx_linear_allowed(const struct agx_resource *pres)
@@ -2043,7 +2257,56 @@ index ab205bf..f1cf6c8 100644
        return DRM_FORMAT_MOD_LINEAR;
  
     /* For SCANOUT or SHARED resources with no explicit modifier selection, force
-@@ -1993,7 +2000,8 @@ agx_init_compute_caps(struct pipe_screen *pscreen)
+@@ -518,6 +525,13 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
+       nresource->base.bind |= PIPE_BIND_SHADER_IMAGE;
+    }
+ 
++   /* Scanout buffers come from the display (see kmsro), linear */
++   bool ro_dumb = dev->ro && (templ->bind & PIPE_BIND_SCANOUT) &&
++                  dev->ro->create_for_resource ==
++                     renderonly_create_kms_dumb_buffer_for_resource;
++   if (ro_dumb)
++      nresource->modifier = DRM_FORMAT_MOD_LINEAR;
++
+    nresource->mipmapped = (templ->last_level > 0);
+ 
+    assert(templ->format != PIPE_FORMAT_Z24X8_UNORM &&
+@@ -528,8 +542,34 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
+ 
+    pipe_reference_init(&nresource->base.reference, 1);
+ 
++   struct winsys_handle dumb = {0};
++   if (ro_dumb) {
++      nresource->scanout =
++         renderonly_scanout_for_resource(&nresource->base, dev->ro, &dumb);
++      if (!nresource->scanout) {
++         FREE(nresource);
++         return NULL;
++      }
++
++      nresource->layout.linear_stride_B = dumb.stride;
++   }
++
+    ail_make_miptree(&nresource->layout);
+ 
++   if (ro_dumb) {
++      nresource->bo = agx_bo_import(dev, dumb.handle);
++      close(dumb.handle);
++
++      if (!nresource->bo) {
++         renderonly_scanout_destroy(nresource->scanout, dev->ro);
++         FREE(nresource);
++         return NULL;
++      }
++
++      agx_resource_debug(nresource, "New (display): ");
++      return &nresource->base;
++   }
++
+    /* Fail Piglit's obnoxious allocations */
+    if (nresource->layout.size_B >= (1ull << 32)) {
+       free(nresource);
+@@ -1993,7 +2033,8 @@ agx_init_compute_caps(struct pipe_screen *pscreen)
  
     caps->subgroup_sizes = 32;
     caps->max_variable_threads_per_block = 1024;
@@ -2053,7 +2316,7 @@ index ab205bf..f1cf6c8 100644
  }
  
  static void
-@@ -2182,7 +2190,6 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+@@ -2182,7 +2223,6 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        BITFIELD_BIT(MESA_PRIM_TRIANGLES_ADJACENCY) |
        BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) |
        BITFIELD_BIT(MESA_PRIM_PATCHES);
@@ -2061,7 +2324,7 @@ index ab205bf..f1cf6c8 100644
     caps->map_unsynchronized_thread_safe = true;
  
     caps->vs_layer_viewport = true;
-@@ -2253,6 +2260,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
+@@ -2253,6 +2293,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
        if (!ail_is_valid_pixel_format(tex_format))
           return false;
  
@@ -2081,7 +2344,7 @@ index ab205bf..f1cf6c8 100644
        /* RGB32, luminance/alpha/intensity emulated for texture buffers only */
        if ((ent.channels == AGX_CHANNELS_R32G32B32_EMULATED ||
             util_format_is_luminance(tex_format) ||
-@@ -2437,6 +2457,7 @@ agx_screen_create(int fd, struct renderonly *ro,
+@@ -2437,6 +2490,7 @@ agx_screen_create(int fd, struct renderonly *ro,
  
     agx_screen->dev.fd = fd;
     agx_screen->dev.ro = ro;
@@ -3239,6 +3502,22 @@ index 967cd2b..4b02cb6 100644
  };
  
  struct asahi_vs_shader_key {
+diff --git a/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c b/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
+index 2ead5db..3c5ab17 100644
+--- a/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
++++ b/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
+@@ -88,7 +88,10 @@ struct pipe_screen *kmsro_drm_screen_create(int kms_fd,
+ 
+       if (strcmp(render_dev_name, "asahi") == 0) {
+ #if defined(GALLIUM_ASAHI)
+-         ro->create_for_resource = renderonly_create_gpu_import_for_resource;
++         /* G11's display pipe scans contiguous memory only, so the display
++          * allocates scanout buffers and the GPU imports them.
++          */
++         ro->create_for_resource = renderonly_create_kms_dumb_buffer_for_resource;
+          screen = asahi_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
+ #endif
+       }
 diff --git a/src/util/u_thread.c b/src/util/u_thread.c
 index d6b3a07..921e88e 100644
 --- a/src/util/u_thread.c

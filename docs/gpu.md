@@ -257,6 +257,16 @@ command left running when `tsh.py` disconnects is killed:
 build/venv/bin/python tools/tsh.py "setsid chroot /mnt/a gl-test > /mnt/a/tmp/gl.txt 2>&1 < /dev/null &"
 ```
 
+On screen, GBM on the display node (`/dev/dri/card1`, `apple-h11p`) goes
+through kmsro to the GPU. The display pipe only scans contiguous memory, so
+the display allocates scanout buffers as dumb buffers and the GPU imports
+them, linear at the display's pitch. kmscube from Alpine draws at about 470
+fps (flips do not wait for vblank):
+
+```sh
+build/venv/bin/python tools/tsh.py "chroot /mnt/a sh -c 'sleep 30 | kmscube -D /dev/dri/card1'"
+```
+
 Without the phone, build Mesa with `-Dtools=drm-shim` and run under
 `LD_PRELOAD=libasahi_noop_drm_shim.so ASAHI_MESA_DEBUG=trace`.
 
@@ -363,6 +373,7 @@ Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 | `usc_exec_base` | must be 0x11 << 32, the base the firmware loads |
 | submit | async, one `drm_sched` job per compute or render command |
 | name | `asahi`, so Mesa picks it up |
+| imports | dma-bufs map their pages for the GPU (`drm_gem_shmem_prime_import_sg_table`), for display scanout |
 | ignored | sampler heaps, timestamps |
 | not yet | helper programs, single-page binds, more than one render in flight |
 
