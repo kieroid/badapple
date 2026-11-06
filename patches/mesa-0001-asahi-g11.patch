@@ -2222,7 +2222,7 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..3b99018 100644
+index ab205bf..581a353 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
 @@ -369,7 +369,8 @@ agx_linear_allowed(const struct agx_resource *pres)
@@ -2316,15 +2316,25 @@ index ab205bf..3b99018 100644
  }
  
  static void
-@@ -2182,7 +2223,6 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+@@ -2182,11 +2223,14 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        BITFIELD_BIT(MESA_PRIM_TRIANGLES_ADJACENCY) |
        BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) |
        BITFIELD_BIT(MESA_PRIM_PATCHES);
 -
     caps->map_unsynchronized_thread_safe = true;
  
-    caps->vs_layer_viewport = true;
-@@ -2253,6 +2293,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
+-   caps->vs_layer_viewport = true;
+-   caps->tes_layer_viewport = true;
++   /* G11 binds render targets at their first layer, see
++    * agx_upload_spilled_rt_descriptors
++    */
++   caps->vs_layer_viewport = !AGX_G11;
++   caps->tes_layer_viewport = !AGX_G11;
++   caps->no_layered_rendering = AGX_G11;
+ 
+    caps->context_priority_mask =
+       PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM |
+@@ -2253,6 +2297,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
        if (!ail_is_valid_pixel_format(tex_format))
           return false;
  
@@ -2344,7 +2354,7 @@ index ab205bf..3b99018 100644
        /* RGB32, luminance/alpha/intensity emulated for texture buffers only */
        if ((ent.channels == AGX_CHANNELS_R32G32B32_EMULATED ||
             util_format_is_luminance(tex_format) ||
-@@ -2437,6 +2490,7 @@ agx_screen_create(int fd, struct renderonly *ro,
+@@ -2437,6 +2494,7 @@ agx_screen_create(int fd, struct renderonly *ro,
  
     agx_screen->dev.fd = fd;
     agx_screen->dev.ro = ro;
@@ -3502,6 +3512,19 @@ index 967cd2b..4b02cb6 100644
  };
  
  struct asahi_vs_shader_key {
+diff --git a/src/gallium/include/pipe/p_defines.h b/src/gallium/include/pipe/p_defines.h
+index 85e4e9f..bc380ce 100644
+--- a/src/gallium/include/pipe/p_defines.h
++++ b/src/gallium/include/pipe/p_defines.h
+@@ -938,6 +938,8 @@ struct pipe_caps {
+    bool query_pipeline_statistics;
+    bool mixed_framebuffer_sizes;
+    bool vs_layer_viewport;
++   /* Only the first layer of a render target can be drawn to */
++   bool no_layered_rendering;
+    bool texture_gather_sm5;
+    bool buffer_map_persistent_coherent;
+    bool fake_sw_msaa;
 diff --git a/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c b/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
 index 2ead5db..3c5ab17 100644
 --- a/src/gallium/winsys/kmsro/drm/kmsro_drm_winsys.c
@@ -3518,6 +3541,19 @@ index 2ead5db..3c5ab17 100644
           screen = asahi_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
  #endif
        }
+diff --git a/src/mesa/state_tracker/st_pbo.c b/src/mesa/state_tracker/st_pbo.c
+index 7d7bfc2..dae7ab1 100644
+--- a/src/mesa/state_tracker/st_pbo.c
++++ b/src/mesa/state_tracker/st_pbo.c
+@@ -660,7 +660,7 @@ st_init_pbo_helpers(struct st_context *st)
+    st->pbo.rgba_only =
+       screen->caps.buffer_sampler_view_rgba_only;
+ 
+-   if (screen->caps.vs_instanceid) {
++   if (screen->caps.vs_instanceid && !screen->caps.no_layered_rendering) {
+       if (screen->caps.vs_layer_viewport) {
+          st->pbo.layers = true;
+       } else if (screen->caps.max_geometry_output_vertices >= 3) {
 diff --git a/src/util/u_thread.c b/src/util/u_thread.c
 index d6b3a07..921e88e 100644
 --- a/src/util/u_thread.c
