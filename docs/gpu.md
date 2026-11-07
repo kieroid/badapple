@@ -169,6 +169,7 @@ applegpu's G13 disassembler reads nearly all of them.
 | threadgroup load, store | device load, store (`0x05`, `0x45`) with bits 29:28 = 2, bit 26 and bits 46:45 clear, a 16-bit register base holding the byte address |
 | threadgroup barrier | `0x0068`, same as G13 |
 | memory barrier | only `0xf596` |
+| flush memory to texture | none, the thread stops there; Mesa leaves it out |
 | SIMD reductions (`simd_iadd`) | none |
 
 An instruction G11 lacks kills the thread without a fault, and the job still
@@ -349,8 +350,17 @@ level 0, so Mesa leaves it clear. The image write takes level 0 from the
 instruction, so to render into a level Mesa points the PBE at that level,
 with its size and one level.
 
-Not checked yet: multisampling, so sample and centroid interpolation
-(centroid never shows up in Apple's code; Mesa uses G13's value).
+Multisampled textures: AGXMetalA12 gives them dimension 4 and the sample
+count as on G13, but how the sample instruction picks a sample is not known
+(with G13's coordinates every read returns the first pixel), and the image
+write has no sample either. Mesa keeps the hardware out of it: a
+multisampled colour buffer is a linear 2D array with a layer per sample,
+read as an array and written as one tall 2D image at y + sample * height,
+with the fragment shader looping over samples. Depth and stencil stay in
+ZLS's layout, a pixel's samples side by side, and are read as one 2D layer
+of a format with a channel per sample (Z32F 4x as RGBA32F), so blits can
+pick the sample. Rasterization, coverage and ZLS need nothing new. Centroid
+never shows up in Apple's code; Mesa uses G13's value.
 
 The kernel side needs the hwdata power limits (0 parks the engines), the
 scene at 3D command +0x30, the event counter written at both finalizes, the
