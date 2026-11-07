@@ -2347,7 +2347,7 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..581a353 100644
+index ab205bf..cead4e6 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
 @@ -369,7 +369,8 @@ agx_linear_allowed(const struct agx_resource *pres)
@@ -2459,7 +2459,7 @@ index ab205bf..581a353 100644
  
     caps->context_priority_mask =
        PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM |
-@@ -2253,6 +2297,19 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
+@@ -2253,6 +2297,18 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
        if (!ail_is_valid_pixel_format(tex_format))
           return false;
  
@@ -2471,15 +2471,14 @@ index ab205bf..581a353 100644
 +         if (d->layout == UTIL_FORMAT_LAYOUT_S3TC ||
 +             d->layout == UTIL_FORMAT_LAYOUT_RGTC ||
 +             d->layout == UTIL_FORMAT_LAYOUT_BPTC ||
-+             (d->layout == UTIL_FORMAT_LAYOUT_ASTC &&
-+              util_format_is_float(tex_format)))
++             util_format_is_astc_hdr(tex_format))
 +            return false;
 +      }
 +
        /* RGB32, luminance/alpha/intensity emulated for texture buffers only */
        if ((ent.channels == AGX_CHANNELS_R32G32B32_EMULATED ||
             util_format_is_luminance(tex_format) ||
-@@ -2437,6 +2494,7 @@ agx_screen_create(int fd, struct renderonly *ro,
+@@ -2437,6 +2493,7 @@ agx_screen_create(int fd, struct renderonly *ro,
  
     agx_screen->dev.fd = fd;
     agx_screen->dev.ro = ro;

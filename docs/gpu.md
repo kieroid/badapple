@@ -327,8 +327,10 @@ The texture unit does not see what the clear or earlier draws wrote in the
 same pass, so a draw that blends, masks or reads the framebuffer after them
 starts a new pass. That is slow, and overlap within one draw is still wrong.
 
-A12 has no BC (S3TC, RGTC, BPTC) or ASTC HDR decoding; sampling S3TC hangs
-it. Mesa decompresses those formats on upload instead.
+A12 has no BC (S3TC, RGTC, BPTC) decoding; sampling S3TC hangs it. Mesa
+decompresses those formats on upload instead. It has no ASTC HDR either: HDR
+blocks read as zero through the HDR formats and as the LDR error colour
+through the LDR ones, so Mesa leaves out KHR_texture_compression_astc_hdr.
 
 Depth and stencil need little new: G11's ZLS control word and the depth and
 stencil load and store registers are G13's (AGXMetalA12 `Framebuffer<G11>`
