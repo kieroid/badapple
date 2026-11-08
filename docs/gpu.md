@@ -186,7 +186,7 @@ driver target G11, so OpenCL runs through Rusticl and GLES through EGL. `AGX_G11
 | uniform | tag 0x03 |
 | shader | one word for shader, registers and threadgroup memory |
 | no preshader | 0x0108 |
-| preshader | 0x38, then 0xc04000, then the code address. Fragment preshaders go stale: over a run of draws some cores shade with an earlier draw's results, so Mesa leaves fragment shaders without one |
+| preshader | 0x38, then 0xc04000, then the code address. Fragment preshaders go stale: over a run of draws some cores shade with an earlier draw's results, so Mesa leaves fragment shaders without one. A preshader that samples drops a triangle now and then, so shaders with textures get none either |
 | texture | `0x17 \| start << 8 \| count << 20 \| address >> 2 << 26`, count 0 is 64 |
 | sampler | `0x13 \| start << 8 \| count << 20 \| address >> 2 << 26` |
 | CDM header | bit 0 set; uniforms, textures in 8s, samplers in 4s |
