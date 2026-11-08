@@ -49,7 +49,7 @@ index 000000000..5b8b471d7
 +agx-y := agx_drv.o agx_fw.o agx_vm.o
 diff --git a/drivers/gpu/drm/agx/agx.h b/drivers/gpu/drm/agx/agx.h
 new file mode 100644
-index 000000000..26962adef
+index 000000000..437eeb28c
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx.h
 @@ -0,0 +1,109 @@
@@ -153,7 +153,7 @@ index 000000000..26962adef
 +struct agx_vm *agx_vm_get(struct agx_vm *vm);
 +void agx_vm_put(struct agx_vm *vm);
 +int agx_vm_bind(struct agx_vm *vm, struct drm_gem_object *obj, u64 offset, u64 range,
-+		u64 addr, bool write);
++		u64 addr, bool write, bool single);
 +int agx_vm_unbind(struct agx_vm *vm, u64 addr, u64 range);
 +void agx_vm_unmap_object(struct agx_vm *vm, struct drm_gem_object *obj);
 +struct agx_vm *agx_vm_job_start(struct agx_vm *vm);
@@ -164,7 +164,7 @@ index 000000000..26962adef
 +#endif
 diff --git a/drivers/gpu/drm/agx/agx_drv.c b/drivers/gpu/drm/agx/agx_drv.c
 new file mode 100644
-index 000000000..64b2f114c
+index 000000000..bb19c5842
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_drv.c
 @@ -0,0 +1,776 @@
@@ -175,8 +175,7 @@ index 000000000..64b2f114c
 + *
 + *  - USC addresses are relative to AGX_USC_BASE, which the firmware loads
 + *    for every context, so queues must use it as usc_exec_base.
-+ *  - No helper programs, layered or very large renders, or single-page
-+ *    binds yet.
++ *  - No helper programs, or layered or very large renders yet.
 + *    Sampler heaps and timestamps are accepted and ignored; timestamp
 + *    objects are only kept so that Mesa can bind them.
 + *  - Each compute or render command is one scheduler job. Every queue is an entity
@@ -289,7 +288,7 @@ index 000000000..64b2f114c
 +		.vm_end = AGX_VM_END,
 +		.vm_kernel_min_size = AGX_PAGE,
 +		.max_commands_per_submission = MAX_COMMANDS,
-+		.command_timestamp_frequency_hz = 24000000,
++		.command_timestamp_frequency_hz = 1000000000,
 +	};
 +
 +	if (args->param_group || args->pad)
@@ -373,7 +372,7 @@ index 000000000..64b2f114c
 +			break;
 +		}
 +		if (op.flags & ~(DRM_ASAHI_BIND_UNBIND | DRM_ASAHI_BIND_READ |
-+				 DRM_ASAHI_BIND_WRITE)) {
++				 DRM_ASAHI_BIND_WRITE | DRM_ASAHI_BIND_SINGLE_PAGE)) {
 +			ret = -EINVAL;
 +			break;
 +		}
@@ -391,7 +390,8 @@ index 000000000..64b2f114c
 +			break;
 +		}
 +		ret = agx_vm_bind(vm, obj, op.offset, op.range, op.addr,
-+				  op.flags & DRM_ASAHI_BIND_WRITE);
++				  op.flags & DRM_ASAHI_BIND_WRITE,
++				  op.flags & DRM_ASAHI_BIND_SINGLE_PAGE);
 +		drm_gem_object_put(obj);
 +	}
 +out:
@@ -946,7 +946,7 @@ index 000000000..64b2f114c
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..512eacd9a
+index 000000000..7a1c78f7b
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
 @@ -0,0 +1,1101 @@
@@ -2053,10 +2053,10 @@ index 000000000..512eacd9a
 +
 diff --git a/drivers/gpu/drm/agx/agx_vm.c b/drivers/gpu/drm/agx/agx_vm.c
 new file mode 100644
-index 000000000..afffea65b
+index 000000000..fc8a8c324
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_vm.c
-@@ -0,0 +1,408 @@
+@@ -0,0 +1,443 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * GPU VMs. The MMU is a PowerVR Rogue S7 with 16K pages: a page catalogue
@@ -2311,17 +2311,57 @@ index 000000000..afffea65b
 +{
 +	struct agx_mapping *m;
 +
-+	if (addr < vm->kernel_end && vm->kernel_start < addr + range)
-+		return true;
 +	list_for_each_entry(m, &vm->mappings, node)
 +		if (addr < m->addr + m->range && m->addr < addr + range)
 +			return true;
 +	return false;
 +}
 +
-+/* Map range bytes of obj from offset at addr. Binds may not overlap. */
++/*
++ * Unmap [addr, addr + range), splitting the mappings it cuts through, as
++ * Vulkan rebinds sparse ranges over each other. Called with the VM idle.
++ */
++static int cut(struct agx_vm *vm, u64 addr, u64 range)
++{
++	struct agx_mapping *m, *tmp, *right;
++	u64 end = addr + range;
++
++	list_for_each_entry_safe(m, tmp, &vm->mappings, node) {
++		u64 m_end = m->addr + m->range;
++
++		if (m_end <= addr || end <= m->addr)
++			continue;
++		clear_range(vm, max(addr, m->addr), min(end, m_end) - max(addr, m->addr));
++		if (m->addr < addr && end < m_end) {
++			right = kzalloc(sizeof(*right), GFP_KERNEL);
++			if (!right)
++				return -ENOMEM;
++			drm_gem_object_get(m->obj);
++			right->obj = m->obj;
++			right->addr = end;
++			right->range = m_end - end;
++			list_add(&right->node, &vm->mappings);
++			m->range = addr - m->addr;
++		} else if (m->addr < addr) {
++			m->range = addr - m->addr;
++		} else if (end < m_end) {
++			m->addr = end;
++			m->range = m_end - end;
++		} else {
++			list_del(&m->node);
++			drm_gem_object_put(m->obj);
++			kfree(m);
++		}
++	}
++	return 0;
++}
++
++/*
++ * Map range bytes of obj from offset at addr, or with single the page at
++ * offset over the whole range, replacing what was there.
++ */
 +int agx_vm_bind(struct agx_vm *vm, struct drm_gem_object *obj, u64 offset, u64 range,
-+		u64 addr, bool write)
++		u64 addr, bool write, bool single)
 +{
 +	struct sg_table *sgt;
 +	struct scatterlist *sg;
@@ -2331,7 +2371,7 @@ index 000000000..afffea65b
 +	int i, ret;
 +
 +	if (!range || !IS_ALIGNED(offset | range | addr, AGX_PAGE) || !in_vm(addr, range) ||
-+	    offset >= obj->size || range > obj->size - offset)
++	    offset >= obj->size || (!single && range > obj->size - offset))
 +		return -EINVAL;
 +
 +	/* Imported buffers (display scanout) come with their pages mapped */
@@ -2348,8 +2388,16 @@ index 000000000..afffea65b
 +
 +	mutex_lock(&vm->lock);
 +	ret = -EBUSY;
-+	if (overlaps(vm, addr, range))
++	if (addr < vm->kernel_end && vm->kernel_start < addr + range)
 +		goto err;
++	if (overlaps(vm, addr, range)) {
++		ret = wait_event_interruptible(vm->idle, !atomic_read(&vm->jobs));
++		if (ret)
++			goto err;
++		ret = cut(vm, addr, range);
++		if (ret)
++			goto err_clear;
++	}
 +
 +	for_each_sgtable_dma_sg(sgt, sg, i) {
 +		dma_addr_t dma = sg_dma_address(sg);
@@ -2362,10 +2410,14 @@ index 000000000..afffea65b
 +		dma += skip;
 +		len -= skip;
 +		skip = 0;
-+		for (; len && va < addr + range; len -= AGX_PAGE, dma += AGX_PAGE, va += AGX_PAGE) {
++		for (; len && va < addr + range; va += AGX_PAGE) {
 +			ret = agx_set_pte(vm, va, dma | pte_flags);
 +			if (ret)
 +				goto err_clear;
++			if (!single) {
++				len -= AGX_PAGE;
++				dma += AGX_PAGE;
++			}
 +		}
 +		if (va == addr + range)
 +			break;
@@ -2393,38 +2445,21 @@ index 000000000..afffea65b
 +}
 +
 +/*
-+ * Unmap every binding inside [addr, addr + range); partial ones fail. Waits
-+ * for the VM's jobs first.
++ * Unmap [addr, addr + range), splitting the bindings at its edges. Waits for
++ * the VM's jobs first.
 + *
 + * ponytail: waits for all of them, not only those using the range. Track
 + * per-mapping fences if unbinds under load ever stall.
 + */
 +int agx_vm_unbind(struct agx_vm *vm, u64 addr, u64 range)
 +{
-+	struct agx_mapping *m, *tmp;
 +	int ret;
 +
 +	mutex_lock(&vm->lock);
 +	ret = wait_event_interruptible(vm->idle, !atomic_read(&vm->jobs));
-+	if (ret)
-+		goto out;
-+	list_for_each_entry(m, &vm->mappings, node) {
-+		if (m->addr < addr + range && addr < m->addr + m->range &&
-+		    (m->addr < addr || m->addr + m->range > addr + range)) {
-+			ret = -EINVAL;
-+			goto out;
-+		}
-+	}
-+	list_for_each_entry_safe(m, tmp, &vm->mappings, node) {
-+		if (m->addr < addr || m->addr + m->range > addr + range)
-+			continue;
-+		clear_range(vm, m->addr, m->range);
-+		list_del(&m->node);
-+		drm_gem_object_put(m->obj);
-+		kfree(m);
-+	}
++	if (!ret)
++		ret = cut(vm, addr, range);
 +	agx_fw_flush_tlb(vm->agx, vm->ctx);
-+out:
 +	mutex_unlock(&vm->lock);
 +	return ret;
 +}
