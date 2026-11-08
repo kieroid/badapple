@@ -313,7 +313,7 @@ SYSROOT_PKGS := musl-dev gcc g++ libdrm-dev llvm21-dev clang21-dev clang21-libcl
 	elfutils-dev opencl-headers opencl-icd-loader-dev wayland-dev wayland-protocols
 ROOTFS_PKGS := alpine-baselayout busybox musl libdrm zlib zstd-libs expat spirv-tools \
 	llvm21-libs clang21-libs spirv-llvm-translator-libs libstdc++ libgcc opencl-icd-loader strace \
-	wayland-libs-client wayland-libs-server wayland-libs-egl
+	wayland-libs-client wayland-libs-server wayland-libs-egl vulkan-loader vulkan-tools
 RUST_DIR  := build/rust
 RUST_VER  := 1.98.1
 RUSTC     := $(RUST_DIR)/rustup/toolchains/$(RUST_VER)-x86_64-unknown-linux-gnu/bin/rustc
@@ -362,12 +362,13 @@ $(ALPINE)/rootfs.tar: $(MESA_SRC)/build/build.ninja $(ALPINE)/cross.ini $(RUSTC)
 	$(HOST_PATH) ninja -C $(MESA_SRC)/build src/compiler/clc/mesa_clc src/asahi/clc/asahi_clc \
 	    src/compiler/spirv/vtn_bindgen2
 	test -d $(MESA_A12) || $(HOST_PATH) meson setup $(MESA_A12) $(MESA_SRC) \
-	    --cross-file $(ALPINE)/cross.ini -Dgallium-drivers=asahi -Dvulkan-drivers= \
+	    --cross-file $(ALPINE)/cross.ini -Dgallium-drivers=asahi -Dvulkan-drivers=asahi \
 	    -Dgallium-rusticl=true -Dllvm=enabled -Dshared-llvm=enabled -Dplatforms=wayland \
 	    -Dglx=disabled -Degl=enabled -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled \
 	    -Dopengl=true \
 	    -Dmesa-clc=system -Dprecomp-compiler=system -Dmesa-clc-bundle-headers=enabled \
 	    -Dstatic-libclc=all -Dbuildtype=release -Dprefix=/usr -Dlibdir=lib
+	$(HOST_PATH) meson configure $(MESA_A12) -Dvulkan-drivers=asahi
 	$(HOST_PATH) ninja -C $(MESA_A12)
 	DESTDIR=$(abspath $(ALPINE)/rootfs) meson install -C $(MESA_A12) --no-rebuild --quiet --strip
 	PATH=$(LLVM_DIR)/bin:$$PATH $(A12_CC) -O2 -Wall -o $(ALPINE)/rootfs/usr/bin/cl-test \

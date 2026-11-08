@@ -373,6 +373,27 @@ its own; 1 MB ran out at 3000 full screen triangles. The tiling buffers are
 sized for 16384x4096 worth of macrotiles, in any shape up to 16384 a side. There are no partial
 renders yet, so a frame that fills the heap hangs the TA.
 
+### Vulkan
+
+Honeykrisp (`src/asahi/vulkan`) runs vkcube under weston. Its G11 paths are
+the GL driver's: the vertex state token, PPP state in G11's blocks, 8 byte
+scissors, the combined shader word, spilled render targets, linear images
+without compression, and the G11 PBE stride bias and level handling.
+
+| what | G11 |
+|---|---|
+| descriptors | no bindless: a shader's textures and samplers (constant indices) get state slots at compile time, and every draw and dispatch copies their descriptors from the bound sets into its texture and sampler state, spilled render targets after the textures. Samplers 1-14 are the API's, 0 the txf sampler and 15 the txf-lod one. Vulkan forbids updating a bound set, so copying at record time is safe; there is no update-after-bind |
+| CDM stream link | not known, so compute streams are not merged; a single stream past 64 KiB (about 20 dispatches) would still need it. VDM's link works |
+| copies | the meta copy shaders store texel by texel; G11's block store is not known |
+| WSI | linear modifiers only. weston logs `bo geometry out of bounds` while it tries the buffer on a display plane, then composites it with GL |
+
+Not done: dynamically indexed descriptor arrays (element 0 is used),
+multisampling, custom border colours.
+
+```sh
+build/venv/bin/python tools/tsh.py "chroot /mnt/a vulkaninfo --summary"
+```
+
 ## DRM
 
 `linux-0020` is `drivers/gpu/drm/agx`, a render node with the
@@ -386,8 +407,10 @@ Asahi uAPI (`include/uapi/drm/asahi_drm.h`).
 | submit | async, one `drm_sched` job per compute or render command |
 | name | `asahi`, so Mesa picks it up |
 | imports | dma-bufs map their pages for the GPU (`drm_gem_shmem_prime_import_sg_table`), for display scanout |
-| ignored | sampler heaps, timestamps |
-| not yet | helper programs, single-page binds, more than one render in flight |
+| binds | single-page binds map one page over the range; a bind over existing mappings replaces them, splitting those it cuts (Vulkan rebinds sparse ranges) |
+| timestamps | reported in ns, as Honeykrisp expects; not written |
+| ignored | sampler heaps |
+| not yet | helper programs, more than one render in flight |
 
 Every user context gets a page catalogue at init and is loaded by the
 firmware at every power-up, so a VM only fills its page tables. After a

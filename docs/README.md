@@ -36,8 +36,9 @@ Registers, gotchas, and things that turned out wrong.
 | PCIe, wifi, Bluetooth | :white_check_mark: |
 | Audio, cellular, camera | :x: |
 | GPU compute, OpenCL through Rusticl | :white_check_mark: |
-| GPU graphics, GLES clears and flat triangles | :white_check_mark: |
-| GPU varyings, depth, display output | :x: |
+| GPU graphics, GLES 3.0 (dEQP-GLES3 44523 pass), kmscube, glmark2, weston | :white_check_mark: |
+| GPU Vulkan through Honeykrisp, vkcube under weston | :white_check_mark: |
+| GPU tilebuffer, Vulkan multisampling and descriptor indexing | :x: |
 
 - Wifi joins WPA2 networks on 2.4 and 5 GHz, with Alpine's `iw` and
   `wpa_supplicant` brought in by hand.
@@ -52,5 +53,6 @@ Registers, gotchas, and things that turned out wrong.
 4. Touch has no power off and no force sensor.
 5. Wifi and Bluetooth need their tools brought in. Bluetooth pairing is
    untested, it needs `bluetoothd`.
-6. GPU graphics draws flat triangles only, offscreen. Varyings, depth and
-   stencil are untested, and there is no display output.
+6. GPU render targets all live in memory (the tilebuffer stores are not
+   known), so blending and framebuffer reads start new passes. Vulkan is
+   early: constant descriptor indices only, no multisampling.
