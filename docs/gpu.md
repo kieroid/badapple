@@ -371,7 +371,11 @@ at 0x50 and 0x80 bytes per macrotile utile, and a buffer manager whose block
 list entries are eight 16K chunks. The parameter heap behind it is 8 MB of
 its own; 1 MB ran out at 3000 full screen triangles. The tiling buffers are
 sized for 16384x4096 worth of macrotiles, in any shape up to 16384 a side. There are no partial
-renders yet, so a frame that fills the heap hangs the TA.
+renders yet, so a frame that fills the heap hangs the TA. The scene's
+`+0x14` counts the 128K blocks a TA used: 14 B a point, 32 B a tiny
+triangle, about 0.6 B per 32x32 tile a primitive covers. Mesa keeps an
+estimate per render (4 B per vertex output plus 8, `agx_g11_heap_cost`),
+ends the render past 6 MB and splits draws bigger than half that.
 
 ### Vulkan
 
@@ -386,9 +390,13 @@ without compression, and the G11 PBE stride bias and level handling.
 | CDM stream link | not known, so compute streams are not merged; a single stream past 64 KiB (about 20 dispatches) would still need it. VDM's link works |
 | copies | the meta copy shaders store texel by texel; G11's block store is not known |
 | WSI | linear modifiers only. weston logs `bo geometry out of bounds` while it tries the buffer on a display plane, then composites it with GL |
+| internal kernels | libagx's precompiled kernels (buffer copies, fills, updates) launch with no texture or sampler states; a count without the USC words loads state from address 0 and left every later compute job doing nothing |
+| layers | layered rendering is not known and the kernel takes one layer: layer writes are dropped and everything lands on layer 0 |
+| background loads | background programs clamp spilled render target loads to the image: they run for the whole tile, past the last row of a linear image. Fragment shaders reading the framebuffer are in bounds and skip it |
 
-Not done: dynamically indexed descriptor arrays (element 0 is used),
-multisampling, custom border colours.
+Not done: layered rendering, dynamically indexed descriptor arrays
+(element 0 is used), multisampling (only 1 sample is advertised), custom
+border colours (the extension is off).
 
 ```sh
 build/venv/bin/python tools/tsh.py "chroot /mnt/a vulkaninfo --summary"

@@ -949,7 +949,7 @@ new file mode 100644
 index 000000000..7a1c78f7b
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1101 @@
+@@ -0,0 +1,1100 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -2050,7 +2050,6 @@ index 000000000..7a1c78f7b
 +	WRITE_ONCE(*(u32 *)(agx->buf + agx->gen + ctx * 4),
 +		   READ_ONCE(*(u32 *)(agx->buf + agx->gen_fw + ctx * 4)) + BIT(22));
 +}
-+
 diff --git a/drivers/gpu/drm/agx/agx_vm.c b/drivers/gpu/drm/agx/agx_vm.c
 new file mode 100644
 index 000000000..fc8a8c324

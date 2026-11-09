@@ -368,7 +368,6 @@ $(ALPINE)/rootfs.tar: $(MESA_SRC)/build/build.ninja $(ALPINE)/cross.ini $(RUSTC)
 	    -Dopengl=true \
 	    -Dmesa-clc=system -Dprecomp-compiler=system -Dmesa-clc-bundle-headers=enabled \
 	    -Dstatic-libclc=all -Dbuildtype=release -Dprefix=/usr -Dlibdir=lib
-	$(HOST_PATH) meson configure $(MESA_A12) -Dvulkan-drivers=asahi
 	$(HOST_PATH) ninja -C $(MESA_A12)
 	DESTDIR=$(abspath $(ALPINE)/rootfs) meson install -C $(MESA_A12) --no-rebuild --quiet --strip
 	PATH=$(LLVM_DIR)/bin:$$PATH $(A12_CC) -O2 -Wall -o $(ALPINE)/rootfs/usr/bin/cl-test \

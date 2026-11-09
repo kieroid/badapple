@@ -1,5 +1,5 @@
 diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
-index e131bcf..c837bbf 100644
+index e131bcf..6ff8014 100644
 --- a/src/asahi/compiler/agx_compile.c
 +++ b/src/asahi/compiler/agx_compile.c
 @@ -977,7 +977,7 @@ translate_atomic_opcode(nir_atomic_op op)
@@ -381,6 +381,14 @@ index e131bcf..c837bbf 100644
     NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
              nir_var_function_temp, ~0);
     NIR_PASS(_, nir, nir_split_var_copies);
+@@ -3698,6 +3921,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
+             nir_metadata_control_flow, NULL);
+ 
+    NIR_PASS(_, nir, nir_lower_frag_coord_to_pixel_coord);
++
+    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+ 
+    /* Late sysval lowering creates large loads. Load lowering creates unpacks */
 diff --git a/src/asahi/compiler/agx_compile.h b/src/asahi/compiler/agx_compile.h
 index 4b10423..ebe0c7b 100644
 --- a/src/asahi/compiler/agx_compile.h
@@ -1106,17 +1114,17 @@ index 6236c3c..2509ed1 100644
                         (I->zs << 29);
  
 diff --git a/src/asahi/compiler/agx_register_allocate.c b/src/asahi/compiler/agx_register_allocate.c
-index 87a0335..bc039ff 100644
+index 87a0335..ccdab8e 100644
 --- a/src/asahi/compiler/agx_register_allocate.c
 +++ b/src/asahi/compiler/agx_register_allocate.c
-@@ -1042,6 +1042,177 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
+@@ -1042,6 +1042,180 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
     }
  }
  
 +/*
 + * G11 samples and image writes encode their data and coordinate registers in
-+ * six bits (16-bit halves), so those must sit in r0-r31. Returns the source
-+ * index of such an operand, -1 for the destination, or -2 for none.
++ * six bits (16-bit halves), so those must sit in r0-r31. Whether source s
++ * (-1 for the destination) is such an operand.
 + */
 +#define G11_LOW_REGS 64
 +
@@ -1226,6 +1234,15 @@ index 87a0335..bc039ff 100644
 +   return best;
 +}
 +
++static void
++g11_emit_copies(struct ra_ctx *rctx, agx_instr *I, struct util_dynarray *copies)
++{
++   agx_builder b = agx_init_builder(rctx->shader, agx_before_instr(I));
++   agx_emit_parallel_copies(
++      &b, copies->data, util_dynarray_num_elements(copies, struct agx_copy));
++   util_dynarray_fini(copies);
++}
++
 +/*
 + * Move the low-register sources of a G11 sample or image write into r0-r31
 + * before it. ponytail: if there is no room the operand stays high and reads
@@ -1259,10 +1276,7 @@ index 87a0335..bc039ff 100644
 +      set_ssa_to_reg(rctx, var, reg);
 +   }
 +
-+   agx_builder b = agx_init_builder(rctx->shader, agx_before_instr(I));
-+   agx_emit_parallel_copies(
-+      &b, copies.data, util_dynarray_num_elements(&copies, struct agx_copy));
-+   util_dynarray_fini(&copies);
++   g11_emit_copies(rctx, I, &copies);
 +}
 +
 +/* Pick a destination in r0-r31 for a G11 sample, freeing one if needed */
@@ -1276,10 +1290,7 @@ index 87a0335..bc039ff 100644
 +   struct util_dynarray copies = UTIL_DYNARRAY_INIT;
 +   unsigned low = g11_low_range(rctx, n, pinned, &copies);
 +
-+   agx_builder b = agx_init_builder(rctx->shader, agx_before_instr(I));
-+   agx_emit_parallel_copies(
-+      &b, copies.data, util_dynarray_num_elements(&copies, struct agx_copy));
-+   util_dynarray_fini(&copies);
++   g11_emit_copies(rctx, I, &copies);
 +
 +   return low == ~0 ? reg : low;
 +}
@@ -1287,7 +1298,7 @@ index 87a0335..bc039ff 100644
  /** Assign registers to SSA values in a block. */
  
  static void
-@@ -1123,6 +1294,11 @@ agx_ra_assign_local(struct ra_ctx *rctx)
+@@ -1123,6 +1297,11 @@ agx_ra_assign_local(struct ra_ctx *rctx)
           continue;
        }
  
@@ -1299,7 +1310,7 @@ index 87a0335..bc039ff 100644
        /* Search for regions of contiguous killed sources to early-kill. */
        rctx->early_killed = false;
  
-@@ -1155,7 +1331,22 @@ agx_ra_assign_local(struct ra_ctx *rctx)
+@@ -1155,7 +1334,22 @@ agx_ra_assign_local(struct ra_ctx *rctx)
           if (I->op == AGX_OPCODE_PHI && I->dest[d].has_reg)
              continue;
  
@@ -1323,32 +1334,27 @@ index 87a0335..bc039ff 100644
        }
  
        /* Free late-killed sources */
-@@ -1451,8 +1642,14 @@ agx_ra(agx_context *ctx)
+@@ -1451,8 +1645,11 @@ agx_ra(agx_context *ctx)
     enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
     BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
     unsigned max_ncomps = 1;
 +   bool g11_texture = false;
  
     agx_foreach_instr_global(ctx, I) {
-+      g11_texture |= AGX_G11 && (I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
-+                                 I->op == AGX_OPCODE_TEXTURE_LOAD ||
-+                                 I->op == AGX_OPCODE_IMAGE_LOAD ||
-+                                 I->op == AGX_OPCODE_IMAGE_WRITE);
++      g11_texture |= g11_low_operand(I, 0);
 +
        /* Record collects/phis so we can coalesce when assigning */
        if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
            I->op == AGX_OPCODE_EXPORT || I->op == AGX_OPCODE_SPLIT) {
-@@ -1497,6 +1694,17 @@ agx_ra(agx_context *ctx)
+@@ -1497,6 +1694,15 @@ agx_ra(agx_context *ctx)
  
     max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
  
 +   /*
 +    * G11 samples and image writes reach r0-r31 only: the sample tail holds
 +    * the offset or compare register, not high register bits, and none of
-+    * Apple's G11 samples go above r21. Keep such shaders in r0-r31.
-+    *
-+    * ponytail: bigger shaders still use the full file and break; fragment
-+    * shaders cannot spill on G11
++    * Apple's G11 samples go above r21. Keep such shaders in r0-r31, bigger
++    * ones move the operands down (g11_lower_sources).
 +    */
 +   if (g11_texture && demand <= 64)
 +      max_regs = MIN2(max_regs, 64);
@@ -1734,10 +1740,25 @@ index 084d727..1a0f529 100644
     unsigned log2_tile_height_el = util_logbase2(tile_size.height_el);
  
 diff --git a/src/asahi/lib/agx_bg_eot.c b/src/asahi/lib/agx_bg_eot.c
-index 1cb8fab..736568f 100644
+index 1cb8fab..0eccdd3 100644
 --- a/src/asahi/lib/agx_bg_eot.c
 +++ b/src/asahi/lib/agx_bg_eot.c
-@@ -269,9 +269,13 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
+@@ -257,8 +257,12 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
+ 
+    /* Bake launch */
+    agx_pack(&p->b.launch, CDM_LAUNCH_WORD_0, cfg) {
+-      cfg.texture_state_register_count = 8 /* same encoding as 0 */;
+-      cfg.sampler_state_register_count = 1;
++      /* G11 loads the counted states from USC address 0 when the USC has no
++       * texture or sampler words, and precompiled kernels push none.
++       */
++      cfg.texture_state_register_count = AGX_G11 ? 0 : 8 /* same as 0 */;
++      cfg.sampler_state_register_count =
++         AGX_G11 ? AGX_SAMPLER_STATES_0 : AGX_SAMPLER_STATES_4_COMPACT;
+       cfg.uniform_register_count = info->push_count;
+       cfg.preshader_register_count = info->nr_preamble_gprs;
+    }
+@@ -269,9 +273,13 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
  
     agx_usc_immediates(&b, &info->rodata, p->ptr);
  
@@ -1752,7 +1773,7 @@ index 1cb8fab..736568f 100644
     agx_usc_shared(&b, info->local_size, info->imageblock_stride, 0);
  
     agx_usc_pack(&b, SHADER, cfg) {
-@@ -283,6 +287,7 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
+@@ -283,6 +291,7 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
        cfg.register_count = info->nr_gprs;
        cfg.spill_size = 0;
     }
@@ -1761,18 +1782,10 @@ index 1cb8fab..736568f 100644
     if (info->nr_preamble_gprs) {
        agx_usc_pack(&b, PRESHADER, cfg) {
 diff --git a/src/asahi/lib/agx_device.c b/src/asahi/lib/agx_device.c
-index f158e0e..b23a797 100644
+index f158e0e..8c8103f 100644
 --- a/src/asahi/lib/agx_device.c
 +++ b/src/asahi/lib/agx_device.c
-@@ -15,6 +15,7 @@
- #include "util/timespec.h"
- #include "agx_abi.h"
- #include "agx_bo.h"
-+#include "asahi/genxml/agx_g11.h"
- #include "agx_compile.h"
- #include "agx_device_virtio.h"
- #include "agx_scratch.h"
-@@ -541,7 +542,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
+@@ -541,7 +541,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
     }
     assert(params_size >= sizeof(dev->params));
  
@@ -1781,7 +1794,7 @@ index f158e0e..b23a797 100644
     const char *variant = " Unknown";
     switch (dev->params.gpu_variant) {
     case 'G':
-@@ -557,10 +558,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
+@@ -557,10 +557,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
        variant = " Ultra";
        break;
     }
@@ -1801,7 +1814,7 @@ index f158e0e..b23a797 100644
  
     /* We need a large chunk of VA space carved out for robustness. Hardware
      * loads can shift an i32 by up to 2, for a total shift of 4. If the base
-@@ -647,7 +653,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
+@@ -647,7 +652,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
  
     simple_mtx_init(&dev->vma_lock, mtx_plain);
     util_vma_heap_init(&dev->main_heap, user_start, user_size);
@@ -1814,7 +1827,7 @@ index f158e0e..b23a797 100644
     dev->vm_id = vm_create.vm_id;
  
 diff --git a/src/asahi/lib/agx_helpers.h b/src/asahi/lib/agx_helpers.h
-index bf7dfb9..af5ed47 100644
+index bf7dfb9..0cff297 100644
 --- a/src/asahi/lib/agx_helpers.h
 +++ b/src/asahi/lib/agx_helpers.h
 @@ -54,6 +54,24 @@ agx_pack_txf_sampler(struct agx_sampler_packed *out)
@@ -1842,7 +1855,7 @@ index bf7dfb9..af5ed47 100644
     }
  }
  
-@@ -139,6 +157,27 @@ agx_pack_zls_control(struct agx_zls_control_packed *packed,
+@@ -139,6 +157,75 @@ agx_pack_zls_control(struct agx_zls_control_packed *packed,
              agx_translate_zls_tiling(s->tiling);
        }
     }
@@ -1850,6 +1863,54 @@ index bf7dfb9..af5ed47 100644
 +   /* AGXMetalA12's Framebuffer<G11> sets bits 62 and 63 with any stencil */
 +   if (AGX_G11 && s)
 +      packed->opaque[1] |= BITFIELD_RANGE(30, 2);
++}
++
++/*
++ * G11 has no partial renders (the kernel does not set them up), so a render
++ * whose geometry fills the 8 MB tiler heap hangs the TA. Drivers end the
++ * render, and split draws, before that. Measured: 14 B per point and 32 B
++ * per tiny triangle, plus about 0.6 B per 32x32 tile a primitive covers.
++ *
++ * ponytail: a CPU estimate against a fixed budget, with indirect draws at a
++ * flat cost; firmware partial renders are the real fix
++ */
++#define AGX_G11_HEAP_BUDGET   (6u << 20)
++#define AGX_G11_HEAP_INDIRECT (AGX_G11_HEAP_BUDGET / 64)
++
++static inline uint64_t
++agx_g11_heap_cost(uint64_t vertices, unsigned outputs)
++{
++   return vertices * (4 * outputs + 8);
++}
++
++/* Most vertices in one piece of a split draw, a multiple of 6 for any list */
++static inline uint32_t
++agx_g11_split_max(unsigned instances, unsigned outputs)
++{
++   uint64_t per = agx_g11_heap_cost(MAX2(instances, 1), outputs);
++   return MAX2((AGX_G11_HEAP_BUDGET / 2) / per / 6 * 6, 6);
++}
++
++/* G11 PBE strides keep the level count in the low bits */
++#define AGX_PBE_STRIDE_BIAS (AGX_G11 ? 16 : 4)
++
++/* G11 vertex state token header class for the vertex output count */
++static inline uint32_t
++agx_g11_vs_class(unsigned outputs)
++{
++   return outputs <= 8     ? 0x4000
++          : outputs <= 24  ? 0x2000
++          : outputs <= 32  ? 0x1800
++          : outputs <= 64  ? 0x1000
++          : outputs <= 128 ? 0x800
++                           : 0x400;
++}
++
++/* G11 pipeline word register count: 8s in 5:2, 0 for 128 */
++static inline uint32_t
++agx_g11_regs(unsigned nr_gprs)
++{
++   return (DIV_ROUND_UP(nr_gprs, 16) & 15) << 2;
 +}
 +
 +/*
@@ -1928,7 +1989,7 @@ index 419dccf..0704fb3 100644
     struct agx_varyings_fs cf;
  
 diff --git a/src/asahi/lib/agx_nir_lower_tilebuffer.c b/src/asahi/lib/agx_nir_lower_tilebuffer.c
-index e20a3ca..758ed43 100644
+index e20a3ca..59838b6 100644
 --- a/src/asahi/lib/agx_nir_lower_tilebuffer.c
 +++ b/src/asahi/lib/agx_nir_lower_tilebuffer.c
 @@ -166,11 +166,89 @@ image_coords(nir_builder *b)
@@ -2021,12 +2082,27 @@ index e20a3ca..758ed43 100644
     nir_def *image = handle_for_rt(b, bindless_base, rt, true);
     nir_def *tex_image = handle_for_rt(b, bindless_base, rt, false);
     nir_def *zero = nir_imm_intN_t(b, 0, 16);
-@@ -230,6 +308,24 @@ load_memory(nir_builder *b, unsigned bindless_base, unsigned nr_samples,
+@@ -230,6 +308,39 @@ load_memory(nir_builder *b, unsigned bindless_base, unsigned nr_samples,
              uint8_t comps, uint8_t bit_size, unsigned rt,
              enum pipe_format format)
  {
 +   if (AGX_G11) {
 +      nir_def *coords = g11_rt_coords(b);
++
++      /* Background programs run for the whole tile: clamp to the image, a
++       * linear one ends right after its last row (read fault on 1D images).
++       * They are internal and lower the txs later. A GL shader reading the
++       * framebuffer is in bounds and gets no texture lowering after this.
++       */
++      if (b->shader->info.internal) {
++         nir_def *size = nir_txs(b, .texture_index = bindless_base + (2 * rt),
++                                 .dim = GLSL_SAMPLER_DIM_2D,
++                                 .is_array = nr_samples > 1,
++                                 .dest_type = nir_type_int32);
++         nir_def *max = nir_iadd_imm(b, nir_trim_vector(b, size, 2), -1);
++         coords = nir_pad_vec4(
++            b, nir_umin(b, nir_trim_vector(b, coords, 2), max));
++      }
 +
 +      if (nr_samples > 1) {
 +         nir_def *sample;
@@ -2047,10 +2123,44 @@ index e20a3ca..758ed43 100644
     nir_def *zero = nir_imm_intN_t(b, 0, 16);
     nir_def *lod = zero;
 diff --git a/src/asahi/lib/agx_nir_lower_uvs.c b/src/asahi/lib/agx_nir_lower_uvs.c
-index 75d3c0d..a289123 100644
+index 75d3c0d..166a8d2 100644
 --- a/src/asahi/lib/agx_nir_lower_uvs.c
 +++ b/src/asahi/lib/agx_nir_lower_uvs.c
-@@ -310,7 +310,7 @@ agx_link_varyings_vs_fs(void *out, struct agx_varyings_vs *vs,
+@@ -129,6 +129,17 @@ write_layer_viewport_sysval(struct ctx *ctx)
+       nir_imm_int(&b, ctx->layout->group_offs[UVS_LAYER_VIEWPORT]));
+ }
+ 
++static bool
++drop_layer(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   if (intr->intrinsic != nir_intrinsic_store_output ||
++       nir_intrinsic_io_semantics(intr).location != VARYING_SLOT_LAYER)
++      return false;
++
++   nir_instr_remove(&intr->instr);
++   return true;
++}
++
+ static bool
+ gather_components(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+ {
+@@ -160,6 +171,15 @@ agx_nir_lower_uvs(nir_shader *s, struct agx_unlinked_uvs_layout *layout)
+    NIR_PASS(progress, s, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
+             NULL);
+ 
++   /* G11 layered rendering is not known and the kernel takes one layer, so
++    * everything lands on layer 0.
++    */
++   if (AGX_G11) {
++      NIR_PASS(progress, s, nir_shader_intrinsics_pass, drop_layer,
++               nir_metadata_control_flow, NULL);
++      s->info.outputs_written &= ~VARYING_BIT_LAYER;
++   }
++
+    /* Determine the unlinked UVS layout */
+    NIR_PASS(progress, s, nir_shader_intrinsics_pass, gather_components,
+             nir_metadata_control_flow, layout);
+@@ -310,7 +330,7 @@ agx_link_varyings_vs_fs(void *out, struct agx_varyings_vs *vs,
                          unsigned provoking_vertex, uint8_t sprite_coord_enable,
                          bool *generate_primitive_id)
  {
@@ -2060,7 +2170,7 @@ index 75d3c0d..a289123 100644
     *generate_primitive_id = false;
  
 diff --git a/src/asahi/lib/agx_ppp.h b/src/asahi/lib/agx_ppp.h
-index 2a7f710..6a7de91 100644
+index 2a7f710..5095e20 100644
 --- a/src/asahi/lib/agx_ppp.h
 +++ b/src/asahi/lib/agx_ppp.h
 @@ -41,7 +41,8 @@ agx_ppp_update_size(struct AGX_PPP_HEADER *present)
@@ -2073,6 +2183,36 @@ index 2a7f710..6a7de91 100644
                (present->viewport_count * AGX_VIEWPORT_LENGTH);
     }
  
+@@ -144,6 +145,29 @@ agx_ppp_fini(uint8_t **out, struct agx_ppp_update *ppp)
+    *out += AGX_PPP_STATE_LENGTH;
+ }
+ 
++/*
++ * G11 takes PPP state in blocks of one state group each, as AGXMetalA12's
++ * RenderContext<G11>::encodeAndEmitRenderState emits it. Header bits:
++ * fragment control, front face, front stencil, back face, back stencil 0-4,
++ * depth bias/scissor 5, fragment shader 7-8, region clip 10, viewport 11,
++ * viewport count 15:12, W clamp 16, output select 17, varying counts 32
++ * and 16 18-19, cull 21. T holds count words.
++ */
++static inline void
++agx_g11_ppp_emit(uint8_t **out, struct agx_ptr T, const uint32_t *words,
++                 unsigned count)
++{
++   memcpy(T.cpu, words, count * 4);
++
++   agx_pack(*out, PPP_STATE, cfg) {
++      cfg.pointer_hi = T.gpu >> 32;
++      cfg.pointer_lo = (uint32_t)T.gpu;
++      cfg.size_words = count;
++   }
++
++   *out += AGX_PPP_STATE_LENGTH;
++}
++
+ static void
+ agx_ppp_push_merged_blobs(struct agx_ppp_update *ppp, size_t length,
+                           void *src1_, void *src2_)
 diff --git a/src/asahi/lib/agx_tilebuffer.c b/src/asahi/lib/agx_tilebuffer.c
 index f79180d..3a72efe 100644
 --- a/src/asahi/lib/agx_tilebuffer.c
@@ -2593,7 +2733,7 @@ index b527e97..d0e8d39 100644
     struct agx_ptr T = hk_pool_alloc(cmd, size, 256);
  
 diff --git a/src/asahi/vulkan/hk_cmd_buffer.h b/src/asahi/vulkan/hk_cmd_buffer.h
-index 6a06060..30582cd 100644
+index 6a06060..ec072ff 100644
 --- a/src/asahi/vulkan/hk_cmd_buffer.h
 +++ b/src/asahi/vulkan/hk_cmd_buffer.h
 @@ -269,6 +269,9 @@ struct hk_graphics_state {
@@ -2606,7 +2746,17 @@ index 6a06060..30582cd 100644
     /* Fast linked shader data structures */
     uint64_t varyings;
     struct agx_varyings_vs linked_varyings;
-@@ -796,6 +799,17 @@ void hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
+@@ -359,6 +362,9 @@ struct hk_cs {
+    /* Whether there is more than just the root chunk */
+    bool stream_linked;
+ 
++   /* Estimated G11 tiler heap use, see agx_g11_heap_cost */
++   uint64_t g11_heap_B;
++
+    /* Whether the sampler heap is required. Although we always must maintain the
+     * heap for correctness, it's often not necessary since we can push lots of
+     * samplers (especially for GL/DX11-era engines).
+@@ -796,6 +802,17 @@ void hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
  void hk_cmd_bind_vertex_buffer(struct hk_cmd_buffer *cmd, uint32_t vb_idx,
                                 struct hk_addr_range addr_range);
  
@@ -2624,7 +2774,7 @@ index 6a06060..30582cd 100644
  static inline struct hk_descriptor_state *
  hk_get_descriptors_state(struct hk_cmd_buffer *cmd,
                           VkPipelineBindPoint bind_point)
-@@ -852,7 +866,17 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -852,7 +869,17 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     uint32_t usc = hk_upload_usc_words(cmd, s, s->only_linked);
  
     hk_reserve_scratch(cmd, cs, s);
@@ -2658,7 +2808,7 @@ index 7cb08bb..9f56d29 100644
  
     hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
 diff --git a/src/asahi/vulkan/hk_cmd_draw.c b/src/asahi/vulkan/hk_cmd_draw.c
-index b29bcbc..88daa94 100644
+index b29bcbc..f2d8854 100644
 --- a/src/asahi/vulkan/hk_cmd_draw.c
 +++ b/src/asahi/vulkan/hk_cmd_draw.c
 @@ -412,6 +412,10 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
@@ -2820,33 +2970,19 @@ index b29bcbc..88daa94 100644
  }
  
  static enum agx_object_type
-@@ -2634,6 +2663,267 @@ agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
+@@ -2634,6 +2663,245 @@ agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
     }
  }
  
 +#if AGX_G11
-+/*
-+ * G11 takes PPP state in blocks of one state group each, as AGXMetalA12's
-+ * RenderContext<G11>::encodeAndEmitRenderState emits it (the GL driver's
-+ * agx_g11_ppp has the header bits).
-+ */
++/* See agx_g11_ppp_emit */
 +static void
 +hk_g11_ppp(struct hk_cmd_buffer *cmd, uint8_t **out, const uint32_t *words,
 +           unsigned count)
 +{
 +   struct agx_ptr T = hk_pool_alloc(cmd, count * 4, 4);
-+   if (!T.cpu)
-+      return;
-+
-+   memcpy(T.cpu, words, count * 4);
-+
-+   agx_pack(*out, PPP_STATE, cfg) {
-+      cfg.pointer_hi = T.gpu >> 32;
-+      cfg.pointer_lo = (uint32_t)T.gpu;
-+      cfg.size_words = count;
-+   }
-+
-+   *out += AGX_PPP_STATE_LENGTH;
++   if (T.cpu)
++      agx_g11_ppp_emit(out, T, words, count);
 +}
 +
 +static uint32_t
@@ -2880,7 +3016,6 @@ index b29bcbc..88daa94 100644
 +{
 +   struct hk_graphics_state *gfx = &cmd->state.gfx;
 +   unsigned outputs = hw_vs->info.uvs.size;
-+   unsigned regs = DIV_ROUND_UP(linked->b.nr_gprs, 16);
 +
 +   if (varyings_dirty) {
 +      uint32_t counts[3] = {BITFIELD_RANGE(18, 2)};
@@ -2894,13 +3029,7 @@ index b29bcbc..88daa94 100644
 +
 +   /* 0x8040 rasterization off, 2:1 the provoking vertex */
 +   w[0] = 0x48000000 | (hk_rast_discard(cmd) ? 0x8040 : 0) |
-+          (gfx->provoking << 1) |
-+          (outputs <= 8     ? 0x4000
-+           : outputs <= 24  ? 0x2000
-+           : outputs <= 32  ? 0x1800
-+           : outputs <= 64  ? 0x1000
-+           : outputs <= 128 ? 0x800
-+                            : 0x400);
++          (gfx->provoking << 1) | agx_g11_vs_class(outputs);
 +   gfx->g11_vs_header = w[0];
 +
 +   struct hk_g11_counts n = hk_g11_counts(cmd, hw_vs, false);
@@ -2913,7 +3042,7 @@ index b29bcbc..88daa94 100644
 +   agx_g11_clear_counts(&w[1], n.textures, n.samplers);
 +
 +   w[2] = hk_upload_usc_words(cmd, hw_vs, linked) |
-+          ((regs == 16 ? 0 : regs) << 2);
++          agx_g11_regs(linked->b.nr_gprs);
 +   w[3] = outputs & 0xff;
 +   *out += 16;
 +}
@@ -2962,12 +3091,11 @@ index b29bcbc..88daa94 100644
 +      /* Every render target is spilled, so the shader writes no tilebuffer
 +       * words (bits 15 up).
 +       */
-+      unsigned regs = DIV_ROUND_UP(linked_fs->b.nr_gprs, 16);
 +      uint32_t words[] = {
 +         BITFIELD_BIT(7) | BITFIELD_BIT(8),
 +         counts,
 +         hk_upload_usc_words(cmd, fs, linked_fs) |
-+            ((regs == 16 ? 0 : regs) << 2),
++            agx_g11_regs(linked_fs->b.nr_gprs),
 +         gfx->varyings,
 +         linked_fs->b.cf.nr_bindings & 0x7f,
 +      };
@@ -3088,7 +3216,7 @@ index b29bcbc..88daa94 100644
  static void
  hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                         uint32_t draw_id, struct agx_draw draw)
-@@ -3055,7 +3345,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3055,7 +3323,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  
     if ((gfx->dirty & HK_DIRTY_PROVOKING) || vgt_dirty || linked_fs_dirty) {
        unsigned bindings = linked_fs->b.cf.nr_bindings;
@@ -3099,7 +3227,7 @@ index b29bcbc..88daa94 100644
           size_t linkage_size =
              AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
  
-@@ -3067,6 +3359,10 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3067,6 +3337,10 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
              t.cpu, &gfx->linked_varyings, hw_vs->info.uvs.user_size,
              &linked_fs->b.cf, gfx->provoking, 0, &gfx->generate_primitive_id);
  
@@ -3110,7 +3238,7 @@ index b29bcbc..88daa94 100644
           gfx->varyings = agx_usc_addr(&dev->dev, t.gpu);
        } else {
           gfx->varyings = 0;
-@@ -3123,6 +3419,11 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3123,6 +3397,11 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        /* TODO: Do less often? */
        hk_reserve_scratch(cmd, cs, hw_vs);
  
@@ -3122,7 +3250,7 @@ index b29bcbc..88daa94 100644
        agx_push(out, VDM_STATE, cfg) {
           cfg.vertex_shader_word_0_present = true;
           cfg.vertex_shader_word_1_present = true;
-@@ -3150,6 +3451,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3150,6 +3429,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        /* Pad up to a multiple of 8 bytes */
        memset(out, 0, 4);
        out += 4;
@@ -3130,7 +3258,7 @@ index b29bcbc..88daa94 100644
     }
  
     if (IS_DIRTY(RS_DEPTH_BIAS_FACTORS)) {
-@@ -3171,16 +3473,25 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3171,16 +3451,25 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     }
  
     /* Hardware viewport/scissor state is entangled with depth bias. */
@@ -3156,6 +3284,120 @@ index b29bcbc..88daa94 100644
     cs->current = out;
  
     vk_dynamic_graphics_state_clear_dirty(dyn);
+@@ -3513,6 +3802,91 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
+    }
+ }
+ 
++#if AGX_G11
++static unsigned
++hk_g11_outputs(struct hk_cmd_buffer *cmd)
++{
++   struct hk_graphics_state *gfx = &cmd->state.gfx;
++   return gfx->shaders[MESA_SHADER_VERTEX] ? hk_bound_hw_vs(gfx)->info.uvs.size
++                                           : 64;
++}
++
++/* End the render before G11's tiler heap fills, see agx_g11_heap_cost */
++static void
++hk_g11_heap_reserve(struct hk_cmd_buffer *cmd, struct agx_draw draw)
++{
++   uint64_t cost =
++      agx_is_indirect(draw.b)
++         ? AGX_G11_HEAP_INDIRECT
++         : agx_g11_heap_cost((uint64_t)draw.b.count[0] * draw.b.count[1],
++                             hk_g11_outputs(cmd));
++   struct hk_cs *cs = cmd->current_cs.gfx;
++
++   if (cs && cs->g11_heap_B && cs->g11_heap_B + cost > AGX_G11_HEAP_BUDGET) {
++      perf_debug(cmd, "Splitting control stream for the G11 tiler heap");
++      hk_cmd_buffer_end_graphics(cmd);
++   }
++
++   cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
++   if (cs)
++      cs->g11_heap_B += cost;
++}
++#endif
++
++static void hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id,
++                    struct agx_draw draw_);
++
++#if AGX_G11
++/* Split a direct draw too big for G11's tiler heap into list or strip pieces */
++static bool
++hk_g11_split_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id,
++                  struct agx_draw draw)
++{
++   VkPrimitiveTopology topo =
++      cmd->vk.dynamic_graphics_state.ia.primitive_topology;
++   unsigned overlap;
++
++   switch (topo) {
++   case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
++   case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
++   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
++      overlap = 0;
++      break;
++   case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
++      overlap = 1;
++      break;
++   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
++      overlap = 2;
++      break;
++   default:
++      return false;
++   }
++
++   if (agx_is_indirect(draw.b) || draw.restart ||
++       cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
++       cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL])
++      return false;
++
++   uint32_t max = agx_g11_split_max(draw.b.count[1], hk_g11_outputs(cmd));
++   uint32_t left = draw.b.count[0];
++
++   if (left <= max)
++      return false;
++
++   while (left > overlap) {
++      struct agx_draw piece = draw;
++      uint32_t n = MIN2(left, max);
++
++      piece.b.count[0] = n;
++      hk_draw(cmd, draw_id, piece);
++      draw.start += n - overlap;
++      left -= n - overlap;
++   }
++
++   return true;
++}
++#endif
++
+ static void
+ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+ {
+@@ -3527,6 +3901,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+    draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
+    draw_.index_size = cmd->state.gfx.index.size;
+ 
++#if AGX_G11
++   if (hk_g11_split_draw(cmd, draw_id, draw_))
++      return;
++#endif
++
+    uint64_t stat_ia_verts = hk_pipeline_stat_addr(
+       cmd, VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT);
+ 
+@@ -3550,6 +3929,9 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+ 
+    hk_foreach_view(cmd) {
+       struct agx_draw draw = draw_;
++#if AGX_G11
++      hk_g11_heap_reserve(cmd, draw);
++#endif
+       struct hk_cs *cs = hk_flush_gfx_state(cmd, draw_id, draw);
+       /* If we failed to allocate a control stream, we've already lost the
+        * device. Just drop the draw so we don't crash.
 diff --git a/src/asahi/vulkan/hk_cmd_meta.c b/src/asahi/vulkan/hk_cmd_meta.c
 index abe4eb7..abc8d8f 100644
 --- a/src/asahi/vulkan/hk_cmd_meta.c
@@ -3203,7 +3445,7 @@ index 28c2b49..425e64e 100644
     if (mod == DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED &&
         !hk_can_compress_format(dev, vk_format))
 diff --git a/src/asahi/vulkan/hk_image.c b/src/asahi/vulkan/hk_image.c
-index 6a01a05..8c21731 100644
+index 6a01a05..8d3bb1c 100644
 --- a/src/asahi/vulkan/hk_image.c
 +++ b/src/asahi/vulkan/hk_image.c
 @@ -226,8 +226,8 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
@@ -3217,6 +3459,15 @@ index 6a01a05..8c21731 100644
        return false;
  
     /* TODO: Handle compression with sparse. This should be doable but it's a bit
+@@ -456,7 +456,7 @@ hk_GetPhysicalDeviceImageFormatProperties2(
+       maxMipLevels = 1;
+ 
+    VkSampleCountFlags sampleCounts = VK_SAMPLE_COUNT_1_BIT;
+-   if (pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
++   if (!AGX_G11 && pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
+        pImageFormatInfo->type == VK_IMAGE_TYPE_2D && ycbcr_info == NULL &&
+        (features & (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
+                     VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
 @@ -724,6 +724,13 @@ hk_map_tiling(struct hk_device *dev, const VkImageCreateInfo *info,
        return AIL_TILING_LINEAR;
  
@@ -3247,7 +3498,7 @@ index 6a01a05..8c21731 100644
     case DRM_FORMAT_MOD_LINEAR:
        return 1;
 diff --git a/src/asahi/vulkan/hk_image_view.c b/src/asahi/vulkan/hk_image_view.c
-index 27e13e7..91e8515 100644
+index 27e13e7..0dab72f 100644
 --- a/src/asahi/vulkan/hk_image_view.c
 +++ b/src/asahi/vulkan/hk_image_view.c
 @@ -53,6 +53,15 @@ static enum agx_texture_dimension
@@ -3287,27 +3538,19 @@ index 27e13e7..91e8515 100644
            (hk_image_view_type_is_array(view->vk.view_type))) {
  
           cfg.depth_linear = layers;
-@@ -360,6 +374,9 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
-    }
- }
- 
-+/* G11 PBE strides are off by 16 */
-+#define AGX_PBE_STRIDE_BIAS (AGX_G11 ? 16 : 4)
-+
- static void
- pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
-          enum hk_desc_usage usage, struct agx_pbe_packed *out)
-@@ -392,6 +409,9 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -392,6 +406,11 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
                          ? image->vk.extent.depth
                          : view->vk.layer_count;
  
-+   if (AGX_G11 && usage == HK_DESC_USAGE_EMRT)
++   /* See translate_image_view_type */
++   bool g11_2d = AGX_G11 && usage == HK_DESC_USAGE_EMRT;
++   if (g11_2d)
 +      layers = 1;
 +
     agx_pack(out, PBE, cfg) {
        cfg.dimension =
           translate_image_view_type(view->vk.view_type, msaa, layers > 1, usage);
-@@ -414,7 +434,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -414,7 +433,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
        }
  
        cfg.buffer = base_addr + ail_get_layer_offset_B(layout, layer);
@@ -3317,7 +3560,7 @@ index 27e13e7..91e8515 100644
  
        if (msaa & !eot) {
           /* Multisampled images are bound like buffer textures, with
-@@ -431,7 +452,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -431,7 +451,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
           cfg.layout = AGX_LAYOUT_LINEAR;
           cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
           cfg.height = DIV_ROUND_UP(size_px, cfg.width);
@@ -3326,15 +3569,16 @@ index 27e13e7..91e8515 100644
           cfg.layers = 1;
           cfg.levels = 1;
  
-@@ -458,6 +479,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -457,7 +477,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+             cfg.level = level;
           }
  
-          if (layout->tiling == AIL_TILING_LINEAR &&
-+             !(AGX_G11 && usage == HK_DESC_USAGE_EMRT) &&
+-         if (layout->tiling == AIL_TILING_LINEAR &&
++         if (layout->tiling == AIL_TILING_LINEAR && !g11_2d &&
               (hk_image_view_type_is_array(view->vk.view_type))) {
  
              cfg.depth_linear = layers;
-@@ -471,7 +493,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -471,7 +491,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
           cfg.levels = image->vk.mip_levels;
  
           if (layout->tiling == AIL_TILING_LINEAR) {
@@ -3344,7 +3588,7 @@ index 27e13e7..91e8515 100644
              assert(cfg.levels == 1);
           } else {
              cfg.page_aligned_layers = layout->page_aligned_layers;
-@@ -479,6 +502,15 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -479,6 +500,15 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
  
           if (image->vk.samples > 1)
              cfg.samples = agx_translate_sample_count(image->vk.samples);
@@ -3360,11 +3604,98 @@ index 27e13e7..91e8515 100644
        }
  
        if (layout->compressed && usage != HK_DESC_USAGE_EMRT) {
+diff --git a/src/asahi/vulkan/hk_physical_device.c b/src/asahi/vulkan/hk_physical_device.c
+index bbfda00..82b36bf 100644
+--- a/src/asahi/vulkan/hk_physical_device.c
++++ b/src/asahi/vulkan/hk_physical_device.c
+@@ -151,7 +151,8 @@ hk_get_device_extensions(const struct hk_instance *instance,
+       .EXT_calibrated_timestamps = true,
+       .EXT_conditional_rendering = false,
+       .EXT_color_write_enable = true,
+-      .EXT_custom_border_color = true,
++      /* G11: no state slot for the clamp-to-0 sampler of the emulation */
++      .EXT_custom_border_color = !AGX_G11,
+       .EXT_debug_marker = true,
+       .EXT_depth_bias_control = true,
+       .EXT_depth_clip_control = false,
+@@ -200,7 +201,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
+       .EXT_provoking_vertex = true,
+       .EXT_queue_family_foreign = true,
+       .EXT_robustness2 = true,
+-      .EXT_sample_locations = true,
++      .EXT_sample_locations = !AGX_G11,
+       .EXT_sampler_filter_minmax = false,
+       .EXT_scalar_block_layout = true,
+       .EXT_separate_stencil_usage = true,
+@@ -499,8 +500,8 @@ hk_get_device_features(
+       .inheritedConditionalRendering = false,
+ 
+       /* VK_EXT_custom_border_color */
+-      .customBorderColors = true,
+-      .customBorderColorWithoutFormat = true,
++      .customBorderColors = !AGX_G11,
++      .customBorderColorWithoutFormat = !AGX_G11,
+ 
+       /* VK_EXT_depth_bias_control */
+       .depthBiasControl = true,
+@@ -679,8 +680,11 @@ hk_get_device_properties(const struct agx_device *dev,
+                          struct vk_properties *properties)
+ {
+    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
++   /* G11: multisampled rendering is GL only so far (agx_g11_ms_layers) */
+    const VkSampleCountFlagBits sample_counts =
+-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
++      AGX_G11 ? VK_SAMPLE_COUNT_1_BIT
++              : VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT |
++                   VK_SAMPLE_COUNT_4_BIT;
+ 
+    uint64_t os_page_size = 16384;
+    os_get_page_size(&os_page_size);
+diff --git a/src/asahi/vulkan/hk_queue.c b/src/asahi/vulkan/hk_queue.c
+index e7e6aec..7a56372 100644
+--- a/src/asahi/vulkan/hk_queue.c
++++ b/src/asahi/vulkan/hk_queue.c
+@@ -164,6 +164,13 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
+       c->layers = 32;
+    }
+ 
++   /* ponytail: G11 layered rendering is not known, everything is drawn to
++    * layer 0 (agx_nir_lower_uvs drops layer writes). Splitting renders per
++    * layer would cover it.
++    */
++   if (AGX_G11)
++      c->layers = 1;
++
+    c->ppp_multisamplectl = cs->ppp_multisamplectl;
+    c->sample_size_B = cs->tib.sample_size_B;
+ 
+@@ -274,10 +281,9 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
+    if (dev->dev.is_virtio)
+       u_rwlock_rdunlock(&dev->external_bos.lock);
+ 
+-   /* XXX: don't trap */
+    if (ret) {
+       fprintf(stderr, "DRM_IOCTL_ASAHI_SUBMIT failed: %m\n");
+-      assert(0);
++      return VK_ERROR_DEVICE_LOST;
+    }
+ 
+    return VK_SUCCESS;
 diff --git a/src/asahi/vulkan/hk_shader.c b/src/asahi/vulkan/hk_shader.c
-index e12393a..284592e 100644
+index e12393a..9f8c696 100644
 --- a/src/asahi/vulkan/hk_shader.c
 +++ b/src/asahi/vulkan/hk_shader.c
-@@ -996,6 +996,94 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
+@@ -265,6 +265,9 @@ enum hk_feature_key {
+ static enum hk_feature_key
+ hk_make_feature_key(const struct vk_features *feats)
+ {
++   if (AGX_G11)
++      return 0;
++
+    return (!feats || feats->customBorderColors) ? HK_FEAT_CUSTOM_BORDER : 0;
+ }
+ 
+@@ -996,6 +999,94 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
                                        : VK_SUCCESS;
  }
  
@@ -3459,7 +3790,7 @@ index e12393a..284592e 100644
  static bool
  lower_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  {
-@@ -1158,6 +1246,18 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1158,6 +1249,18 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
  
     shader->info.set_count = set_count;
  
@@ -3478,7 +3809,7 @@ index e12393a..284592e 100644
     /* XXX: rename */
     NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos);
     NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
-@@ -1178,7 +1278,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1178,7 +1281,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        .no_stop = nir->info.stage == MESA_SHADER_FRAGMENT,
        .has_scratch = !nir->info.internal,
        .promote_constants = true,
@@ -3488,7 +3819,7 @@ index e12393a..284592e 100644
     };
  
     /* For now, sample shading is always dynamic. Indicate that. */
-@@ -1283,10 +1384,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
+@@ -1283,10 +1387,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
        hk_shader_destroy(dev, shader);
     }
  
@@ -3501,16 +3832,15 @@ index e12393a..284592e 100644
  }
  
  static void dump_shader_ir(
-@@ -1952,6 +2053,21 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1952,6 +2056,20 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
        agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
     }
  
 +#if AGX_G11
-+   /* G11 reads the sampler words even without textures, and takes one word
-+    * for shader, registers and threadgroup memory (see agx_build_pipeline).
++   /* G11 takes one word for shader, registers and threadgroup memory (see
++    * agx_build_pipeline). Texture and sampler state come per draw, see
++    * hk_g11_bind_state.
 +    */
-+   /* Texture and sampler state come per draw, see hk_g11_bind_state */
-+
 +   uint32_t code = agx_usc_addr(&dev->dev, s->b.bo->va->addr);
 +   if (fragment) {
 +      agx_usc_shader_g11_frag(&b, code, s->b.nr_gprs);
@@ -3523,7 +3853,7 @@ index e12393a..284592e 100644
     if (s->b.uses_txf)
        agx_usc_push_packed(&b, SAMPLER, dev->dev.txf_sampler);
  
-@@ -1961,6 +2077,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1961,6 +2079,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
  
     if (fragment)
        agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, s->b.fragment_props);
@@ -3629,6 +3959,18 @@ index 7df5900..86a3c33 100644
     [_IOC_NR(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE)] = drm_shim_ioctl_stub,
     [_IOC_NR(DRM_IOCTL_SYNCOBJ_WAIT)] = drm_shim_ioctl_stub,
     [_IOC_NR(DRM_IOCTL_SYNCOBJ_TRANSFER)] = drm_shim_ioctl_stub,
+diff --git a/src/gallium/drivers/asahi/agx_batch.c b/src/gallium/drivers/asahi/agx_batch.c
+index 75c41cd..55557f2 100644
+--- a/src/gallium/drivers/asahi/agx_batch.c
++++ b/src/gallium/drivers/asahi/agx_batch.c
+@@ -126,6 +126,7 @@ agx_batch_init(struct agx_context *ctx,
+ 
+    batch->clear = 0;
+    batch->draw = 0;
++   batch->g11_heap_B = 0;
+    batch->load = 0;
+    batch->resolve = 0;
+    batch->feedback = 0;
 diff --git a/src/gallium/drivers/asahi/agx_blit.c b/src/gallium/drivers/asahi/agx_blit.c
 index fbf1ce0..fa06ca4 100644
 --- a/src/gallium/drivers/asahi/agx_blit.c
@@ -3700,7 +4042,7 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..d8864d2 100644
+index ab205bf..19d707b 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
 @@ -144,8 +144,10 @@ agx_resource_setup(struct agx_device *dev, struct agx_resource *nresource)
@@ -3853,19 +4195,19 @@ index ab205bf..d8864d2 100644
        /* RGB32, luminance/alpha/intensity emulated for texture buffers only */
        if ((ent.channels == AGX_CHANNELS_R32G32B32_EMULATED ||
             util_format_is_luminance(tex_format) ||
-@@ -2437,6 +2495,7 @@ agx_screen_create(int fd, struct renderonly *ro,
- 
-    agx_screen->dev.fd = fd;
-    agx_screen->dev.ro = ro;
-+
-    u_rwlock_init(&agx_screen->destroy_lock);
- 
-    /* Try to open an AGX device */
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..22a5b2c 100644
+index 616dd6d..386741c 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
-@@ -231,6 +231,10 @@ agx_create_blend_state(struct pipe_context *ctx,
+@@ -29,6 +29,7 @@
+ #include "gallium/auxiliary/util/u_framebuffer.h"
+ #include "gallium/auxiliary/util/u_helpers.h"
+ #include "gallium/auxiliary/util/u_prim_restart.h"
++#include "gallium/auxiliary/util/u_split_draw.h"
+ #include "gallium/auxiliary/util/u_viewport.h"
+ #include "pipe/p_context.h"
+ #include "pipe/p_defines.h"
+@@ -231,6 +232,10 @@ agx_create_blend_state(struct pipe_context *ctx,
  
        if (rt.colormask)
           so->store |= (PIPE_CLEAR_COLOR0 << i);
@@ -3876,7 +4218,7 @@ index 616dd6d..22a5b2c 100644
     }
  
     return so;
-@@ -639,6 +643,42 @@ agx_pack_texture(void *out, struct agx_resource *rsrc,
+@@ -639,6 +644,42 @@ agx_pack_texture(void *out, struct agx_resource *rsrc,
                   enum pipe_format format /* override */,
                   const struct pipe_sampler_view *state)
  {
@@ -3919,7 +4261,7 @@ index 616dd6d..22a5b2c 100644
     const struct util_format_description *desc = util_format_description(format);
  
     assert(ail_is_valid_pixel_format(format));
-@@ -674,8 +714,8 @@ agx_pack_texture(void *out, struct agx_resource *rsrc,
+@@ -674,8 +715,8 @@ agx_pack_texture(void *out, struct agx_resource *rsrc,
  
     /* Pack the descriptor into GPU memory */
     agx_pack(out, TEXTURE, cfg) {
@@ -3930,7 +4272,7 @@ index 616dd6d..22a5b2c 100644
        cfg.layout = agx_translate_layout(rsrc->layout.tiling);
        cfg.channels = ail_pixel_format[format].channels;
        cfg.type = ail_pixel_format[format].type;
-@@ -743,7 +783,7 @@ agx_pack_texture(void *out, struct agx_resource *rsrc,
+@@ -743,7 +784,7 @@ agx_pack_texture(void *out, struct agx_resource *rsrc,
           }
        }
  
@@ -3939,32 +4281,17 @@ index 616dd6d..22a5b2c 100644
           cfg.samples = agx_translate_sample_count(rsrc->base.nr_samples);
  
        if (state->target == PIPE_BUFFER) {
-@@ -933,7 +973,32 @@ agx_get_scissor_extents(const struct pipe_viewport_state *vp,
+@@ -933,7 +974,17 @@ agx_get_scissor_extents(const struct pipe_viewport_state *vp,
     }
  }
  
-+/*
-+ * G11 takes PPP state in blocks of one state group each, as AGXMetalA12's
-+ * RenderContext<G11>::encodeAndEmitRenderState emits it. Header bits:
-+ * fragment control, front face, front stencil, back face, back stencil 0-4,
-+ * depth bias/scissor 5, fragment shader 7-8, region clip 10, viewport 11,
-+ * viewport count 15:12, W clamp 16, output select 17, varying counts 32
-+ * and 16 18-19, cull 21.
-+ */
++/* See agx_g11_ppp_emit */
  static void
 +agx_g11_ppp(struct agx_batch *batch, uint8_t **out, const uint32_t *words,
 +            unsigned count)
 +{
-+   struct agx_ptr T = agx_pool_alloc_aligned(&batch->pool, count * 4, 4);
-+   memcpy(T.cpu, words, count * 4);
-+
-+   agx_pack(*out, PPP_STATE, cfg) {
-+      cfg.pointer_hi = T.gpu >> 32;
-+      cfg.pointer_lo = (uint32_t)T.gpu;
-+      cfg.size_words = count;
-+   }
-+
-+   *out += AGX_PPP_STATE_LENGTH;
++   agx_g11_ppp_emit(
++      out, agx_pool_alloc_aligned(&batch->pool, count * 4, 4), words, count);
 +}
 +
 +/* Returns the depth bias/scissor word, which G11 emits on its own */
@@ -3972,7 +4299,7 @@ index 616dd6d..22a5b2c 100644
  agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
                              uint8_t **out, const struct pipe_viewport_state *vp,
                              const struct pipe_scissor_state *ss,
-@@ -946,9 +1011,11 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -946,9 +997,11 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
     unsigned count = multi_viewport ? AGX_MAX_VIEWPORTS : 1;
  
     /* Allocate scissor descriptors */
@@ -3987,7 +4314,7 @@ index 616dd6d..22a5b2c 100644
  
     unsigned minx[AGX_MAX_VIEWPORTS], miny[AGX_MAX_VIEWPORTS];
     unsigned maxx[AGX_MAX_VIEWPORTS], maxy[AGX_MAX_VIEWPORTS];
-@@ -961,7 +1028,8 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -961,7 +1014,8 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
        float minz, maxz;
        util_viewport_zmin_zmax(vp, clip_halfz, &minz, &maxz);
  
@@ -3997,7 +4324,7 @@ index 616dd6d..22a5b2c 100644
           cfg.min_x = minx[i];
           cfg.min_y = miny[i];
           cfg.min_z = minz;
-@@ -969,11 +1037,21 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -969,11 +1023,21 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
           cfg.max_y = maxy[i];
           cfg.max_z = maxz;
        }
@@ -4020,7 +4347,7 @@ index 616dd6d..22a5b2c 100644
        .region_clip = true,
        .viewport = true,
        .viewport_count = count,
-@@ -984,17 +1062,13 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -984,17 +1048,13 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
        agx_pool_alloc_aligned(&batch->pool, size, AGX_PPP_HEADER_ALIGN);
     struct agx_ppp_update ppp = agx_new_ppp_update(T, size, &present);
  
@@ -4042,7 +4369,7 @@ index 616dd6d..22a5b2c 100644
           cfg.min_x = minx[i] / 32;
           cfg.min_y = miny[i] / 32;
           cfg.max_x = DIV_ROUND_UP(MAX2(maxx[i], 1), 32);
-@@ -1002,8 +1076,10 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -1002,8 +1062,10 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
        }
     }
  
@@ -4055,7 +4382,7 @@ index 616dd6d..22a5b2c 100644
  
     /* Upload viewports */
     for (unsigned i = 0; i < count; ++i) {
-@@ -1023,6 +1099,7 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
+@@ -1023,6 +1085,7 @@ agx_upload_viewport_scissor(struct agx_pool *pool, struct agx_batch *batch,
     }
  
     agx_ppp_fini(out, &ppp);
@@ -4063,17 +4390,7 @@ index 616dd6d..22a5b2c 100644
  }
  
  static void
-@@ -1127,6 +1204,9 @@ target_is_array(enum pipe_texture_target target)
-    }
- }
- 
-+/* G11 keeps the level count in the low stride bits */
-+#define AGX_PBE_STRIDE_BIAS (AGX_G11 ? 16 : 4)
-+
- static void
- agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
-                      struct pipe_image_view *view, bool block_access,
-@@ -1177,7 +1257,8 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1177,7 +1240,8 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
        }
  
        cfg.buffer = agx_map_texture_gpu(tex, layer);
@@ -4083,7 +4400,7 @@ index 616dd6d..22a5b2c 100644
  
        if (is_buffer) {
           unsigned size_el =
-@@ -1190,9 +1271,23 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1190,9 +1254,23 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
           cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
           cfg.height = DIV_ROUND_UP(size_el, cfg.width);
           cfg.level = 0;
@@ -4108,7 +4425,7 @@ index 616dd6d..22a5b2c 100644
        } else if (util_res_sample_count(&tex->base) > 1 && !block_access) {
           /* Multisampled images are bound like buffer textures, with
            * addressing arithmetic to determine the texel to write.
-@@ -1209,7 +1304,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1209,7 +1287,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
           cfg.layout = AGX_LAYOUT_LINEAR;
           cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
           cfg.height = DIV_ROUND_UP(size_px, cfg.width);
@@ -4117,7 +4434,7 @@ index 616dd6d..22a5b2c 100644
           cfg.layers = 1;
           cfg.levels = 1;
  
-@@ -1235,7 +1330,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1235,7 +1313,7 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
           }
  
           if (tex->layout.tiling == AIL_TILING_LINEAR) {
@@ -4126,7 +4443,7 @@ index 616dd6d..22a5b2c 100644
              cfg.levels = 1;
           } else {
              cfg.page_aligned_layers = tex->layout.page_aligned_layers;
-@@ -1244,6 +1339,15 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1244,6 +1322,15 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
  
           if (tex->base.nr_samples > 1)
              cfg.samples = agx_translate_sample_count(tex->base.nr_samples);
@@ -4142,7 +4459,7 @@ index 616dd6d..22a5b2c 100644
        }
  
        if (tex->layout.compressed && !emrt) {
-@@ -1272,7 +1376,8 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
+@@ -1272,7 +1359,8 @@ agx_batch_upload_pbe(struct agx_batch *batch, struct agx_pbe_packed *out,
                 ail_get_level_offset_B(&tex->layout, cfg.level);
           }
  
@@ -4152,7 +4469,7 @@ index 616dd6d..22a5b2c 100644
              struct ail_tile tile_size = tex->layout.tilesize_el[level];
              cfg.tile_width_sw = tile_size.width_el;
              cfg.tile_height_sw = tile_size.height_el;
-@@ -1435,6 +1540,55 @@ agx_nir_lower_point_sprite_zw(nir_builder *b, nir_intrinsic_instr *intr,
+@@ -1435,6 +1523,55 @@ agx_nir_lower_point_sprite_zw(nir_builder *b, nir_intrinsic_instr *intr,
   * shader key should have already been applied. agx_compile_variant may call
   * this multiple times if there are auxiliary shaders.
   */
@@ -4208,7 +4525,7 @@ index 616dd6d..22a5b2c 100644
  static struct agx_compiled_shader *
  agx_compile_nir(struct agx_device *dev, nir_shader *nir,
                  struct util_debug_callback *debug, mesa_shader_stage stage,
-@@ -1463,6 +1617,13 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
+@@ -1463,6 +1600,13 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
         nir->info.fs.uses_sample_shading)
        key.fs.inside_sample_loop = true;
  
@@ -4222,7 +4539,7 @@ index 616dd6d..22a5b2c 100644
     if (internal_kernel) {
        key.reserved_preamble = 8;
     } else if (!secondary) {
-@@ -1497,6 +1658,46 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
+@@ -1497,6 +1641,46 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
                                 size_t data_size, bool prolog, bool epilog,
                                 unsigned cf_base, bool internal_kernel);
  
@@ -4269,7 +4586,7 @@ index 616dd6d..22a5b2c 100644
  /* Does not take ownership of key. Clones if necessary. */
  static struct agx_compiled_shader *
  agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
-@@ -1535,7 +1736,11 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
+@@ -1535,7 +1719,11 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
        }
  
        if (key->hw) {
@@ -4282,7 +4599,7 @@ index 616dd6d..22a5b2c 100644
           NIR_PASS(_, nir, nir_lower_clip_halfz_dynamic);
  
           NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
-@@ -1631,26 +1836,16 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
+@@ -1631,26 +1819,16 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
     }
  
     if (gs_copy) {
@@ -4317,7 +4634,7 @@ index 616dd6d..22a5b2c 100644
     }
  
     compiled->gs = gs_info;
-@@ -1667,12 +1862,15 @@ agx_get_shader_variant(struct agx_screen *screen, struct pipe_context *pctx,
+@@ -1667,12 +1845,15 @@ agx_get_shader_variant(struct agx_screen *screen, struct pipe_context *pctx,
                         struct agx_uncompiled_shader *so,
                         union asahi_shader_key *key)
  {
@@ -4335,7 +4652,7 @@ index 616dd6d..22a5b2c 100644
     }
  
     /* key may be destroyed after we return, so clone it before using it as a
-@@ -1998,6 +2196,13 @@ agx_get_compute_state_info(struct pipe_context *pctx, void *cso,
+@@ -1998,6 +2179,13 @@ agx_get_compute_state_info(struct pipe_context *pctx, void *cso,
  
     info->max_threads =
        agx_occupancy_for_register_count(so->b.info.nr_gprs).max_threads;
@@ -4349,7 +4666,7 @@ index 616dd6d..22a5b2c 100644
     info->private_memory = 0;
     info->preferred_simd_size = 32;
     info->simd_sizes = 32;
-@@ -2221,6 +2426,37 @@ agx_update_gs(struct agx_context *ctx, const struct pipe_draw_info *info,
+@@ -2221,6 +2409,37 @@ agx_update_gs(struct agx_context *ctx, const struct pipe_draw_info *info,
     ctx->gs = _mesa_hash_table_next_entry(
                  ctx->stage[MESA_SHADER_GEOMETRY].shader->variants, NULL)
                  ->data;
@@ -4387,7 +4704,7 @@ index 616dd6d..22a5b2c 100644
     return true;
  }
  
-@@ -2435,8 +2671,15 @@ agx_delete_compiled_shader(struct agx_device *dev,
+@@ -2435,8 +2654,15 @@ agx_delete_compiled_shader(struct agx_device *dev,
     if (so->pre_gs)
        agx_delete_compiled_shader(dev, so->pre_gs);
  
@@ -4404,7 +4721,7 @@ index 616dd6d..22a5b2c 100644
  
     free(so->b.binary);
     agx_bo_unreference(dev, so->bo);
-@@ -2613,8 +2856,10 @@ agx_build_meta_shader(struct agx_context *ctx, meta_shader_builder_t builder,
+@@ -2613,8 +2839,10 @@ agx_build_meta_shader(struct agx_context *ctx, meta_shader_builder_t builder,
  static unsigned
  sampler_count(struct agx_context *ctx, mesa_shader_stage stage)
  {
@@ -4417,15 +4734,7 @@ index 616dd6d..22a5b2c 100644
  }
  
  static inline enum agx_sampler_states
-@@ -2625,6 +2870,7 @@ translate_sampler_state_count(struct agx_context *ctx, mesa_shader_stage stage)
-                                             ctx->stage[stage].custom_borders);
- }
- 
-+
- static uint32_t
- agx_nr_tex_descriptors_without_spilled_rts(const struct agx_compiled_shader *cs)
- {
-@@ -2671,8 +2917,18 @@ agx_upload_spilled_rt_descriptors(struct agx_texture_packed *out,
+@@ -2671,8 +2899,18 @@ agx_upload_spilled_rt_descriptors(struct agx_texture_packed *out,
        struct pipe_sampler_view sampler_view = sampler_view_for_surface(surf);
        sampler_view.target = PIPE_TEXTURE_2D_ARRAY;
  
@@ -4445,7 +4754,7 @@ index 616dd6d..22a5b2c 100644
     }
  }
  
-@@ -2807,8 +3063,15 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2807,8 +3045,15 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
        agx_pool_alloc_aligned(&batch->pool, sampler_length * nr_samplers, 64);
  
     /* Sampler #0 is reserved for txf */
@@ -4461,7 +4770,7 @@ index 616dd6d..22a5b2c 100644
     /* Remaining samplers are API samplers */
     uint8_t *out_sampler = (uint8_t *)T.cpu + sampler_length;
     for (unsigned i = 0; i < ctx->stage[stage].sampler_count; ++i) {
-@@ -2889,7 +3152,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2889,7 +3134,11 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
  
     mesa_shader_stage stage = cs->stage;
  
@@ -4474,7 +4783,7 @@ index 616dd6d..22a5b2c 100644
        agx_usc_pack(&b, TEXTURE, cfg) {
           cfg.start = 0;
           cfg.count =
-@@ -2898,7 +3165,17 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2898,7 +3147,17 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
@@ -4493,57 +4802,58 @@ index 616dd6d..22a5b2c 100644
        agx_usc_pack(&b, SAMPLER, cfg) {
           cfg.start = 0;
           cfg.count = batch->sampler_count[stage];
-@@ -2954,30 +3231,53 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
+@@ -2954,30 +3213,50 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
        }
     }
  
 -   if (stage == MESA_SHADER_FRAGMENT) {
 -      agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
-+   /* G11 takes one combined shader word for every stage (Metal's
-+    * emitUscStateLoad).
-+    */
-+   if (AGX_G11 && stage == MESA_SHADER_FRAGMENT) {
-+      /* The linked program has the prolog and epilog (colour output) */
-+      agx_usc_shader_g11_frag(&b,
-+                              linked ? agx_usc_addr(dev, linked->bo->va->addr)
-+                                     : agx_usc_addr(dev, cs->bo->va->addr +
-+                                                            cs->b.info.main_offset),
-+                              linked ? linked->nr_gprs : cs->b.info.nr_gprs);
-+   } else if (AGX_G11) {
-+      /* The linked VS has the prolog that loads vertex attributes */
-+      uint32_t code =
-+         linked ? agx_usc_addr(dev, linked->bo->va->addr)
-+                : agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset);
-+
-+      /* Spills take the whole window, see agx_lower_spill.c */
-+      agx_usc_shader_g11(&b, code,
-+                         linked ? linked->nr_gprs : cs->b.info.nr_gprs,
-+                         cs->b.info.spill_stride ? AGX_G11_SPILL_TOP
-+                         : cs->b.info.local_size + variable_shared_mem);
-    } else {
+-   } else {
 -      agx_usc_shared_non_fragment(&b, &cs->b.info, variable_shared_mem);
 -   }
-+      if (stage == MESA_SHADER_FRAGMENT) {
-+         agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
-+      } else {
-+         agx_usc_shared_non_fragment(&b, &cs->b.info, variable_shared_mem);
-+      }
- 
+-
 -   if (linked) {
 -      agx_usc_push_packed(&b, SHADER, linked->shader);
 -      agx_usc_push_packed(&b, REGISTERS, linked->regs);
-+      if (linked) {
-+         agx_usc_push_packed(&b, SHADER, linked->shader);
-+         agx_usc_push_packed(&b, REGISTERS, linked->regs);
++   /* G11 takes one combined shader word for every stage (Metal's
++    * emitUscStateLoad). The linked program has the prolog (vertex attributes)
++    * and epilog (colour output).
++    */
++   if (AGX_G11) {
++      uint32_t code =
++         linked ? agx_usc_addr(dev, linked->bo->va->addr)
++                : agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset);
++      unsigned gprs = linked ? linked->nr_gprs : cs->b.info.nr_gprs;
  
--      if (stage == MESA_SHADER_FRAGMENT)
++      /* Spills take the whole window, see agx_lower_spill.c */
+       if (stage == MESA_SHADER_FRAGMENT)
 -         agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, linked->fragment_props);
--   } else {
++         agx_usc_shader_g11_frag(&b, code, gprs);
++      else
++         agx_usc_shader_g11(&b, code, gprs,
++                            cs->b.info.spill_stride
++                               ? AGX_G11_SPILL_TOP
++                               : cs->b.info.local_size + variable_shared_mem);
+    } else {
 -      agx_usc_pack(&b, SHADER, cfg) {
 -         cfg.code =
 -            agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset);
 -         cfg.unk_2 = 3;
--      }
++      if (stage == MESA_SHADER_FRAGMENT) {
++         agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
++      } else {
++         agx_usc_shared_non_fragment(&b, &cs->b.info, variable_shared_mem);
+       }
+ 
+-      agx_usc_pack(&b, REGISTERS, cfg) {
+-         cfg.register_count = cs->b.info.nr_gprs;
+-         cfg.spill_size = cs->b.info.scratch_size
+-                             ? agx_scratch_get_bucket(cs->b.info.scratch_size)
+-                             : 0;
++      if (linked) {
++         agx_usc_push_packed(&b, SHADER, linked->shader);
++         agx_usc_push_packed(&b, REGISTERS, linked->regs);
++
 +         if (stage == MESA_SHADER_FRAGMENT)
 +            agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, linked->fragment_props);
 +      } else {
@@ -4552,12 +4862,7 @@ index 616dd6d..22a5b2c 100644
 +               agx_usc_addr(dev, cs->bo->va->addr + cs->b.info.main_offset);
 +            cfg.unk_2 = 3;
 +         }
- 
--      agx_usc_pack(&b, REGISTERS, cfg) {
--         cfg.register_count = cs->b.info.nr_gprs;
--         cfg.spill_size = cs->b.info.scratch_size
--                             ? agx_scratch_get_bucket(cs->b.info.scratch_size)
--                             : 0;
++
 +         agx_usc_pack(&b, REGISTERS, cfg) {
 +            cfg.register_count = cs->b.info.nr_gprs;
 +            cfg.spill_size = cs->b.info.scratch_size
@@ -4567,7 +4872,7 @@ index 616dd6d..22a5b2c 100644
        }
     }
  
-@@ -3206,8 +3506,6 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3206,8 +3485,6 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
        }
     }
  
@@ -4576,7 +4881,7 @@ index 616dd6d..22a5b2c 100644
     /* Get the shader */
     key.reserved_preamble = uniforms;
     struct agx_device *dev = agx_device(ctx->base.screen);
-@@ -3215,13 +3513,21 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3215,13 +3492,21 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
     agx_batch_add_bo(batch, shader->bo);
     assert(shader->info.rodata.size_16 == 0);
  
@@ -4604,7 +4909,7 @@ index 616dd6d..22a5b2c 100644
  
     if (shader->info.has_preamble) {
        agx_usc_pack(&b, PRESHADER, cfg) {
-@@ -3242,10 +3548,14 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
+@@ -3242,10 +3527,14 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
        cfg.sampler_state_register_count =
           agx_translate_sampler_state_count(needs_sampler ? 1 : 0, false);
  
@@ -4620,7 +4925,7 @@ index 616dd6d..22a5b2c 100644
     return ret;
  }
  
-@@ -3313,27 +3623,30 @@ agx_batch_init_state(struct agx_batch *batch)
+@@ -3313,27 +3602,30 @@ agx_batch_init_state(struct agx_batch *batch)
        cfg.usc_cache_inval = true;
     }
  
@@ -4669,7 +4974,7 @@ index 616dd6d..22a5b2c 100644
     batch->vdm.current = out;
  
     /* Mark it as initialized now, since agx_batch_writes() will check this. */
-@@ -3416,9 +3729,183 @@ agx_point_object_type(struct agx_rasterizer *rast)
+@@ -3416,9 +3708,180 @@ agx_point_object_type(struct agx_rasterizer *rast)
               : AGX_OBJECT_TYPE_POINT_SPRITE_UV10;
  }
  
@@ -4717,9 +5022,6 @@ index 616dd6d..22a5b2c 100644
 +                              ctx->fs->b.info.uses_txf ||
 +                              agx_tilebuffer_spills(&batch->tilebuffer_layout));
 +
-+      /* Registers in 8s in 5:2 (0: 128), length 1:0 (0: 256 bytes) */
-+      unsigned regs = DIV_ROUND_UP(ctx->linked.fs->nr_gprs, 16);
-+
 +      /* ponytail: varying count as the binding count, unverified with
 +       * varyings (ProgramVaryingTable iteration counts)
 +       */
@@ -4728,7 +5030,7 @@ index 616dd6d..22a5b2c 100644
 +         counts | (tib_writes ? BITFIELD_MASK(17) << 15 : 0),
 +         agx_build_pipeline(batch, ctx->fs, ctx->linked.fs,
 +                            MESA_SHADER_FRAGMENT, 0, 0) |
-+            ((regs == 16 ? 0 : regs) << 2),
++            agx_g11_regs(ctx->linked.fs->nr_gprs),
 +         batch->varyings,
 +         ctx->linked.fs->cf.nr_bindings & 0x7f,
 +      };
@@ -4854,7 +5156,7 @@ index 616dd6d..22a5b2c 100644
  static uint8_t *
  agx_encode_state(struct agx_batch *batch, uint8_t *out)
  {
-@@ -3442,7 +3929,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3442,7 +3905,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
         IS_DIRTY(PRIM)) {
  
        unsigned bindings = ctx->linked.fs->cf.nr_bindings;
@@ -4864,7 +5166,7 @@ index 616dd6d..22a5b2c 100644
           size_t linkage_size =
              AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
  
-@@ -3457,6 +3945,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3457,6 +3921,10 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                      : 0,
                                   &batch->generate_primitive_id);
  
@@ -4875,7 +5177,7 @@ index 616dd6d..22a5b2c 100644
           batch->varyings = agx_usc_addr(dev, t.gpu);
        } else {
           batch->varyings = 0;
-@@ -3466,7 +3958,60 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3466,7 +3934,53 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ppp_updates++;
     }
  
@@ -4891,8 +5193,6 @@ index 616dd6d..22a5b2c 100644
 +       */
 +      unsigned outputs = vs->uvs.size;
 +      struct agx_linked_shader *linked = ctx->gs ? NULL : ctx->linked.vs;
-+      unsigned regs = DIV_ROUND_UP(
-+         linked ? linked->nr_gprs : vs->b.info.nr_gprs, 16);
 +      uint32_t *w;
 +
 +      /* Varying counts go with the vertex shader (VS variant PPP block) */
@@ -4913,12 +5213,7 @@ index 616dd6d..22a5b2c 100644
 +      w[0] = 0x48000000 |
 +             (ctx->rast->base.rasterizer_discard ? 0x8040 : 0) |
 +             (ctx->rast->base.flatshade_first ? 0 : 2 << 1) |
-+             (outputs <= 8    ? 0x4000
-+                           : outputs <= 24  ? 0x2000
-+                           : outputs <= 32  ? 0x1800
-+                           : outputs <= 64  ? 0x1000
-+                           : outputs <= 128 ? 0x800
-+                                            : 0x400);
++             agx_g11_vs_class(outputs);
 +      batch->g11_vs_header = w[0];
 +      agx_pack(&w[1], VDM_STATE_VERTEX_SHADER_WORD_0, cfg) {
 +         cfg.uniform_register_count = vs->b.info.push_count;
@@ -4930,14 +5225,14 @@ index 616dd6d..22a5b2c 100644
 +                           ctx->stage[vs->stage].sampler_count ||
 +                              vs->b.info.uses_txf);
 +      w[2] = agx_build_pipeline(batch, vs, linked, MESA_SHADER_VERTEX, 0, 0) |
-+             ((regs == 16 ? 0 : regs) << 2);
++             agx_g11_regs(linked ? linked->nr_gprs : vs->b.info.nr_gprs);
 +      w[3] = outputs & 0xff;
 +      out += 16;
 +   } else if (IS_DIRTY(VS) || varyings_dirty) {
        agx_push(out, VDM_STATE, cfg) {
           cfg.vertex_shader_word_0_present = true;
           cfg.vertex_shader_word_1_present = true;
-@@ -3511,8 +4056,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3511,8 +4025,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
        ctx->dirty |= AGX_DIRTY_SCISSOR_ZBIAS;
     }
  
@@ -4948,7 +5243,7 @@ index 616dd6d..22a5b2c 100644
  
        agx_upload_viewport_scissor(pool, batch, &out, ctx->viewport,
                                    ctx->rast->base.scissor ? ctx->scissor : NULL,
-@@ -3533,6 +4078,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
+@@ -3533,6 +4047,21 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out)
                                        : is_lines ? AGX_OBJECT_TYPE_LINE
                                                   : AGX_OBJECT_TYPE_TRIANGLE;
  
@@ -4970,7 +5265,40 @@ index 616dd6d..22a5b2c 100644
     struct AGX_PPP_HEADER dirty = {
        .fragment_control =
           IS_DIRTY(ZS) || IS_DIRTY(RS) || IS_DIRTY(PRIM) || IS_DIRTY(QUERY),
-@@ -4919,6 +5479,23 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+@@ -4911,6 +5440,32 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+       return;
+    }
+ 
++   /* A draw too big for G11's tiler heap is split, see agx_g11_heap_cost */
++   /* ctx->vs is only current once the VS is clean (it may be freed) */
++   unsigned g11_outputs =
++      (ctx->vs && !(ctx->dirty & AGX_DIRTY_VS)) ? ctx->vs->uvs.size : 64;
++   if (AGX_G11 && !indirect &&
++       (info->mode == MESA_PRIM_POINTS || info->mode == MESA_PRIM_LINES ||
++        info->mode == MESA_PRIM_LINE_STRIP ||
++        info->mode == MESA_PRIM_TRIANGLES ||
++        info->mode == MESA_PRIM_TRIANGLE_STRIP)) {
++      uint32_t max = agx_g11_split_max(info->instance_count, g11_outputs);
++
++      if (draws[0].count > max) {
++         struct pipe_draw_start_count_bias d = draws[0];
++
++         for (uint32_t left = draws[0].count; left > 2;) {
++            uint32_t step;
++            d.count = left;
++            u_split_draw(info, max, &d.count, &step);
++            agx_draw_vbo(pctx, info, drawid_offset, NULL, &d, 1);
++            d.start += step;
++            left -= step;
++         }
++         return;
++      }
++   }
++
+    /* We must legalize feedback loops and transform feedback writes before
+     * getting the batch, since once we have the batch we're not allowed to flush
+     * the bound render targets.
+@@ -4919,6 +5474,38 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     agx_legalize_xfb(ctx);
  
     struct agx_batch *batch = agx_get_batch(ctx);
@@ -4991,10 +5319,25 @@ index 616dd6d..22a5b2c 100644
 +      batch = agx_get_batch(ctx);
 +   }
 +
++   if (AGX_G11) {
++      uint64_t cost =
++         indirect ? AGX_G11_HEAP_INDIRECT
++                  : agx_g11_heap_cost((uint64_t)draws[0].count *
++                                         MAX2(info->instance_count, 1),
++                                      g11_outputs);
++
++      if (batch->g11_heap_B && batch->g11_heap_B + cost > AGX_G11_HEAP_BUDGET) {
++         agx_flush_batch_for_reason(ctx, batch, "G11 tiler heap");
++         batch = agx_get_batch(ctx);
++      }
++
++      batch->g11_heap_B += cost;
++   }
++
     uint64_t ib = 0;
     size_t ib_extent = 0;
  
-@@ -5202,7 +5779,19 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+@@ -5202,7 +5789,19 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
  
     uint8_t *out = agx_encode_state(batch, batch->vdm.current);
  
@@ -5015,7 +5358,7 @@ index 616dd6d..22a5b2c 100644
        agx_push(out, VDM_STATE, cfg)
           cfg.restart_index_present = true;
  
-@@ -5314,6 +5903,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5314,6 +5913,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -5035,7 +5378,7 @@ index 616dd6d..22a5b2c 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +5946,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +5956,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);
@@ -5048,7 +5391,7 @@ index 616dd6d..22a5b2c 100644
  
     agx_launch_internal(batch, grid, wg, launch, stage, usc);
 diff --git a/src/gallium/drivers/asahi/agx_state.h b/src/gallium/drivers/asahi/agx_state.h
-index 967cd2b..97d0e7d 100644
+index 967cd2b..70d3cae 100644
 --- a/src/gallium/drivers/asahi/agx_state.h
 +++ b/src/gallium/drivers/asahi/agx_state.h
 @@ -30,6 +30,7 @@
@@ -5093,7 +5436,17 @@ index 967cd2b..97d0e7d 100644
     struct poly_gs_info gs;
  
     /* Logical shader stage used for descriptor access. This may differ from the
-@@ -405,6 +419,9 @@ struct agx_batch {
+@@ -389,6 +403,9 @@ struct agx_batch {
+    uint32_t clear, draw, load, resolve, feedback;
+    bool initialized;
+ 
++   /* Estimated G11 tiler heap use, see agx_g11_heap_cost */
++   uint64_t g11_heap_B;
++
+    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
+    double clear_depth;
+    unsigned clear_stencil;
+@@ -405,6 +422,9 @@ struct agx_batch {
     uint32_t varyings;
     struct agx_varyings_vs linked_varyings;
  
@@ -5103,7 +5456,7 @@ index 967cd2b..97d0e7d 100644
     struct agx_draw_uniforms uniforms;
     struct agx_stage_uniforms stage_uniforms[MESA_SHADER_STAGES];
  
-@@ -478,6 +495,9 @@ struct agx_blend {
+@@ -478,6 +498,9 @@ struct agx_blend {
  
     /* PIPE_CLEAR_* bitmask corresponding to this blend state */
     uint32_t store;
@@ -5113,7 +5466,7 @@ index 967cd2b..97d0e7d 100644
  };
  
  struct asahi_vs_shader_key {
-@@ -942,6 +962,21 @@ agx_resource(struct pipe_resource *pctx)
+@@ -942,6 +965,21 @@ agx_resource(struct pipe_resource *pctx)
     return (struct agx_resource *)pctx;
  }
  
