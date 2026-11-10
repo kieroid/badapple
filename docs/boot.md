@@ -66,6 +66,7 @@ CPID:8020 ... BDID:1A ... PWND:[usbliter8]
 | 0012 | hand the CPU and GPU rails to software |
 | 0013 | PCIe on T8020 |
 | 0015 | enable the GPU coprocessor nodes when iBoot loaded their firmware |
+| 0016 | `wcslen`, which Rust's core links against from 1.99 on |
 
 An SError hits every boot at `L2C_ERR_ADR` 0x8ec78c000, cause unknown. Its
 status register is write-1-to-clear.
