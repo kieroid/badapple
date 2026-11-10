@@ -398,10 +398,23 @@ without compression, and the G11 PBE stride bias and level handling.
 | internal kernels | libagx's precompiled kernels (buffer copies, fills, updates) launch with no texture or sampler states; a count without the USC words loads state from address 0 and left every later compute job doing nothing |
 | layers | layered rendering is not known and the kernel takes one layer: layer writes are dropped and everything lands on layer 0 |
 | background loads | background programs clamp spilled render target loads to the image: they run for the whole tile, past the last row of a linear image. Fragment shaders reading the framebuffer are in bounds and skip it |
+| faults | any GPU fault wedges G11 until reboot (no soft faults). So every buffer access is bounds checked whatever the pipeline asks for, and texture states that are unwritten or past the end of their set get the null texture |
+| dynamic indexing | a descriptor array indexed at run time becomes a chain of accesses with constant indices, at most 16. Samples and loads reach states 0-15 only: past that they read zero, stores go up to 48 |
+| spilled targets | fragment shaders read a spilled render target's size from its descriptor through u0_u1, which points at the draw's texture states |
+| draws | an indexed draw follows a restart token, as in GL. libagx kernels that write draws into the stream fill exactly the G11 size: a gap is read as more words |
+| LOD query | not in hardware: computed from coordinate derivatives, without the sampler's bias and clamps |
 
-Not done: layered rendering, dynamically indexed descriptor arrays
-(element 0 is used), multisampling (only 1 sample is advertised), custom
-border colours (the extension is off).
+dEQP-VK, every 200th case of the mustpass (16112): 3821 pass, 388 fail, 10825
+not supported, and none wedges the GPU. The fails are wrong results in
+samplers, blending, blits, robustness2 and image views. Vulkan 1.3 is
+reported: 1.4 needs subgroup operations G11 does not have (only barriers and
+elect work), and the GPU caps at 740 MHz unless told otherwise (see Power).
+
+Not done: layered rendering and multiview, multisampling (only 1 sample is
+advertised, so this is not conformant), geometry and tessellation shaders and
+transform feedback (they hang in the TA), dual source blending, sparse
+residency, more than one viewport, custom border colours. A bad job still
+wedges the GPU until reboot.
 
 ```sh
 build/venv/bin/python tools/tsh.py "chroot /mnt/a vulkaninfo --summary"
