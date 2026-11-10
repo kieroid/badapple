@@ -1,5 +1,5 @@
 diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
-index e131bcf..fe8fc37 100644
+index e131bcf..fa044af 100644
 --- a/src/asahi/compiler/agx_compile.c
 +++ b/src/asahi/compiler/agx_compile.c
 @@ -977,7 +977,7 @@ translate_atomic_opcode(nir_atomic_op op)
@@ -179,7 +179,7 @@ index e131bcf..fe8fc37 100644
     if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
        I->op = AGX_OPCODE_TEXTURE_LOAD;
        b->shader->out->uses_txf = true;
-@@ -2853,6 +2929,126 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
+@@ -2853,6 +2929,145 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
     return false;
  }
  
@@ -303,10 +303,29 @@ index e131bcf..fe8fc37 100644
 +   return true;
 +}
 +
++/* Vulkan's bindless textures leave textures_used empty */
++static bool
++agx_g11_has_textures(nir_shader *nir)
++{
++   if (!BITSET_IS_EMPTY(nir->info.textures_used))
++      return true;
++
++   nir_foreach_function_impl(impl, nir) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type == nir_instr_type_tex)
++               return true;
++         }
++      }
++   }
++
++   return false;
++}
++
  static void
  agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
                   uint8_t *ts_count, uint8_t *ss_count)
-@@ -2900,7 +3096,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2900,7 +3115,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
        .lower_subgroup_masks = true,
     };
  
@@ -317,7 +336,7 @@ index e131bcf..fe8fc37 100644
  
     /* Lower addressing modes. The sooner we do this, the sooner we get rid of
      * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
-@@ -2968,7 +3166,23 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2968,7 +3185,23 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
     /* Force preamble generation for internal shaders since hk's meta copies
      * depend on it for correctness with imgwblk intrinsics.
      */
@@ -336,13 +355,13 @@ index e131bcf..fe8fc37 100644
 +    */
 +   bool g11_no_preamble =
 +      AGX_G11 && (nir->info.stage == MESA_SHADER_FRAGMENT ||
-+                  !BITSET_IS_EMPTY(nir->info.textures_used));
++                  agx_g11_has_textures(nir));
 +
 +   if (preamble_size && !g11_no_preamble &&
         (!(agx_compiler_debug & AGX_DBG_NOPREAMBLE) || nir->info.internal)) {
        unsigned sizes[] = {
           *preamble_size,
-@@ -3034,6 +3248,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -3034,6 +3267,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
      * do it after fusing constant shifts. Constant folding will clean up.
      */
     NIR_PASS(_, nir, agx_nir_lower_algebraic_late);
@@ -353,7 +372,7 @@ index e131bcf..fe8fc37 100644
     NIR_PASS(_, nir, agx_nir_fuse_selects);
     NIR_PASS(_, nir, nir_opt_constant_folding);
     NIR_PASS(_, nir, nir_opt_combine_barriers, NULL, NULL);
-@@ -3412,7 +3630,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3412,7 +3649,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     AGX_PASS(ctx, agx_ra);
     agx_lower_64bit_postra(ctx);
  
@@ -363,7 +382,7 @@ index e131bcf..fe8fc37 100644
        /* Apple always allocate 40 more bytes in the entrypoint and align to 4. */
        uint64_t stack_size = align(DIV_ROUND_UP(ctx->scratch_size_B, 4) + 10, 4);
  
-@@ -3502,7 +3721,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3502,7 +3740,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
      */
     bool dump_shaders = agx_should_dump(nir, AGX_DBG_SHADERS);
  #ifndef NDEBUG
@@ -373,7 +392,7 @@ index e131bcf..fe8fc37 100644
  #else
     bool selftest = false;
  #endif
-@@ -3512,7 +3732,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3512,7 +3751,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
        bool errors =
           agx2_disassemble(binary->data + offset, binary->size - offset, fp);
  
@@ -382,7 +401,7 @@ index e131bcf..fe8fc37 100644
           /* In a self-test, disassemble again to get something the user can look
            * at to figure out what went wrong.
            */
-@@ -3592,9 +3812,16 @@ agx_preprocess_nir(nir_shader *nir)
+@@ -3592,9 +3831,16 @@ agx_preprocess_nir(nir_shader *nir)
  
     NIR_PASS(_, nir, nir_lower_vars_to_ssa);
  
@@ -402,7 +421,7 @@ index e131bcf..fe8fc37 100644
     NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
              nir_var_function_temp, ~0);
     NIR_PASS(_, nir, nir_split_var_copies);
-@@ -3698,6 +3925,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
+@@ -3698,6 +3944,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
              nir_metadata_control_flow, NULL);
  
     NIR_PASS(_, nir, nir_lower_frag_coord_to_pixel_coord);
@@ -410,6 +429,14 @@ index e131bcf..fe8fc37 100644
     NIR_PASS(_, nir, nir_lower_vars_to_ssa);
  
     /* Late sysval lowering creates large loads. Load lowering creates unpacks */
+@@ -3753,6 +4000,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
+       (key->secondary || !key->promote_textures) ? NULL
+                                                  : &info->sampler_state_count);
+ 
++
+    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+       info->varyings.fs.nr_cf = key->fs.cf_base;
+       assign_coefficient_regs(nir, &info->varyings.fs);
 diff --git a/src/asahi/compiler/agx_compile.h b/src/asahi/compiler/agx_compile.h
 index 4b10423..ebe0c7b 100644
 --- a/src/asahi/compiler/agx_compile.h
@@ -2837,7 +2864,7 @@ index f6bf75a..090b2b0 100644
  libagx_buffer_texel_address(constant const struct agx_pbe_packed *ptr,
                              uint4 coord, uint bytes_per_pixel_B)
 diff --git a/src/asahi/vulkan/hk_cmd_buffer.c b/src/asahi/vulkan/hk_cmd_buffer.c
-index b527e97..e291bb8 100644
+index b527e97..16558d8 100644
 --- a/src/asahi/vulkan/hk_cmd_buffer.c
 +++ b/src/asahi/vulkan/hk_cmd_buffer.c
 @@ -5,6 +5,7 @@
@@ -2859,7 +2886,56 @@ index b527e97..e291bb8 100644
        merge_control_streams(cmd);
     }
  
-@@ -620,6 +622,19 @@ hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
+@@ -592,6 +594,41 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
+    return root_ptr.gpu;
+ }
+ 
++/* Add to the 36-bit, 16 byte unit address at bit start of a descriptor */
++static void
++hk_g11_add_address(void *desc, unsigned start, uint64_t offset_B)
++{
++   uint64_t *w = (uint64_t *)desc + 1;
++   unsigned shift = start - 64;
++   uint64_t mask = BITFIELD64_MASK(36) << shift;
++   uint64_t addr = (*w & mask) + ((offset_B >> 4) << shift);
++
++   *w = (*w & ~mask) | (addr & mask);
++}
++
++/*
++ * Texture and PBE descriptors of a spilled render target, at the layer of
++ * the G11 render being recorded (hk_g11_layer_cs). Each layer is a render of
++ * its own, so the descriptors stay 2D.
++ */
++void
++hk_rt_descs(struct hk_cmd_buffer *cmd, unsigned rt,
++            struct agx_texture_packed out[2])
++{
++   struct hk_rendering_state *render = &cmd->state.gfx.render;
++   struct hk_image_view *iview = render->color_att[rt].iview;
++
++   memcpy(&out[0], &iview->planes[0].emrt_texture, sizeof(out[0]));
++   memcpy(&out[1], &iview->planes[0].emrt_pbe, sizeof(out[1]));
++
++   if (AGX_G11 && render->g11_layer) {
++      uint64_t offset_B = render->g11_layer * render->g11_rt_stride_B[rt];
++
++      hk_g11_add_address(&out[0], 66, offset_B);
++      hk_g11_add_address(&out[1], 64, offset_B);
++   }
++}
++
+ void
+ hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
+                                struct hk_cmd_buffer *cmd)
+@@ -614,12 +651,24 @@ hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
+          continue;
+       }
+ 
+-      memcpy(&desc[(i * 2) + 0], &iview->planes[0].emrt_texture, sizeof(*desc));
+-      memcpy(&desc[(i * 2) + 1], &iview->planes[0].emrt_pbe, sizeof(*desc));
++      hk_rt_descs(cmd, i, &desc[i * 2]);
+    }
  
     desc = descs.cpu;
  
@@ -2879,7 +2955,7 @@ index b527e97..e291bb8 100644
     /* Bind the base as u0_u1 for bindless access */
     agx_usc_uniform(b, 0, 4, hk_pool_upload(cmd, &descs.gpu, 8, 8));
  }
-@@ -662,6 +677,121 @@ hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -662,6 +711,120 @@ hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     }
  }
  
@@ -2951,8 +3027,7 @@ index b527e97..e291bb8 100644
 +         struct agx_texture_packed *o = &out[s->info.g11_nr_tex + 2 * rt];
 +
 +         if (iview) {
-+            memcpy(o, &iview->planes[0].emrt_texture, AGX_TEXTURE_LENGTH);
-+            memcpy(o + 1, &iview->planes[0].emrt_pbe, AGX_TEXTURE_LENGTH);
++            hk_rt_descs(cmd, rt, o);
 +         } else {
 +            agx_set_null_texture(o);
 +            agx_set_null_pbe((struct agx_pbe_packed *)(o + 1));
@@ -3001,7 +3076,7 @@ index b527e97..e291bb8 100644
  uint32_t
  hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                      struct hk_linked_shader *linked)
-@@ -675,7 +805,7 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
+@@ -675,7 +838,7 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
     unsigned stage_ranges = 3;
  
     size_t usc_size =
@@ -3010,7 +3085,7 @@ index b527e97..e291bb8 100644
     struct agx_ptr t = hk_pool_usc_alloc(cmd, usc_size, 64);
     if (!t.cpu)
        return 0;
-@@ -726,7 +856,9 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
+@@ -726,7 +889,9 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
  
        root_unif = AGX_ABI_VUNI_COUNT_VK(count);
     } else if (sw_stage == MESA_SHADER_FRAGMENT) {
@@ -3021,7 +3096,7 @@ index b527e97..e291bb8 100644
           hk_usc_upload_spilled_rt_descs(&b, cmd);
        }
  
-@@ -741,13 +873,25 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
+@@ -741,13 +906,25 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
         *
         * TODO: We probably could with some refactor.
         */
@@ -3048,7 +3123,28 @@ index b527e97..e291bb8 100644
     agx_usc_push_blob(&b, linked->usc.data, linked->usc.size);
     return agx_usc_addr(&dev->dev, t.gpu);
  }
-@@ -803,6 +947,15 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+@@ -795,6 +972,20 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+    cs->cr.eot.main = render->cr.eot.partial;
+    cs->cr.zls_control = render->cr.zls_control_partial;
+ 
++   /* A layer of a G11 layered render, see hk_g11_layer_cs */
++   if (render->g11_layers) {
++      unsigned l = render->g11_layer;
++
++      if (cs->cr.depth.buffer)
++         cs->cr.depth.buffer += l * render->g11_z_stride_B;
++
++      if (cs->cr.stencil.buffer)
++         cs->cr.stencil.buffer += l * render->g11_s_stride_B;
++
++      cs->cr.layers = 1;
++      render->g11_cs[l] = cs;
++   }
++
+    /* Barrier to enforce GPU-CPU coherency, in case this batch is back to back
+     * with another that caused stale data to be cached and the CPU wrote to it
+     * in the meantime.
+@@ -803,6 +994,15 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
        cfg.usc_cache_inval = true;
     }
  
@@ -3064,7 +3160,7 @@ index b527e97..e291bb8 100644
     struct AGX_PPP_HEADER present = {
        .w_clamp = true,
        .occlusion_query_2 = true,
-@@ -860,7 +1013,12 @@ hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -860,7 +1060,12 @@ hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  
     /* Otherwise, we need to allocate a new command buffer. We use memory owned
      * by the batch to simplify lifetime management for the BO.
@@ -3078,10 +3174,37 @@ index b527e97..e291bb8 100644
     struct agx_ptr T = hk_pool_alloc(cmd, size, 256);
  
 diff --git a/src/asahi/vulkan/hk_cmd_buffer.h b/src/asahi/vulkan/hk_cmd_buffer.h
-index 6a06060..ec072ff 100644
+index 6a06060..7450a8f 100644
 --- a/src/asahi/vulkan/hk_cmd_buffer.h
 +++ b/src/asahi/vulkan/hk_cmd_buffer.h
-@@ -269,6 +269,9 @@ struct hk_graphics_state {
+@@ -100,6 +100,11 @@ struct hk_root_descriptor_table {
+          uint16_t rasterization_stream;
+          uint16_t _pad6;
+ 
++         /* G11: layer of the render this draw is recorded into, see
++          * hk_g11_layer_cs
++          */
++         uint32_t g11_layer;
++
+          /* Mapping from varying slots written by the last vertex stage to UVS
+           * indices. This mapping must be compatible with the fragment shader.
+           */
+@@ -201,6 +206,14 @@ struct hk_rendering_state {
+ 
+    struct agx_tilebuffer_layout tilebuffer;
+    struct hk_render_registers cr;
++
++   /* G11 has no layered rendering: a layered or multiview render is one
++    * render per layer, each draw recorded into all of them (hk_g11_layer_cs).
++    * g11_layers is 0 otherwise.
++    */
++   uint32_t g11_layers, g11_layer;
++   uint64_t g11_rt_stride_B[HK_MAX_RTS], g11_z_stride_B, g11_s_stride_B;
++   struct hk_cs *g11_cs[HK_G11_MAX_LAYERS];
+ };
+ 
+ struct hk_index_buffer_state {
+@@ -269,6 +282,9 @@ struct hk_graphics_state {
        uint16_t index;
     } occlusion;
  
@@ -3091,7 +3214,7 @@ index 6a06060..ec072ff 100644
     /* Fast linked shader data structures */
     uint64_t varyings;
     struct agx_varyings_vs linked_varyings;
-@@ -359,6 +362,9 @@ struct hk_cs {
+@@ -359,6 +375,9 @@ struct hk_cs {
     /* Whether there is more than just the root chunk */
     bool stream_linked;
  
@@ -3101,7 +3224,53 @@ index 6a06060..ec072ff 100644
     /* Whether the sampler heap is required. Although we always must maintain the
      * heap for correctness, it's often not necessary since we can push lots of
      * samplers (especially for GL/DX11-era engines).
-@@ -796,6 +802,17 @@ void hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
+@@ -712,12 +731,18 @@ hk_cmd_buffer_end_compute(struct hk_cmd_buffer *cmd)
+ void hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd);
+ 
+ static void
+-hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
++hk_cmd_buffer_end_graphics_cs(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+ {
+-   struct hk_cs *cs = cmd->current_cs.gfx;
+-
+-   if (cs && cs->stats.cmds == 0) {
++   /* An empty layer of a G11 layered render still clears in its background
++    * program: replacing it with image clears would land after the other
++    * layers' renders.
++    */
++   if (cs && cs->stats.cmds == 0 && !cmd->state.gfx.render.g11_layers) {
++      cmd->current_cs.gfx = cs;
+       hk_optimize_empty_vdm(cmd);
++   } else if (cs && cs->stats.cmds == 0 && !cs->cr.process_empty_tiles) {
++      list_del(&cs->node);
++      hk_cs_destroy(cs);
+    } else if (cs) {
+       /* Scissor and depth bias arrays are staged to dynamic arrays on the
+        * CPU. When we end the control stream, they're done growing and are
+@@ -732,7 +757,22 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
+       /* TODO: maybe free scissor/depth_bias now? */
+       cs->current = agx_vdm_terminate(cs->current);
+    }
++}
+ 
++static void
++hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
++{
++   struct hk_rendering_state *render = &cmd->state.gfx.render;
++
++   /* End every layer's render, see hk_g11_layer_cs */
++   for (unsigned l = 0; l < render->g11_layers; ++l) {
++      if (render->g11_cs[l] && render->g11_cs[l] != cmd->current_cs.gfx)
++         hk_cmd_buffer_end_graphics_cs(cmd, render->g11_cs[l]);
++
++      render->g11_cs[l] = NULL;
++   }
++
++   hk_cmd_buffer_end_graphics_cs(cmd, cmd->current_cs.gfx);
+    cmd->current_cs.gfx = NULL;
+ 
+    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.pre_gfx);
+@@ -796,6 +836,17 @@ void hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
  void hk_cmd_bind_vertex_buffer(struct hk_cmd_buffer *cmd, uint32_t vb_idx,
                                 struct hk_addr_range addr_range);
  
@@ -3119,7 +3288,17 @@ index 6a06060..ec072ff 100644
  static inline struct hk_descriptor_state *
  hk_get_descriptors_state(struct hk_cmd_buffer *cmd,
                           VkPipelineBindPoint bind_point)
-@@ -852,7 +869,17 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -816,6 +867,9 @@ void hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
+ void hk_meta_resolve_rendering(struct hk_cmd_buffer *cmd,
+                                const VkRenderingInfo *pRenderingInfo);
+ 
++void hk_rt_descs(struct hk_cmd_buffer *cmd, unsigned rt,
++                 struct agx_texture_packed out[2]);
++
+ uint64_t hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
+                                    VkPipelineBindPoint bind_point);
+ 
+@@ -852,7 +906,17 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     uint32_t usc = hk_upload_usc_words(cmd, s, s->only_linked);
  
     hk_reserve_scratch(cmd, cs, s);
@@ -3153,10 +3332,63 @@ index 7cb08bb..9f56d29 100644
  
     hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
 diff --git a/src/asahi/vulkan/hk_cmd_draw.c b/src/asahi/vulkan/hk_cmd_draw.c
-index b29bcbc..24a73cd 100644
+index b29bcbc..ae11ec6 100644
 --- a/src/asahi/vulkan/hk_cmd_draw.c
 +++ b/src/asahi/vulkan/hk_cmd_draw.c
-@@ -412,6 +412,10 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
+@@ -200,6 +200,7 @@ hk_cmd_buffer_begin_graphics(struct hk_cmd_buffer *cmd,
+     * hk_set_view_index will dirty the root each draw.
+     */
+    cmd->state.gfx.descriptors.root.draw.view_index = 0;
++   cmd->state.gfx.descriptors.root.draw.g11_layer = 0;
+    cmd->state.gfx.descriptors.root_dirty = true;
+ }
+ 
+@@ -265,6 +266,34 @@ is_attachment_stored(const VkRenderingAttachmentInfo *att)
+           att->resolveMode != VK_RESOLVE_MODE_NONE;
+ }
+ 
++/*
++ * G11 has no layered rendering. A layered or multiview render is one render
++ * per layer, at that layer of the attachments (hk_rt_descs, hk_cs_init_graphics
++ * for depth and stencil). Every draw is recorded into each layer's control
++ * stream with the layer in the root table: the vertex shader drops primitives
++ * of other layers and gl_Layer reads it in the fragment shader.
++ *
++ * ponytail: every draw costs one pass per layer
++ */
++static struct hk_cs *
++hk_g11_layer_cs(struct hk_cmd_buffer *cmd, unsigned layer)
++{
++   struct hk_rendering_state *render = &cmd->state.gfx.render;
++   struct hk_root_descriptor_table *root = &cmd->state.gfx.descriptors.root;
++
++   render->g11_layer = layer;
++   root->draw.g11_layer = layer;
++   root->draw.view_index = render->view_mask ? layer : 0;
++   cmd->state.gfx.descriptors.root_dirty = true;
++
++   if (cmd->current_cs.gfx != render->g11_cs[layer]) {
++      cmd->current_cs.gfx = render->g11_cs[layer];
++      hk_cmd_buffer_dirty_all(cmd);
++   }
++
++   return hk_cmd_buffer_get_cs(cmd, false /* compute */);
++}
++
+ static struct hk_bg_eot
+ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
+                 bool store, bool partial_render, bool incomplete_render_area)
+@@ -276,7 +305,8 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
+    struct agx_bg_eot_key key = {.tib = render->tilebuffer};
+    static_assert(AGX_BG_EOT_NONE == 0, "default initializer");
+ 
+-   key.tib.layered = (render->cr.layers > 1);
++   /* G11 renders each layer on its own, see hk_g11_layer_cs */
++   key.tib.layered = (render->cr.layers > 1) && !AGX_G11;
+ 
+    bool needs_textures_for_spilled_rts =
+       agx_tilebuffer_spills(&render->tilebuffer) && !partial_render && !store;
+@@ -412,6 +442,10 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
     if (needs_textures_for_spilled_rts) {
        hk_usc_upload_spilled_rt_descs(&b, cmd);
        uniforms = MAX2(uniforms, 4);
@@ -3167,7 +3399,7 @@ index b29bcbc..24a73cd 100644
     }
  
     if (uses_txf) {
-@@ -421,7 +425,10 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
+@@ -421,7 +455,10 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
     /* For attachmentless rendering, we don't know the sample count until
      * draw-time. But we have trivial bg/eot programs in that case too.
      */
@@ -3179,7 +3411,7 @@ index b29bcbc..24a73cd 100644
        agx_usc_push_packed(&b, SHARED, &key.tib.usc);
     } else {
        assert(key.tib.sample_size_B == 0);
-@@ -435,6 +442,11 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
+@@ -435,6 +472,11 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
     /* XXX: locking? */
     struct agx_bg_eot_shader *shader = agx_get_bg_eot_shader(&dev->bg_eot, &key);
  
@@ -3191,7 +3423,7 @@ index b29bcbc..24a73cd 100644
     agx_usc_pack(&b, SHADER, cfg) {
        cfg.code = agx_usc_addr(&dev->dev, shader->ptr);
        cfg.unk_2 = 0;
-@@ -442,6 +454,7 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
+@@ -442,6 +484,7 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
  
     agx_usc_pack(&b, REGISTERS, cfg)
        cfg.register_count = shader->info.nr_gprs;
@@ -3199,7 +3431,7 @@ index b29bcbc..24a73cd 100644
  
     if (shader->info.has_preamble) {
        agx_usc_pack(&b, PRESHADER, cfg) {
-@@ -463,6 +476,9 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
+@@ -463,6 +506,9 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
           agx_translate_sampler_state_count(uses_txf ? 1 : 0, false);
     }
  
@@ -3209,7 +3441,113 @@ index b29bcbc..24a73cd 100644
     return ret;
  }
  
-@@ -2041,7 +2057,8 @@ hk_stencil_test_enabled(struct hk_cmd_buffer *cmd)
+@@ -583,6 +629,20 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+ 
+    render->cr.layers = layer_count;
+ 
++   if (AGX_G11 && layer_count > 1) {
++      render->g11_layers = MIN2(layer_count, HK_G11_MAX_LAYERS);
++
++      for (uint32_t i = 0; i < render->color_att_count; i++) {
++         struct hk_image_view *iview = render->color_att[i].iview;
++         if (iview) {
++            struct hk_image *image =
++               container_of(iview->vk.image, struct hk_image, vk);
++            render->g11_rt_stride_B[i] =
++               image->planes[iview->planes[0].image_plane].layout.layer_stride_B;
++         }
++      }
++   }
++
+    /* Choose a tilebuffer layout given the framebuffer key */
+    enum pipe_format formats[HK_MAX_RTS] = {0};
+    for (unsigned i = 0; i < render->color_att_count; ++i) {
+@@ -668,6 +728,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+ 
+       unsigned stride_pages = z_layout->layer_stride_B / AIL_PAGESIZE;
+       render->cr.depth.stride = ((stride_pages - 1) << 14) | 1;
++      render->g11_z_stride_B = z_layout->layer_stride_B;
+ 
+       assert(z_layout->tiling != AIL_TILING_LINEAR && "must tile");
+ 
+@@ -719,6 +780,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+              "Page aligned S layers");
+       unsigned stride_pages = s_layout->layer_stride_B / AIL_PAGESIZE;
+       render->cr.stencil.stride = ((stride_pages - 1) << 14) | 1;
++      render->g11_s_stride_B = s_layout->layer_stride_B;
+ 
+       if (s_layout->compressed) {
+          render->cr.stencil.meta =
+@@ -750,6 +812,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+     * hk_set_view_index will dirty the root each draw.
+     */
+    cmd->state.gfx.descriptors.root.draw.view_index = 0;
++   cmd->state.gfx.descriptors.root.draw.g11_layer = 0;
+    cmd->state.gfx.descriptors.root_dirty = true;
+ 
+    if (render->flags & VK_RENDERING_RESUMING_BIT)
+@@ -759,12 +822,33 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+     * the clears. Create it and swap in the clear.
+     */
+    assert(!cmd->current_cs.gfx && "not already in a render pass");
+-   struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
+-   if (!cs)
+-      return;
++   struct hk_cs *cs = NULL;
+ 
+-   cs->cr.bg.main = render->cr.bg.main;
+-   cs->cr.zls_control = render->cr.zls_control;
++   /* Each layer of a G11 layered render clears in its own render. Layer 0
++    * is first in the command buffer, so compute queued before the current
++    * render runs before all of them.
++    */
++   for (unsigned l = 0; l < render->g11_layers; ++l) {
++      cs = hk_g11_layer_cs(cmd, l);
++      if (!cs)
++         return;
++
++      cs->cr.bg.main = hk_build_bg_eot(cmd, pRenderingInfo, false, false,
++                                       incomplete_render_area);
++      cs->cr.zls_control = render->cr.zls_control;
++   }
++
++   if (render->g11_layers)
++      cs = hk_g11_layer_cs(cmd, 0);
++
++   if (!render->g11_layers) {
++      cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
++      if (!cs)
++         return;
++
++      cs->cr.bg.main = render->cr.bg.main;
++      cs->cr.zls_control = render->cr.zls_control;
++   }
+ 
+    /* Reordering barrier for post-gfx, in case we had any. */
+    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
+@@ -899,6 +983,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+        * fast clearing and then storing.
+        */
+       cs->cr.process_empty_tiles = resolved_clear;
++
++      for (unsigned l = 0; l < render->g11_layers; ++l)
++         render->g11_cs[l]->cr.process_empty_tiles = resolved_clear;
+    }
+ }
+ 
+@@ -917,6 +1004,11 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
+       cs->cr.eot.main = render->cr.eot.main;
+    }
+ 
++   for (unsigned l = 0; l < render->g11_layers; ++l) {
++      if (render->g11_cs[l])
++         render->g11_cs[l]->cr.eot.main = render->cr.eot.main;
++   }
++
+    perf_debug(cmd, "End rendering");
+    hk_cmd_buffer_end_graphics(cmd);
+ 
+@@ -2041,7 +2133,8 @@ hk_stencil_test_enabled(struct hk_cmd_buffer *cmd)
            render->stencil_att.vk_format != VK_FORMAT_UNDEFINED;
  }
  
@@ -3219,7 +3557,7 @@ index b29bcbc..24a73cd 100644
  hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
  {
     const struct vk_dynamic_graphics_state *dyn =
-@@ -2089,16 +2106,18 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2089,16 +2182,18 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
     }
  
     /* Upload a hardware scissor for each viewport, whether there's a
@@ -3243,7 +3581,7 @@ index b29bcbc..24a73cd 100644
           cfg.min_x = minx[i];
           cfg.min_y = miny[i];
           cfg.max_x = maxx[i];
-@@ -2118,11 +2137,22 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2118,11 +2213,22 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
              cfg.max_z = 1.0;
           }
        }
@@ -3267,7 +3605,7 @@ index b29bcbc..24a73cd 100644
        .region_clip = true,
        .viewport = true,
        .viewport_count = count,
-@@ -2131,21 +2161,17 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2131,21 +2237,17 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
     size_t size = agx_ppp_update_size(&present);
     struct agx_ptr T = hk_pool_alloc(cmd, size, AGX_PPP_HEADER_ALIGN);
     if (!T.cpu)
@@ -3294,7 +3632,7 @@ index b29bcbc..24a73cd 100644
           cfg.min_x = minx[i] / 32;
           cfg.min_y = miny[i] / 32;
           cfg.max_x = DIV_ROUND_UP(MAX2(maxx[i], 1), 32);
-@@ -2153,8 +2179,10 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2153,8 +2255,10 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
        }
     }
  
@@ -3307,7 +3645,7 @@ index b29bcbc..24a73cd 100644
  
     /* Upload viewports */
     for (unsigned i = 0; i < count; ++i) {
-@@ -2172,6 +2200,7 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2172,6 +2276,7 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
     }
  
     agx_ppp_fini(out, &ppp);
@@ -3315,7 +3653,7 @@ index b29bcbc..24a73cd 100644
  }
  
  static enum agx_object_type
-@@ -2634,6 +2663,245 @@ agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
+@@ -2634,6 +2739,245 @@ agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
     }
  }
  
@@ -3561,7 +3899,7 @@ index b29bcbc..24a73cd 100644
  static void
  hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                         uint32_t draw_id, struct agx_draw draw)
-@@ -3055,7 +3323,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3055,7 +3399,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  
     if ((gfx->dirty & HK_DIRTY_PROVOKING) || vgt_dirty || linked_fs_dirty) {
        unsigned bindings = linked_fs->b.cf.nr_bindings;
@@ -3572,7 +3910,7 @@ index b29bcbc..24a73cd 100644
           size_t linkage_size =
              AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
  
-@@ -3067,6 +3337,10 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3067,6 +3413,10 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
              t.cpu, &gfx->linked_varyings, hw_vs->info.uvs.user_size,
              &linked_fs->b.cf, gfx->provoking, 0, &gfx->generate_primitive_id);
  
@@ -3583,7 +3921,7 @@ index b29bcbc..24a73cd 100644
           gfx->varyings = agx_usc_addr(&dev->dev, t.gpu);
        } else {
           gfx->varyings = 0;
-@@ -3123,6 +3397,11 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3123,6 +3473,11 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        /* TODO: Do less often? */
        hk_reserve_scratch(cmd, cs, hw_vs);
  
@@ -3595,7 +3933,7 @@ index b29bcbc..24a73cd 100644
        agx_push(out, VDM_STATE, cfg) {
           cfg.vertex_shader_word_0_present = true;
           cfg.vertex_shader_word_1_present = true;
-@@ -3150,6 +3429,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3150,6 +3505,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        /* Pad up to a multiple of 8 bytes */
        memset(out, 0, 4);
        out += 4;
@@ -3603,7 +3941,7 @@ index b29bcbc..24a73cd 100644
     }
  
     if (IS_DIRTY(RS_DEPTH_BIAS_FACTORS)) {
-@@ -3171,16 +3451,25 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3171,16 +3527,25 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     }
  
     /* Hardware viewport/scissor state is entangled with depth bias. */
@@ -3629,7 +3967,7 @@ index b29bcbc..24a73cd 100644
     cs->current = out;
  
     vk_dynamic_graphics_state_clear_dirty(dyn);
-@@ -3385,7 +3674,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
+@@ -3385,7 +3750,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     if (desc->push_dirty)
        hk_cmd_buffer_flush_push_descriptors(cmd, desc);
  
@@ -3639,7 +3977,51 @@ index b29bcbc..24a73cd 100644
        hk_flush_index(cmd, cs);
  
     hk_flush_dynamic_state(cmd, cs, draw_id, draw);
-@@ -3513,6 +3803,91 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
+@@ -3449,7 +3815,15 @@ hk_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding,
+ static bool
+ hk_set_view_index(struct hk_cmd_buffer *cmd, uint32_t view_idx)
+ {
+-   if (cmd->state.gfx.render.view_mask) {
++   struct hk_rendering_state *render = &cmd->state.gfx.render;
++
++   if (render->view_mask && !(render->view_mask & BITFIELD_BIT(view_idx)))
++      return false;
++
++   if (render->g11_layers)
++      return hk_g11_layer_cs(cmd, view_idx) != NULL;
++
++   if (render->view_mask) {
+       cmd->state.gfx.descriptors.root.draw.view_index = view_idx;
+       cmd->state.gfx.descriptors.root_dirty = true;
+    }
+@@ -3457,13 +3831,24 @@ hk_set_view_index(struct hk_cmd_buffer *cmd, uint32_t view_idx)
+    return true;
+ }
+ 
++static unsigned
++hk_view_count(struct hk_cmd_buffer *cmd)
++{
++   struct hk_rendering_state *render = &cmd->state.gfx.render;
++
++   return render->g11_layers   ? render->g11_layers
++          : render->view_mask ? util_last_bit(render->view_mask)
++                              : 1;
++}
++
+ /*
+  * Iterator macro to duplicate a draw for each enabled view (when multiview is
+  * enabled, else always view 0). Along with hk_lower_multiview, this forms the
+- * world's worst multiview lowering.
++ * world's worst multiview lowering. G11 also goes over every layer of a
++ * layered render.
+  */
+ #define hk_foreach_view(cmd)                                                   \
+-   u_foreach_bit(view_idx, cmd->state.gfx.render.view_mask ?: 1)               \
++   for (unsigned view_idx = 0; view_idx < hk_view_count(cmd); ++view_idx)    \
+       if (hk_set_view_index(cmd, view_idx))
+ 
+ static void
+@@ -3513,6 +3898,91 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
     }
  }
  
@@ -3731,7 +4113,7 @@ index b29bcbc..24a73cd 100644
  static void
  hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
  {
-@@ -3527,6 +3902,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3527,6 +3997,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
     draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
     draw_.index_size = cmd->state.gfx.index.size;
  
@@ -3743,7 +4125,7 @@ index b29bcbc..24a73cd 100644
     uint64_t stat_ia_verts = hk_pipeline_stat_addr(
        cmd, VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT);
  
-@@ -3550,7 +3930,28 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3550,7 +4025,28 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
  
     hk_foreach_view(cmd) {
        struct agx_draw draw = draw_;
@@ -3772,7 +4154,7 @@ index b29bcbc..24a73cd 100644
        /* If we failed to allocate a control stream, we've already lost the
         * device. Just drop the draw so we don't crash.
         */
-@@ -3631,6 +4032,18 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3631,6 +4127,18 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
        }
  
        enum agx_primitive topology = cmd->state.gfx.topology;
@@ -3840,6 +4222,47 @@ index abe4eb7..039c19d 100644
              };
  
              assert(key.nr_samples == src_image->samples);
+diff --git a/src/asahi/vulkan/hk_descriptor_set.c b/src/asahi/vulkan/hk_descriptor_set.c
+index 09ec774..befe991 100644
+--- a/src/asahi/vulkan/hk_descriptor_set.c
++++ b/src/asahi/vulkan/hk_descriptor_set.c
+@@ -81,6 +81,7 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
+ 
+          desc[plane].min_lod_fp16 = _mesa_float_to_half(min_lod);
+          desc[plane].min_lod_uint16 = min_lod;
++         desc[plane].border_map = view->planes[plane].border_map;
+       }
+    }
+ 
+@@ -117,6 +118,11 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
+          desc[plane].sampler = sampler->planes[sampler_plane].hw->key;
+          desc[plane].lod_bias_fp16 = sampler->lod_bias_fp16;
+          desc[plane].clamp_0_sampler_index_or_negative = -1;
++
++         /* See g11_lower_border */
++         if (AGX_G11)
++            memcpy(desc[plane].border, sampler->custom_border.uint32,
++                   sizeof(desc[plane].border));
+       }
+ 
+       if (sampler->has_border) {
+diff --git a/src/asahi/vulkan/hk_descriptor_set.h b/src/asahi/vulkan/hk_descriptor_set.h
+index 54f9fc2..039c53a 100644
+--- a/src/asahi/vulkan/hk_descriptor_set.h
++++ b/src/asahi/vulkan/hk_descriptor_set.h
+@@ -37,7 +37,11 @@ struct hk_sampled_image_descriptor {
+ 
+    /* This is only used for txf, it can be separate from the other stuff */
+    uint16_t min_lod_uint16;
+-   uint16_t pad;
++
++   /* G11 border emulation: for each channel, 3 bits of the border component
++    * it reads, or 4 for constant 0 and 5 for constant 1 (g11_lower_border)
++    */
++   uint16_t border_map;
+    /* TODO: This should probably be a heap! */
+    uint32_t border[4];
+    uint8_t pad2[4];
 diff --git a/src/asahi/vulkan/hk_format.c b/src/asahi/vulkan/hk_format.c
 index 28c2b49..425e64e 100644
 --- a/src/asahi/vulkan/hk_format.c
@@ -3949,7 +4372,7 @@ index 6a01a05..5ab8530 100644
                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
     if (!image)
 diff --git a/src/asahi/vulkan/hk_image_view.c b/src/asahi/vulkan/hk_image_view.c
-index 27e13e7..22c5195 100644
+index 27e13e7..3e2eb77 100644
 --- a/src/asahi/vulkan/hk_image_view.c
 +++ b/src/asahi/vulkan/hk_image_view.c
 @@ -53,6 +53,15 @@ static enum agx_texture_dimension
@@ -3968,10 +4391,27 @@ index 27e13e7..22c5195 100644
     if (usage == HK_DESC_USAGE_EMRT || usage == HK_DESC_USAGE_INPUT ||
         (usage == HK_DESC_USAGE_LAYERED_BG_EOT && layered)) {
        return msaa ? AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED
-@@ -257,6 +266,11 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
+@@ -257,6 +266,28 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
  
     util_format_compose_swizzles(format_swizzle, view_swizzle, out_swizzle);
  
++   /* See g11_lower_border. Depth and stencil borders keep the swizzle's
++    * constants, colour borders do not.
++    */
++   if (usage == HK_DESC_USAGE_SAMPLED) {
++      bool zs = util_format_is_depth_or_stencil(p_format);
++      uint16_t map = 0;
++      for (unsigned c = 0; c < 4; ++c) {
++         unsigned code = out_swizzle[c] == PIPE_SWIZZLE_0         ? 4
++                         : out_swizzle[c] == PIPE_SWIZZLE_1 && zs ? 4
++                         : out_swizzle[c] == PIPE_SWIZZLE_1       ? 5
++                                                                  : view_swizzle[c];
++         map |= code << (3 * c);
++      }
++
++      view->planes[view_plane].border_map = map;
++   }
++
 +   /* See translate_image_view_type */
 +   bool g11_2d = AGX_G11 && usage == HK_DESC_USAGE_EMRT;
 +   if (g11_2d)
@@ -3980,7 +4420,7 @@ index 27e13e7..22c5195 100644
     agx_pack(out, TEXTURE, cfg) {
        cfg.dimension = translate_image_view_type(
           view->vk.view_type, view->vk.image->samples > 1, layers > 1, usage);
-@@ -337,7 +351,7 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
+@@ -337,7 +368,7 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
                                     (layer * layout->compression_layer_stride_B);
        }
  
@@ -3989,7 +4429,7 @@ index 27e13e7..22c5195 100644
            (hk_image_view_type_is_array(view->vk.view_type))) {
  
           cfg.depth_linear = layers;
-@@ -392,6 +406,11 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -392,6 +423,11 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
                          ? image->vk.extent.depth
                          : view->vk.layer_count;
  
@@ -4001,7 +4441,7 @@ index 27e13e7..22c5195 100644
     agx_pack(out, PBE, cfg) {
        cfg.dimension =
           translate_image_view_type(view->vk.view_type, msaa, layers > 1, usage);
-@@ -414,7 +433,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -414,7 +450,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
        }
  
        cfg.buffer = base_addr + ail_get_layer_offset_B(layout, layer);
@@ -4011,7 +4451,7 @@ index 27e13e7..22c5195 100644
  
        if (msaa & !eot) {
           /* Multisampled images are bound like buffer textures, with
-@@ -431,7 +451,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -431,7 +468,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
           cfg.layout = AGX_LAYOUT_LINEAR;
           cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
           cfg.height = DIV_ROUND_UP(size_px, cfg.width);
@@ -4020,7 +4460,7 @@ index 27e13e7..22c5195 100644
           cfg.layers = 1;
           cfg.levels = 1;
  
-@@ -457,7 +477,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -457,7 +494,7 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
              cfg.level = level;
           }
  
@@ -4029,7 +4469,7 @@ index 27e13e7..22c5195 100644
               (hk_image_view_type_is_array(view->vk.view_type))) {
  
              cfg.depth_linear = layers;
-@@ -471,7 +491,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -471,7 +508,8 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
           cfg.levels = image->vk.mip_levels;
  
           if (layout->tiling == AIL_TILING_LINEAR) {
@@ -4039,7 +4479,7 @@ index 27e13e7..22c5195 100644
              assert(cfg.levels == 1);
           } else {
              cfg.page_aligned_layers = layout->page_aligned_layers;
-@@ -479,6 +500,15 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -479,6 +517,15 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
  
           if (image->vk.samples > 1)
              cfg.samples = agx_translate_sample_count(image->vk.samples);
@@ -4055,7 +4495,7 @@ index 27e13e7..22c5195 100644
        }
  
        if (layout->compressed && usage != HK_DESC_USAGE_EMRT) {
-@@ -516,6 +546,62 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -516,6 +563,62 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
           }
        }
     };
@@ -4118,8 +4558,65 @@ index 27e13e7..22c5195 100644
  }
  
  static VkResult
+diff --git a/src/asahi/vulkan/hk_image_view.h b/src/asahi/vulkan/hk_image_view.h
+index a4f5546..b7998e1 100644
+--- a/src/asahi/vulkan/hk_image_view.h
++++ b/src/asahi/vulkan/hk_image_view.h
+@@ -22,6 +22,7 @@ struct hk_image_view {
+    uint8_t plane_count;
+    struct {
+       uint8_t image_plane;
++      uint16_t border_map;
+ 
+       struct agx_texture_packed ia, sampled, ro_storage, background,
+          layered_background, emrt_texture;
+diff --git a/src/asahi/vulkan/hk_nir_lower_descriptors.c b/src/asahi/vulkan/hk_nir_lower_descriptors.c
+index 7de7000..b6bb9ba 100644
+--- a/src/asahi/vulkan/hk_nir_lower_descriptors.c
++++ b/src/asahi/vulkan/hk_nir_lower_descriptors.c
+@@ -573,6 +573,13 @@ try_lower_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
+    case nir_intrinsic_load_view_index:
+       return lower_sysval_to_root_table(b, intrin, draw.view_index);
+ 
++   case nir_intrinsic_load_layer_id:
++      if (!AGX_G11)
++         return false;
++
++      /* G11 renders each layer on its own, see hk_g11_layer_cs */
++      return lower_sysval_to_root_table(b, intrin, draw.g11_layer);
++
+    case nir_intrinsic_image_deref_load:
+    case nir_intrinsic_image_deref_sparse_load:
+    case nir_intrinsic_image_deref_store:
+@@ -663,6 +670,26 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
+       return true;
+    }
+ 
++   /* Sampler word and border map for g11_lower_border */
++   if (AGX_G11 && tex->op == nir_texop_sampler_descriptor_amd) {
++      nir_def *samp = load_resource_deref_desc(
++         b, 2, 32, nir_src_as_deref(nir_src_for_ssa(sampler)),
++         plane_offset_B + offsetof(struct hk_sampled_image_descriptor, sampler),
++         ctx);
++
++      nir_def *map = load_resource_deref_desc(
++         b, 1, 16, nir_src_as_deref(nir_src_for_ssa(texture)),
++         plane_offset_B +
++            offsetof(struct hk_sampled_image_descriptor, border_map),
++         ctx);
++
++      nir_def_replace(&tex->def,
++                      nir_vec4(b, nir_channel(b, samp, 0),
++                               nir_channel(b, samp, 1), nir_u2u32(b, map),
++                               nir_imm_int(b, 0)));
++      return true;
++   }
++
+    if (tex->op == nir_texop_custom_border_color_agx) {
+       unsigned offs = offsetof(struct hk_sampled_image_descriptor, border);
+ 
 diff --git a/src/asahi/vulkan/hk_physical_device.c b/src/asahi/vulkan/hk_physical_device.c
-index bbfda00..572f67a 100644
+index bbfda00..2c7c4f8 100644
 --- a/src/asahi/vulkan/hk_physical_device.c
 +++ b/src/asahi/vulkan/hk_physical_device.c
 @@ -42,7 +42,8 @@ hk_get_vk_version()
@@ -4345,6 +4842,15 @@ index bbfda00..572f67a 100644
        .maxViewportDimensions = {32768, 32768},
        .viewportBoundsRange = {-65536, 65536},
        .viewportSubPixelBits = 8,
+@@ -792,7 +803,7 @@ hk_get_device_properties(const struct agx_device *dev,
+       .subPixelInterpolationOffsetBits = 4,
+       .maxFramebufferHeight = 16384,
+       .maxFramebufferWidth = 16384,
+-      .maxFramebufferLayers = 2048,
++      .maxFramebufferLayers = AGX_G11 ? HK_G11_MAX_LAYERS : 2048,
+       .framebufferColorSampleCounts = sample_counts,
+       .framebufferDepthSampleCounts = sample_counts,
+       .framebufferNoAttachmentsSampleCounts = sample_counts,
 @@ -839,8 +850,12 @@ hk_get_device_properties(const struct agx_device *dev,
        /* Vulkan 1.1 properties */
        .subgroupSize = 32,
@@ -4368,6 +4874,18 @@ index bbfda00..572f67a 100644
        .pointClippingBehavior = VK_POINT_CLIPPING_BEHAVIOR_USER_CLIP_PLANES_ONLY,
        .maxMultiviewViewCount = HK_MAX_MULTIVIEW_VIEW_COUNT,
        .maxMultiviewInstanceIndex = UINT32_MAX,
+diff --git a/src/asahi/vulkan/hk_private.h b/src/asahi/vulkan/hk_private.h
+index df6915f..cec447e 100644
+--- a/src/asahi/vulkan/hk_private.h
++++ b/src/asahi/vulkan/hk_private.h
+@@ -16,6 +16,7 @@
+ #define HK_MAX_PUSH_SIZE                 256
+ #define HK_MAX_DYNAMIC_BUFFERS           64
+ #define HK_MAX_RTS                       8
++#define HK_G11_MAX_LAYERS                256
+ #define HK_MIN_SSBO_ALIGNMENT            16
+ #define HK_MIN_TEXEL_BUFFER_ALIGNMENT    16
+ #define HK_MIN_UBO_ALIGNMENT             64
 diff --git a/src/asahi/vulkan/hk_queue.c b/src/asahi/vulkan/hk_queue.c
 index e7e6aec..7a56372 100644
 --- a/src/asahi/vulkan/hk_queue.c
@@ -4398,8 +4916,23 @@ index e7e6aec..7a56372 100644
     }
  
     return VK_SUCCESS;
+diff --git a/src/asahi/vulkan/hk_sampler.c b/src/asahi/vulkan/hk_sampler.c
+index bbd98c0..e16b8d2 100644
+--- a/src/asahi/vulkan/hk_sampler.c
++++ b/src/asahi/vulkan/hk_sampler.c
+@@ -212,6 +212,10 @@ hk_CreateSampler(VkDevice device,
+    struct agx_sampler_packed samp;
+    pack_sampler(pdev, info, true, workaround_rgba4, &samp);
+ 
++   /* G11 adds the border in the shader, see g11_lower_border */
++   if (AGX_G11 && uses_border(info))
++      sampler->custom_border = sampler->vk.border_color_value;
++
+    /* LOD bias passed in the descriptor set */
+    sampler->lod_bias_fp16 = _mesa_float_to_half(info->mipLodBias);
+ 
 diff --git a/src/asahi/vulkan/hk_shader.c b/src/asahi/vulkan/hk_shader.c
-index e12393a..041768e 100644
+index e12393a..e34e03a 100644
 --- a/src/asahi/vulkan/hk_shader.c
 +++ b/src/asahi/vulkan/hk_shader.c
 @@ -105,6 +105,28 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
@@ -4449,7 +4982,326 @@ index e12393a..041768e 100644
     return (!feats || feats->customBorderColors) ? HK_FEAT_CUSTOM_BORDER : 0;
  }
  
-@@ -783,6 +809,125 @@ should_lower_robust(const nir_intrinsic_instr *intr, const void *_)
+@@ -573,6 +599,75 @@ hk_lower_multiview(nir_shader *nir)
+    b.shader->info.outputs_written |= VARYING_BIT_LAYER;
+ }
+ 
++/*
++ * G11 records a layered render once per layer (hk_g11_layer_cs, the layer is
++ * load_layer_id). The vertex shader collapses primitives of other layers to
++ * one point outside the clip volume, and the fragment
++ * shader's gl_Layer is the render's layer.
++ */
++static void
++hk_g11_lower_layer_vs(nir_shader *nir)
++{
++   nir_builder b =
++      nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
++
++   nir_variable *layer =
++      nir_find_variable_with_location(nir, nir_var_shader_out, VARYING_SLOT_LAYER);
++   nir_variable *pos =
++      nir_find_variable_with_location(nir, nir_var_shader_out, VARYING_SLOT_POS);
++
++   if (!pos)
++      return;
++
++   /* The hardware drops layer writes (agx_nir_lower_uvs), keep it as a
++    * temporary to read back
++    */
++   if (layer) {
++      layer->data.mode = nir_var_shader_temp;
++      layer->data.location = 0;
++      nir_fixup_deref_modes(nir);
++      nir->info.outputs_written &= ~VARYING_BIT_LAYER;
++   }
++
++   /* Write the position once at the end, outside control flow */
++   nir_variable *out = nir_variable_clone(pos, nir);
++   nir_shader_add_variable(nir, out);
++   pos->data.mode = nir_var_shader_temp;
++   pos->data.location = 0;
++   nir_fixup_deref_modes(nir);
++
++   nir_def *l = layer ? nir_load_var(&b, layer) : nir_imm_int(&b, 0);
++   nir_def *cull = nir_imm_vec4(&b, -2.0, -2.0, -2.0, 1.0);
++   nir_store_var(&b, out,
++                 nir_bcsel(&b, nir_ine(&b, l, nir_load_layer_id(&b)), cull,
++                           nir_load_var(&b, pos)),
++                 0xf);
++}
++
++static bool
++hk_g11_lower_layer_fs_instr(nir_builder *b, nir_intrinsic_instr *intr,
++                            UNUSED void *data)
++{
++   if (intr->intrinsic != nir_intrinsic_load_deref)
++      return false;
++
++   nir_variable *var = nir_intrinsic_get_var(intr, 0);
++   if (!var || var->data.mode != nir_var_shader_in ||
++       var->data.location != VARYING_SLOT_LAYER)
++      return false;
++
++   b->cursor = nir_before_instr(&intr->instr);
++   nir_def_replace(&intr->def, nir_load_layer_id(b));
++   return true;
++}
++
++static void
++hk_g11_lower_layer_fs(nir_shader *nir)
++{
++   NIR_PASS(_, nir, nir_shader_intrinsics_pass, hk_g11_lower_layer_fs_instr,
++            nir_metadata_control_flow, NULL);
++}
++
+ static nir_def *
+ query_custom_border(nir_builder *b, nir_tex_instr *tex)
+ {
+@@ -659,6 +754,242 @@ agx_nir_lower_custom_border(nir_shader *nir)
+    return nir_shader_tex_pass(nir, lower, nir_metadata_none, NULL);
+ }
+ 
++#if AGX_G11
++/*
++ * G11 samplers have no border colour: clamp to border reads transparent black,
++ * applied after the swizzle for colour formats (docs/gpu.md). Add the border
++ * colour times the filter weight of texels outside the image. The weight comes
++ * from the coordinates, the LOD and the sampler word, which the descriptor
++ * holds (hk_sampled_image_descriptor, read through sampler_descriptor_amd).
++ * Sampling through a state swizzled to 1 does not give it: G11 keeps the
++ * constants at the border.
++ *
++ * ponytail: no anisotropy, depth compares or view min LOD; add them when a
++ * test needs them
++ */
++
++/* No ubfe on AGX */
++static nir_def *
++g11_bits(nir_builder *b, nir_def *x, unsigned offset, unsigned bits)
++{
++   return nir_iand_imm(b, nir_ushr_imm(b, x, offset), BITFIELD_MASK(bits));
++}
++
++static bool
++g11_border_sample(const nir_tex_instr *tex)
++{
++   return nir_tex_instr_need_sampler(tex) && !nir_tex_instr_is_query(tex) &&
++          !tex->is_shadow && tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE;
++}
++
++/*
++ * Each sample adds about 180 instructions, and G11 runs very big shaders
++ * wrong (robustness2's 126 samples made 150 KiB).
++ *
++ * ponytail: shaders with more than 32 samples keep the transparent black
++ * border; find G11's code size limit if that matters
++ */
++static unsigned
++g11_border_samples(nir_shader *nir)
++{
++   unsigned n = 0;
++   nir_foreach_function_impl(impl, nir) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type == nir_instr_type_tex &&
++                g11_border_sample(nir_instr_as_tex(instr)))
++               ++n;
++         }
++      }
++   }
++
++   return n;
++}
++
++static bool
++g11_lower_border(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
++{
++   if (!g11_border_sample(tex))
++      return false;
++
++   /* Derivatives before the branch, which may diverge */
++   b->cursor = nir_before_instr(&tex->instr);
++   unsigned n = tex->coord_components - tex->is_array;
++   nir_def *coord = nir_f2f32(
++      b, nir_trim_vector(b, nir_get_tex_src(tex, nir_tex_src_coord), n));
++   nir_def *offset = nir_get_tex_src(tex, nir_tex_src_offset);
++
++   nir_def *dx = NULL, *dy = NULL;
++   if (tex->op == nir_texop_txd) {
++      dx = nir_f2f32(b, nir_get_tex_src(tex, nir_tex_src_ddx));
++      dy = nir_f2f32(b, nir_get_tex_src(tex, nir_tex_src_ddy));
++   } else if ((tex->op == nir_texop_tex || tex->op == nir_texop_txb) &&
++              b->shader->info.stage == MESA_SHADER_FRAGMENT) {
++      dx = nir_ddx(b, coord);
++      dy = nir_ddy(b, coord);
++   }
++
++   b->cursor = nir_after_instr(&tex->instr);
++   nir_instr *orig = nir_instr_clone(b->shader, &tex->instr);
++   nir_builder_instr_insert(b, orig);
++   nir_def *res = &nir_instr_as_tex(orig)->def;
++
++   /* A transparent black border is left to the hardware, robustness2 wants
++    * it as it is
++    */
++   nir_def *border = query_custom_border(b, tex);
++   nir_push_if(b, nir_ine_imm(b, nir_channel(b, border, 3), 0));
++   nir_def *replaced;
++   {
++      nir_def *samp = nir_build_texture_query(
++         b, tex, nir_texop_sampler_descriptor_amd, 4, nir_type_uint32, false,
++         false);
++      nir_def *size0 = nir_trim_vector(
++         b,
++         nir_build_texture_query(b, tex, nir_texop_txs, n + tex->is_array,
++                                 nir_type_int32, false, true),
++         n);
++      nir_def *levels = nir_build_texture_query(
++         b, tex, nir_texop_query_levels, 1, nir_type_int32, false, false);
++      nir_def *lo = nir_channel(b, samp, 0), *hi = nir_channel(b, samp, 1);
++      nir_def *map = nir_channel(b, samp, 2);
++      nir_def *zero = nir_imm_float(b, 0.0), *one_f = nir_imm_float(b, 1.0);
++      nir_def *unnorm = nir_i2b(b, g11_bits(b, hi, 6, 1));
++      nir_def *s0 = nir_i2f32(b, size0);
++
++      /* Vulkan LOD, unnormalized coordinates and gathers use level 0 */
++      nir_def *lod = zero;
++      if (tex->op == nir_texop_txl) {
++         lod = nir_f2f32(b, nir_get_tex_src(tex, nir_tex_src_lod));
++      } else if (dx) {
++         nir_def *sx = nir_fmul(b, dx, s0), *sy = nir_fmul(b, dy, s0);
++         nir_def *rho2 = nir_fmax(b, nir_fdot(b, sx, sx), nir_fdot(b, sy, sy));
++         lod = nir_fmul_imm(b, nir_flog2(b, rho2), 0.5);
++      }
++
++      nir_def *bias = nir_get_tex_src(tex, nir_tex_src_bias);
++      if (bias)
++         lod = nir_fadd(b, lod, nir_f2f32(b, bias));
++
++      nir_def *min_lod = nir_fmul_imm(b, nir_u2f32(b, g11_bits(b, lo, 0, 10)),
++                                      1.0 / 64.0);
++      nir_def *max_lod = nir_fmul_imm(
++         b, nir_u2f32(b, g11_bits(b, lo, 10, 10)), 1.0 / 64.0);
++      lod = nir_bcsel(b, unnorm, zero, nir_fclamp(b, lod, min_lod, max_lod));
++
++      /* Filter: magnify at LOD 0 and below. Gathers read like linear. */
++      nir_def *linear = nir_ieq_imm(
++         b,
++         nir_bcsel(b, nir_fle_imm(b, lod, 0.0), g11_bits(b, lo, 23, 2),
++                   g11_bits(b, lo, 25, 2)),
++         1);
++      if (tex->op == nir_texop_tg4)
++         linear = nir_imm_true(b);
++
++      /* Mip levels A and B blended by delta (Vulkan 16.6.6) */
++      nir_def *mip = g11_bits(b, lo, 27, 2);
++      nir_def *q = nir_fadd_imm(b, nir_i2f32(b, levels), -1.0);
++      nir_def *lc = nir_bcsel(b, nir_ieq_imm(b, mip, 0), zero,
++                              nir_fclamp(b, lod, zero, q));
++      nir_def *mip_linear = nir_ieq_imm(b, mip, 2);
++      nir_def *da = nir_bcsel(b, mip_linear, nir_ffloor(b, lc),
++                              nir_ffloor(b, nir_fadd_imm(b, lc, 0.5)));
++      nir_def *db = nir_bcsel(b, mip_linear,
++                              nir_fmin(b, nir_fadd_imm(b, da, 1.0), q), da);
++      nir_def *delta = nir_bcsel(b, mip_linear, nir_fsub(b, lc, da), zero);
++
++      /* In-image filter weight per axis, x in texels: nearest reads the
++       * texel under x, linear the two around it
++       */
++      nir_def *gather_in[2][2];
++      nir_def *inside[2];
++      for (unsigned l = 0; l < 2; ++l) {
++         nir_def *size = nir_i2f32(
++            b, nir_imax_imm(b, nir_ushr(b, size0, nir_f2u32(b, l ? db : da)),
++                            1));
++
++         inside[l] = one_f;
++         for (unsigned a = 0; a < n; ++a) {
++            nir_def *s = nir_channel(b, size, a);
++            nir_def *x = nir_channel(b, coord, a);
++            x = nir_bcsel(b, unnorm, x, nir_fmul(b, x, s));
++            if (offset)
++               x = nir_fadd(b, x, nir_i2f32(b, nir_channel(b, offset, a)));
++
++            nir_def *w_lin = nir_fsat(
++               b, nir_fmin(b, nir_fadd_imm(b, x, 0.5),
++                           nir_fsub(b, nir_fadd_imm(b, s, 0.5), x)));
++            nir_def *w_near = nir_b2f32(
++               b, nir_iand(b, nir_fge(b, x, zero), nir_flt(b, x, s)));
++            nir_def *w = nir_bcsel(b, linear, w_lin, w_near);
++
++            nir_def *border_axis =
++               nir_ieq_imm(b, g11_bits(b, a == 0 ? lo : hi, a == 0 ? 29 : 3 * (a - 1), 3), 3);
++            inside[l] = nir_fmul(b, inside[l],
++                                 nir_bcsel(b, border_axis, w, one_f));
++
++            /* Gathers: texels floor(x - 0.5) and the next */
++            if (tex->op == nir_texop_tg4 && !l && a < 2) {
++               nir_def *i0 = nir_ffloor(b, nir_fadd_imm(b, x, -0.5));
++               nir_def *i1 = nir_fadd_imm(b, i0, 1.0);
++               gather_in[a][0] = nir_ior(
++                  b, nir_inot(b, border_axis),
++                  nir_iand(b, nir_fge(b, i0, zero), nir_flt(b, i0, s)));
++               gather_in[a][1] = nir_ior(
++                  b, nir_inot(b, border_axis),
++                  nir_iand(b, nir_fge(b, i1, zero), nir_flt(b, i1, s)));
++            }
++         }
++      }
++
++      /* The hardware border is transparent black after the swizzle, so each
++       * channel adds its border component or its swizzle constant
++       */
++      bool is_float =
++         nir_alu_type_get_base_type(tex->dest_type) == nir_type_float;
++      unsigned bits = res->bit_size;
++      nir_def *one =
++         is_float ? nir_imm_floatN_t(b, 1.0, bits) : nir_imm_intN_t(b, 1, bits);
++      nir_def *zbits = nir_imm_zero(b, 1, bits);
++      nir_def *outside =
++         nir_fsub_imm(b, 1.0, nir_flrp(b, inside[0], inside[1], delta));
++      b->shader->info.flrp_lowered = false;
++
++      /* Gather order: (i0, j1), (i1, j1), (i1, j0), (i0, j0) */
++      static const unsigned ij[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
++
++      nir_def *out[4];
++      for (unsigned c = 0; c < res->num_components; ++c) {
++         unsigned ch = tex->op == nir_texop_tg4 ? tex->component : c;
++         nir_def *code = g11_bits(b, map, 3 * ch, 3);
++         nir_def *add =
++            nir_bcsel(b, nir_ult(b, code, nir_imm_int(b, 4)),
++                      nir_vector_extract(b, border, code),
++                      nir_bcsel(b, nir_ieq_imm(b, code, 5), one, zbits));
++
++         nir_def *r = nir_channel(b, res, c);
++         if (tex->op == nir_texop_tg4) {
++            nir_def *in = nir_iand(b, gather_in[0][ij[c][0]],
++                                   gather_in[1][ij[c][1]]);
++            add = nir_bcsel(b, in, zbits, add);
++            out[c] = is_float ? nir_fadd(b, r, add) : nir_iadd(b, r, add);
++         } else if (is_float) {
++            out[c] = nir_ffma(b, nir_f2fN(b, outside, bits), add, r);
++         } else {
++            out[c] = nir_iadd(b, r, nir_bcsel(b, nir_fgt_imm(b, outside, 0.5),
++                                              add, zbits));
++         }
++      }
++
++      replaced = nir_vec(b, out, res->num_components);
++   }
++   nir_pop_if(b, NULL);
++
++   nir_def_replace(&tex->def, nir_if_phi(b, replaced, res));
++   return true;
++}
++#endif
++
+ static nir_def *
+ query_min_lod(nir_builder *b, nir_tex_instr *tex, bool int_coords)
+ {
+@@ -783,6 +1114,125 @@ should_lower_robust(const nir_intrinsic_instr *intr, const void *_)
            intr->intrinsic == nir_intrinsic_image_deref_atomic_swap;
  }
  
@@ -4575,7 +5427,7 @@ index e12393a..041768e 100644
  static void
  hk_lower_nir(struct hk_device *dev, nir_shader *nir,
               const struct vk_pipeline_robustness_state *rs, bool is_multiview,
-@@ -794,6 +939,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -794,6 +1244,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
        rs = &vk_robustness_disabled;
     }
  
@@ -4584,7 +5436,22 @@ index e12393a..041768e 100644
     const nir_opt_access_options access_options = {
        .is_vulkan = true,
     };
-@@ -851,10 +998,22 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -814,8 +1266,14 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+    if (nir->info.stage == MESA_SHADER_VERTEX) {
+       if (is_multiview)
+          hk_lower_multiview(nir);
++
++      if (AGX_G11)
++         hk_g11_lower_layer_vs(nir);
+    }
+ 
++   if (AGX_G11 && nir->info.stage == MESA_SHADER_FRAGMENT)
++      hk_g11_lower_layer_fs(nir);
++
+    if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
+       NIR_PASS(_, nir, nir_lower_patch_vertices,
+                nir->info.tess.tcs_vertices_out, NULL);
+@@ -851,10 +1309,28 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
        NIR_PASS(_, nir, agx_nir_lower_image_view_min_lod);
     }
  
@@ -4595,6 +5462,12 @@ index e12393a..041768e 100644
        NIR_PASS(_, nir, agx_nir_lower_custom_border);
     }
  
++#if AGX_G11
++   if (g11_border_samples(nir) <= 32)
++      NIR_PASS(_, nir, nir_shader_tex_pass, g11_lower_border,
++               nir_metadata_none, NULL);
++#endif
++
 +#if AGX_G11
 +   /* A separate sampler array may need a second round */
 +   bool unrolled;
@@ -4608,7 +5481,7 @@ index e12393a..041768e 100644
     NIR_PASS(_, nir, hk_nir_lower_descriptors, rs, set_layout_count,
              set_layouts);
     NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
-@@ -928,6 +1087,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -928,6 +1404,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
  
     NIR_PASS(_, nir, agx_nir_lower_texture);
     NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
@@ -4617,7 +5490,7 @@ index e12393a..041768e 100644
  
     agx_preprocess_nir(nir);
  
-@@ -996,6 +1157,123 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
+@@ -996,6 +1474,123 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
                                        : VK_SUCCESS;
  }
  
@@ -4741,7 +5614,7 @@ index e12393a..041768e 100644
  static bool
  lower_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  {
-@@ -1073,6 +1351,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1073,6 +1668,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                 struct hk_shader *shader, mesa_shader_stage sw_stage, bool hw,
                 nir_xfb_info *xfb_info, unsigned set_count)
  {
@@ -4749,7 +5622,7 @@ index e12393a..041768e 100644
     unsigned nr_vbos = 0;
     bool kill_psiz = false;
  
-@@ -1158,6 +1437,18 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1158,6 +1754,18 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
  
     shader->info.set_count = set_count;
  
@@ -4768,7 +5641,7 @@ index e12393a..041768e 100644
     /* XXX: rename */
     NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos);
     NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
-@@ -1178,7 +1469,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1178,7 +1786,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        .no_stop = nir->info.stage == MESA_SHADER_FRAGMENT,
        .has_scratch = !nir->info.internal,
        .promote_constants = true,
@@ -4778,7 +5651,7 @@ index e12393a..041768e 100644
     };
  
     /* For now, sample shading is always dynamic. Indicate that. */
-@@ -1283,10 +1575,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
+@@ -1283,10 +1892,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
        hk_shader_destroy(dev, shader);
     }
  
@@ -4791,7 +5664,7 @@ index e12393a..041768e 100644
  }
  
  static void dump_shader_ir(
-@@ -1952,6 +2244,20 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1952,6 +2561,20 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
        agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
     }
  
@@ -4812,7 +5685,7 @@ index e12393a..041768e 100644
     if (s->b.uses_txf)
        agx_usc_push_packed(&b, SAMPLER, dev->dev.txf_sampler);
  
-@@ -1961,6 +2267,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1961,6 +2584,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
  
     if (fragment)
        agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, s->b.fragment_props);

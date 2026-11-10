@@ -396,7 +396,7 @@ without compression, and the G11 PBE stride bias and level handling.
 | copies | the meta copy shaders store texel by texel; G11's block store is not known |
 | WSI | linear modifiers only. weston logs `bo geometry out of bounds` while it tries the buffer on a display plane, then composites it with GL |
 | internal kernels | libagx's precompiled kernels (buffer copies, fills, updates) launch with no texture or sampler states; a count without the USC words loads state from address 0 and left every later compute job doing nothing |
-| layers | layered rendering is not known and the kernel takes one layer: layer writes are dropped and everything lands on layer 0 |
+| layers | layered rendering is not known and the kernel takes one layer. A layered or multiview render is one render per layer (up to 256), at that layer of the attachments. Every draw goes into each layer's render, and the vertex shader moves primitives of other layers to a point outside the clip volume. It writes the position once, at the end: a second write inside a branch left the TA stuck |
 | background loads | background programs clamp spilled render target loads to the image: they run for the whole tile, past the last row of a linear image. Fragment shaders reading the framebuffer are in bounds and skip it |
 | faults | any GPU fault wedges G11 until reboot (no soft faults). So every buffer access is bounds checked whatever the pipeline asks for, and texture states that are unwritten or past the end of their set get the null texture |
 | dynamic indexing | a descriptor array indexed at run time becomes a chain of accesses with constant indices, at most 16. Samples and loads reach states 0-15 only: past that they read zero, stores go up to 48 |
@@ -409,22 +409,24 @@ without compression, and the G11 PBE stride bias and level handling.
 | fetch out of bounds | a fetch above level 0 is a txl through the txf-lod sampler, which clamps the level and layer: an out of range level or layer moves the texel out of bounds to read the zero border |
 | barriers | `memory_barrier_2` and the texture flush end the thread, so the fence after an image atomic is only `memory_barrier` and the image barriers |
 | blits | one layer per render, through 2D views of the layer or 3D slice (`blit_per_layer` in vk_meta) |
-| border colours | the sampler has no border colour: clamp to border reads transparent black whatever was asked (Metal has no border colour on A12 either) |
+| border colours | the sampler has no border colour (Metal has none on A12 either): clamp to border reads transparent black, after the swizzle for colour formats (an RG format's alpha reads 0) and before it for depth and stencil. For an opaque border the shader adds the border colour times the filter weight of texels outside the image, from the coordinates, the LOD and the sampler word in the descriptor (`g11_lower_border`). A second sample through a state swizzled to 1 does not give the weight, it reads 1 at the border too. Shaders with more than 32 samples skip it: robustness2 shaders past about 100 KiB of code ran wrong. Anisotropy and depth compares are not covered |
+| preambles | a preamble that samples drops a triangle now and then, so shaders with texture instructions get none. Vulkan's bindless textures leave `textures_used` empty, so the compiler looks for texture instructions |
 | R9G9B9E5 copies | copied as R32_UINT, G11 writes the shared exponent format wrong |
 
-dEQP-VK, every 200th case of the mustpass (16112): 3848 pass, 98 fail, 10901
+dEQP-VK, every 200th case of the mustpass (16112): 3891 pass, 45 fail, 10857
 not supported, 40 internal errors (the test cannot handle the format) and 2
-that time out, and none wedges the GPU. The fails are opaque border colours,
-shaders reading more than 16 textures, 3D texel fetches, layered clears and
-multiview. Vulkan 1.3 is reported: 1.4 needs subgroup operations G11 does not
-have (only barriers and elect work), and the GPU caps at 740 MHz unless told
-otherwise (see Power).
+that time out, and none wedges the GPU. The fails are shaders reading more
+than 16 textures, compressed texel views, cube array suballocations, 3D texel
+fetches, clip distances read in the fragment shader, fp16 denormals and a few
+blits and copies. Two ubo cases fail now and then. Vulkan 1.3 is reported: 1.4
+needs subgroup operations G11 does not have (only barriers and elect work),
+and the GPU caps at 740 MHz unless told otherwise (see Power).
 
-Not done: layered rendering and multiview, multisampling (only 1 sample is
-advertised, so this is not conformant), geometry and tessellation shaders and
-transform feedback (they hang in the TA), dual source blending, sparse
-residency, more than one viewport, custom and opaque border colours, more than
-16 texture reads per shader. A bad job still wedges the GPU until reboot.
+Not done: multisampling (only 1 sample is advertised, so this is not
+conformant), geometry and tessellation shaders and transform feedback (they
+hang in the TA), dual source blending, sparse residency, more than one
+viewport, custom border colours, more than 16 texture reads per shader. A bad
+job still wedges the GPU until reboot.
 
 ```sh
 build/venv/bin/python tools/tsh.py "chroot /mnt/a vulkaninfo --summary"
