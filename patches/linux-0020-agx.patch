@@ -946,10 +946,10 @@ index 000000000..bb19c5842
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..7a1c78f7b
+index 000000000..2899e0f73
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1100 @@
+@@ -0,0 +1,1109 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -975,6 +975,15 @@ index 000000000..7a1c78f7b
 +#include <drm/asahi_drm.h>
 +
 +#include "agx.h"
++
++/*
++ * Nothing throttles the GPU for heat: the firmware's thermal and PPM limits
++ * are pinned below. The top pstate, 1098 MHz, gets the phone hot under a
++ * long load, so the default stops at 740 MHz, about half the power.
++ */
++static unsigned int max_pstate = 4;
++module_param(max_pstate, uint, 0444);
++MODULE_PARM_DESC(max_pstate, "highest GPU pstate, 1 (316 MHz) to 6 (1098 MHz)");
 +
 +#define EP_MSGS			0x20
 +#define EP_INTS			0x21
@@ -1082,7 +1091,7 @@ index 000000000..7a1c78f7b
 +		{ 8, 10, 10, 21, 0x800, 1, 0xfffffffc00, 0x3fe00000 },
 +		{ 8, 12, 12, 14, 0x200, 1, 0xfffffff000, 0x1fc000 },
 +	};
-+	u32 B, C, st, hb, ha, ttbr;
++	u32 B, C, st, hb, ha, ttbr, top;
 +	int i, j;
 +
 +	B = agx->B = agx_alloc(agx, 0x8000, 0x4000);	/* RegionB */
@@ -1137,11 +1146,11 @@ index 000000000..7a1c78f7b
 +	 * 100 the firmware duty-cycles the GPU and at 0 parks every job.
 +	 * +0x770 and +0x820 pin the thermal and PPM limits.
 +	 */
++	top = clamp(max_pstate, 1U, (u32)ARRAY_SIZE(mhz) - 1);
 +	for (i = 0; i < ARRAY_SIZE(limits); i++)
-+		put32(agx, (limits[i] > 0x2000 ? C : ha) + limits[i],
-+		      (ARRAY_SIZE(mhz) - 1) * 100);
++		put32(agx, (limits[i] > 0x2000 ? C : ha) + limits[i], top * 100);
 +	/* Highest pstate; the DVFS loop in FUN_00020b44 walks down from it. */
-+	put32(agx, hb + 0xa6c, ARRAY_SIZE(mhz) - 1);
++	put32(agx, hb + 0xa6c, top);
 +	/* VA bases; power-up loads +0x18 into RGX 0x10000. */
 +	put64(agx, hb, 0x1400000000);
 +	put64(agx, hb + 8, 0xffc00000);

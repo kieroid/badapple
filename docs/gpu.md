@@ -27,6 +27,11 @@ iBSS leaves GPU rails 2 (SRAM) and 4 (core) at 0, so any RGX access wedges the
 coprocessor. Clear bits 10 and 12 of 0x23b0a0000 and the rails follow the GPU
 DVFS table at 0x23b070000. `m1n1-0012` does this for Linux boots.
 
+Nothing throttles the GPU for heat: the driver pins the firmware's thermal and
+PPM limits, since a low limit duty-cycles the GPU and 0 parks every job. At
+1098 MHz a long run makes the phone hot, so the top pstate defaults to 4,
+740 MHz. `agx.max_pstate=6` lifts it.
+
 ## Init block
 
 EP 0x20, `0x81 << 48 | addr`, points at u64s:
