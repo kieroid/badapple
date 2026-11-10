@@ -402,19 +402,29 @@ without compression, and the G11 PBE stride bias and level handling.
 | dynamic indexing | a descriptor array indexed at run time becomes a chain of accesses with constant indices, at most 16. Samples and loads reach states 0-15 only: past that they read zero, stores go up to 48 |
 | spilled targets | fragment shaders read a spilled render target's size from its descriptor through u0_u1, which points at the draw's texture states |
 | draws | an indexed draw follows a restart token, as in GL. libagx kernels that write draws into the stream fill exactly the G11 size: a gap is read as more words |
-| LOD query | not in hardware: computed from coordinate derivatives, without the sampler's bias and clamps |
+| LOD query | not in hardware: computed from coordinate derivatives, without the sampler's bias and clamps. A null texture queries zero |
+| blending | blends read the spilled render target through the texture unit, which does not see what earlier draws in the render wrote. A draw that reads its render targets after other draws starts a new render, as in GL |
+| layered writes | an image write to an array, 3D or cube image ends the thread. Such storage views get a 2D buffer-like PBE and the shader writes at the texel's index (`lower_g11_layered_store`), from the tile size, aligned width and layer stride in the PBE's software words; image atomics use the same address |
+| twiddling | Y takes the low bit, and the long side's extra bits of an oblong tile sit on top (8 byte texels have 32x64 tiles). Shader-side addressing follows ail's CPU tiling |
+| fetch out of bounds | a fetch above level 0 is a txl through the txf-lod sampler, which clamps the level and layer: an out of range level or layer moves the texel out of bounds to read the zero border |
+| barriers | `memory_barrier_2` and the texture flush end the thread, so the fence after an image atomic is only `memory_barrier` and the image barriers |
+| blits | one layer per render, through 2D views of the layer or 3D slice (`blit_per_layer` in vk_meta) |
+| border colours | the sampler has no border colour: clamp to border reads transparent black whatever was asked (Metal has no border colour on A12 either) |
+| R9G9B9E5 copies | copied as R32_UINT, G11 writes the shared exponent format wrong |
 
-dEQP-VK, every 200th case of the mustpass (16112): 3821 pass, 388 fail, 10825
-not supported, and none wedges the GPU. The fails are wrong results in
-samplers, blending, blits, robustness2 and image views. Vulkan 1.3 is
-reported: 1.4 needs subgroup operations G11 does not have (only barriers and
-elect work), and the GPU caps at 740 MHz unless told otherwise (see Power).
+dEQP-VK, every 200th case of the mustpass (16112): 3848 pass, 98 fail, 10901
+not supported, 40 internal errors (the test cannot handle the format) and 2
+that time out, and none wedges the GPU. The fails are opaque border colours,
+shaders reading more than 16 textures, 3D texel fetches, layered clears and
+multiview. Vulkan 1.3 is reported: 1.4 needs subgroup operations G11 does not
+have (only barriers and elect work), and the GPU caps at 740 MHz unless told
+otherwise (see Power).
 
 Not done: layered rendering and multiview, multisampling (only 1 sample is
 advertised, so this is not conformant), geometry and tessellation shaders and
 transform feedback (they hang in the TA), dual source blending, sparse
-residency, more than one viewport, custom border colours. A bad job still
-wedges the GPU until reboot.
+residency, more than one viewport, custom and opaque border colours, more than
+16 texture reads per shader. A bad job still wedges the GPU until reboot.
 
 ```sh
 build/venv/bin/python tools/tsh.py "chroot /mnt/a vulkaninfo --summary"

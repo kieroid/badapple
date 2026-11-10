@@ -1,5 +1,5 @@
 diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
-index e131bcf..6ff8014 100644
+index e131bcf..fe8fc37 100644
 --- a/src/asahi/compiler/agx_compile.c
 +++ b/src/asahi/compiler/agx_compile.c
 @@ -977,7 +977,7 @@ translate_atomic_opcode(nir_atomic_op op)
@@ -77,7 +77,28 @@ index e131bcf..6ff8014 100644
                 agx_unknown_barrier_1(b);
                 agx_memory_barrier_2(b);
  
-@@ -1583,7 +1619,12 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+@@ -1567,7 +1603,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+    case nir_intrinsic_fence_mem_to_tex_agx: {
+       /* Flush out the atomic to main memory... Found experimentally... */
+       agx_memory_barrier(b);
+-      agx_memory_barrier_2(b);
++
++      /* G11 kills the thread on memory_barrier_2 and the texture flush */
++      if (!AGX_G11)
++         agx_memory_barrier_2(b);
+ 
+       /* TODO: Which ones do we actually need? */
+       agx_image_barrier_1(b);
+@@ -1576,14 +1615,20 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+       agx_image_barrier_4(b);
+ 
+       /* Flush out the texture cache */
+-      agx_flush_memory_to_texture(b);
++      if (!AGX_G11)
++         agx_flush_memory_to_texture(b);
+       return NULL;
+    }
+ 
     case nir_intrinsic_fence_pbe_to_tex_pixel_agx: {
        agx_image_barrier_1(b);
        agx_image_barrier_2(b);
@@ -91,7 +112,7 @@ index e131bcf..6ff8014 100644
        agx_image_barrier_3(b);
        return NULL;
     }
-@@ -2260,18 +2301,31 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+@@ -2260,18 +2305,31 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
        case nir_tex_src_texture_offset:
           texture = index;
           break;
@@ -126,7 +147,7 @@ index e131bcf..6ff8014 100644
           texture =
              agx_translate_bindless_handle(b, &instr->src[i].src, &bindless);
           break;
-@@ -2352,6 +2406,20 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+@@ -2352,6 +2410,20 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
     else if (!agx_is_null(compare))
        compare_offset = compare;
  
@@ -147,7 +168,7 @@ index e131bcf..6ff8014 100644
     agx_index tmp = agx_vec_temp(b->shader, dst.size, instr->is_sparse ? 8 : 4);
     agx_instr *I = agx_texture_sample_to(
        b, tmp, coords, lod, bindless, texture, sampler, compare_offset,
-@@ -2359,6 +2427,10 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+@@ -2359,6 +2431,10 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
        !agx_is_null(packed_offset), !agx_is_null(compare),
        instr->op == nir_texop_lod, agx_gather_for_nir(instr), instr->is_sparse);
  
@@ -158,7 +179,7 @@ index e131bcf..6ff8014 100644
     if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
        I->op = AGX_OPCODE_TEXTURE_LOAD;
        b->shader->out->uses_txf = true;
-@@ -2853,6 +2925,126 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
+@@ -2853,6 +2929,126 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
     return false;
  }
  
@@ -285,7 +306,7 @@ index e131bcf..6ff8014 100644
  static void
  agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
                   uint8_t *ts_count, uint8_t *ss_count)
-@@ -2900,7 +3092,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2900,7 +3096,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
        .lower_subgroup_masks = true,
     };
  
@@ -296,7 +317,7 @@ index e131bcf..6ff8014 100644
  
     /* Lower addressing modes. The sooner we do this, the sooner we get rid of
      * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
-@@ -2968,7 +3162,23 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2968,7 +3166,23 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
     /* Force preamble generation for internal shaders since hk's meta copies
      * depend on it for correctness with imgwblk intrinsics.
      */
@@ -321,7 +342,7 @@ index e131bcf..6ff8014 100644
         (!(agx_compiler_debug & AGX_DBG_NOPREAMBLE) || nir->info.internal)) {
        unsigned sizes[] = {
           *preamble_size,
-@@ -3034,6 +3244,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -3034,6 +3248,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
      * do it after fusing constant shifts. Constant folding will clean up.
      */
     NIR_PASS(_, nir, agx_nir_lower_algebraic_late);
@@ -332,7 +353,7 @@ index e131bcf..6ff8014 100644
     NIR_PASS(_, nir, agx_nir_fuse_selects);
     NIR_PASS(_, nir, nir_opt_constant_folding);
     NIR_PASS(_, nir, nir_opt_combine_barriers, NULL, NULL);
-@@ -3412,7 +3626,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3412,7 +3630,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     AGX_PASS(ctx, agx_ra);
     agx_lower_64bit_postra(ctx);
  
@@ -342,7 +363,7 @@ index e131bcf..6ff8014 100644
        /* Apple always allocate 40 more bytes in the entrypoint and align to 4. */
        uint64_t stack_size = align(DIV_ROUND_UP(ctx->scratch_size_B, 4) + 10, 4);
  
-@@ -3502,7 +3717,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3502,7 +3721,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
      */
     bool dump_shaders = agx_should_dump(nir, AGX_DBG_SHADERS);
  #ifndef NDEBUG
@@ -352,7 +373,7 @@ index e131bcf..6ff8014 100644
  #else
     bool selftest = false;
  #endif
-@@ -3512,7 +3728,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3512,7 +3732,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
        bool errors =
           agx2_disassemble(binary->data + offset, binary->size - offset, fp);
  
@@ -361,7 +382,7 @@ index e131bcf..6ff8014 100644
           /* In a self-test, disassemble again to get something the user can look
            * at to figure out what went wrong.
            */
-@@ -3592,9 +3808,16 @@ agx_preprocess_nir(nir_shader *nir)
+@@ -3592,9 +3812,16 @@ agx_preprocess_nir(nir_shader *nir)
  
     NIR_PASS(_, nir, nir_lower_vars_to_ssa);
  
@@ -381,7 +402,7 @@ index e131bcf..6ff8014 100644
     NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
              nir_var_function_temp, ~0);
     NIR_PASS(_, nir, nir_split_var_copies);
-@@ -3698,6 +3921,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
+@@ -3698,6 +3925,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
              nir_metadata_control_flow, NULL);
  
     NIR_PASS(_, nir, nir_lower_frag_coord_to_pixel_coord);
@@ -573,6 +594,16 @@ index 3aeb3a4..b3073c5 100644
     case AGX_OPCODE_IMAGE_WRITE:
        return src_index == 3;
     case AGX_OPCODE_BLOCK_IMAGE_STORE:
+diff --git a/src/asahi/compiler/agx_nir.h b/src/asahi/compiler/agx_nir.h
+index c037150..32dbfc5 100644
+--- a/src/asahi/compiler/agx_nir.h
++++ b/src/asahi/compiler/agx_nir.h
+@@ -26,4 +26,5 @@ bool agx_nir_lower_fminmax(struct nir_shader *s);
+ bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);
+ bool agx_nir_lower_texture(struct nir_shader *s);
+ bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
++bool agx_nir_lower_g11_layered_image_store(struct nir_shader *s);
+ bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 diff --git a/src/asahi/compiler/agx_nir_lower_discard_zs_emit.c b/src/asahi/compiler/agx_nir_lower_discard_zs_emit.c
 index 07bf42a..ed46c9f 100644
 --- a/src/asahi/compiler/agx_nir_lower_discard_zs_emit.c
@@ -589,7 +620,7 @@ index 07bf42a..ed46c9f 100644
           value = nir_u2u16(&b, value);
  
 diff --git a/src/asahi/compiler/agx_nir_lower_texture.c b/src/asahi/compiler/agx_nir_lower_texture.c
-index 616d0b0..aed651f 100644
+index 616d0b0..5f8266e 100644
 --- a/src/asahi/compiler/agx_nir_lower_texture.c
 +++ b/src/asahi/compiler/agx_nir_lower_texture.c
 @@ -8,6 +8,7 @@
@@ -630,7 +661,7 @@ index 616d0b0..aed651f 100644
     assert(handle_idx >= 0 && "must be bindless");
     return nir_load_from_texture_handle_agx(b, tex->src[handle_idx].src.ssa);
  }
-@@ -201,6 +221,48 @@ lower_buffer_texture(nir_builder *b, nir_tex_instr *tex)
+@@ -201,6 +221,63 @@ lower_buffer_texture(nir_builder *b, nir_tex_instr *tex)
   * requires the index to be a clamped integer. Lower tex_src_coord into
   * tex_src_backend1 for array textures by type-converting and clamping.
   */
@@ -668,6 +699,21 @@ index 616d0b0..aed651f 100644
 +      }
 +   }
 +
++   /* The sampler clamps the level and the layer: a level or layer out of
++    * bounds moves the texel out of bounds instead, to read the zero border
++    */
++   nir_def *levels = nir_build_texture_query(b, tex, nir_texop_query_levels, 1,
++                                             nir_type_int32, false, false);
++   nir_def *valid = nir_ult(b, lod, levels);
++
++   if (tex->is_array) {
++      unsigned l = tex->coord_components - 1;
++      valid = nir_iand(b, valid, nir_ult(b, nir_i2i32(b, nir_channel(b, coord, l)),
++                                         nir_channel(b, size, l)));
++   }
++
++   c[0] = nir_bcsel(b, valid, c[0], nir_imm_float(b, -1.0f));
++
 +   tex->op = nir_texop_txl;
 +   tex->sampler_index = AGX_G11_TXF_LOD_SAMPLER - 1; /* +1 below for txf */
 +   lod_idx = nir_tex_instr_src_index(tex, nir_tex_src_lod);
@@ -679,7 +725,7 @@ index 616d0b0..aed651f 100644
  static bool
  lower_regular_texture(nir_builder *b, nir_instr *instr, UNUSED void *data)
  {
-@@ -220,6 +282,51 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, UNUSED void *data)
+@@ -220,6 +297,51 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, UNUSED void *data)
     if (nir_tex_instr_src_index(tex, nir_tex_src_backend1) >= 0)
        return false;
  
@@ -731,7 +777,36 @@ index 616d0b0..aed651f 100644
     /* Get the coordinates */
     nir_def *coord = nir_steal_tex_src(tex, nir_tex_src_coord);
     nir_def *ms_idx = nir_steal_tex_src(tex, nir_tex_src_ms_index);
-@@ -528,8 +635,12 @@ lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr)
+@@ -417,6 +539,13 @@ txs_for_image(nir_builder *b, nir_intrinsic_instr *intr,
+    return res;
+ }
+ 
++/* See lower_g11_layered_store */
++static bool
++agx_g11_layered_store(enum glsl_sampler_dim dim, bool array)
++{
++   return array || dim == GLSL_SAMPLER_DIM_3D || dim == GLSL_SAMPLER_DIM_CUBE;
++}
++
+ static nir_def *
+ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
+                     bool return_index)
+@@ -441,6 +570,14 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
+                   (dim == GLSL_SAMPLER_DIM_CUBE) ||
+                   (dim == GLSL_SAMPLER_DIM_3D);
+ 
++   /* G11 layered images have a buffer-like PBE, see lower_g11_layered_store */
++   if (AGX_G11 && !return_index &&
++       agx_g11_layered_store(dim, nir_intrinsic_image_array(intr))) {
++      return libagx_g11_layered_address(
++         b, desc_address, nir_pad_vec4(b, nir_u2u32(b, coord)),
++         nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D));
++   }
++
+    if (dim == GLSL_SAMPLER_DIM_BUF && return_index) {
+       return nir_channel(b, coord, 0);
+    } else if (dim == GLSL_SAMPLER_DIM_BUF) {
+@@ -528,8 +665,12 @@ lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr)
     nir_def *layer = nir_channel(b, coord, lidx);
  
     /* image_load is effectively the same as txf, reuse the txf lower */
@@ -745,7 +820,47 @@ index 616d0b0..aed651f 100644
        nir_imm_bool(b, false /* lower LOD */), lod,
        nir_imm_bool(b, false /* lower min LOD */), lod,
        nir_imm_bool(b, true /* lower layer */), layer, nir_channel(b, coord, 0));
-@@ -706,6 +817,55 @@ agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
+@@ -635,16 +776,26 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
+    nir_def *deref = intr->src[0].ssa;
+    nir_def *coord = intr->src[1].ssa;
+ 
++   bool store = intr->intrinsic == nir_intrinsic_image_deref_store;
++   bool g11_layered = AGX_G11 && store && agx_g11_layered_store(dim, array);
++
+    if (dim != GLSL_SAMPLER_DIM_BUF &&
+-       !(dim == GLSL_SAMPLER_DIM_MS &&
+-         intr->intrinsic == nir_intrinsic_image_deref_store))
++       !(dim == GLSL_SAMPLER_DIM_MS && store) && !g11_layered)
+       return false;
+ 
+    /* Bounds check the coordinate */
+    nir_def *size =
+-      nir_image_deref_size(b, size_components, 32, deref, nir_imm_int(b, 0),
++      nir_image_deref_size(b, size_components - (dim == GLSL_SAMPLER_DIM_CUBE && !array),
++                           32, deref, nir_imm_int(b, 0),
+                            .image_dim = dim, .image_array = array);
+-   nir_def *oob = nir_bany(b, nir_uge(b, coord, size));
++   /* Cube sizes count cubes, not faces */
++   if (dim == GLSL_SAMPLER_DIM_CUBE && !array)
++      size = nir_vec3(b, nir_channel(b, size, 0), nir_channel(b, size, 1),
++                      nir_imm_int(b, 6));
++   else if (dim == GLSL_SAMPLER_DIM_CUBE)
++      size = nir_vector_insert_imm(b, size, nir_imul_imm(b, nir_channel(b, size, 2), 6), 2);
++
++   nir_def *oob = nir_bany(b, nir_uge(b, nir_trim_vector(b, coord, size_components), size));
+ 
+    /* Bounds check the sample */
+    if (dim == GLSL_SAMPLER_DIM_MS) {
+@@ -663,7 +814,7 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
+     * This ensures the resulting hardware coordinate is definitely
+     * out-of-bounds, giving hardware-level robustness2 behaviour.
+     */
+-   unsigned c = size_components - 1;
++   unsigned c = g11_layered ? 0 : size_components - 1;
+    nir_def *r =
+       nir_bcsel(b, oob, nir_imm_int(b, 0xFFF0), nir_channel(b, coord, c));
+ 
+@@ -706,6 +857,59 @@ agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
     return progress;
  }
  
@@ -793,15 +908,19 @@ index 616d0b0..aed651f 100644
 +      nir_fmin(b, nir_fmax(b, lod, nir_imm_float(b, 0.0)),
 +               nir_fadd_imm(b, levels, -1.0));
 +
-+   nir_def_replace(&tex->def, nir_f2fN(b, nir_vec2(b, level, lod),
-+                                       tex->def.bit_size));
++   /* Null descriptors have no size and query zero */
++   nir_def *res = nir_vec2(b, level, lod);
++   res = nir_bcsel(b, nir_feq_imm(b, nir_channel(b, size, 0), 0.0),
++                   nir_imm_vec2(b, 0.0, 0.0), res);
++
++   nir_def_replace(&tex->def, nir_f2fN(b, res, tex->def.bit_size));
 +   return true;
 +}
 +
  bool
  agx_nir_lower_texture(nir_shader *s)
  {
-@@ -743,6 +903,10 @@ agx_nir_lower_texture(nir_shader *s)
+@@ -743,6 +947,10 @@ agx_nir_lower_texture(nir_shader *s)
      * 16-bit multisample indices) but before lowering queries (as the lowering
      * generates txs for array textures).
      */
@@ -812,6 +931,55 @@ index 616d0b0..aed651f 100644
     NIR_PASS(progress, s, nir_shader_instructions_pass, lower_regular_texture,
              nir_metadata_none, NULL);
     NIR_PASS(progress, s, nir_shader_instructions_pass, lower_tex_crawl,
+@@ -773,6 +981,48 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
+    return true;
+ }
+ 
++/*
++ * G11's image write to arrays, 3D and cubes ends the thread. Write them as 2D
++ * through a buffer-like PBE (hk_image_view.c) at the texel's index. An
++ * out-of-bounds write has x = 0xFFF0 from lower_robustness.
++ */
++static bool
++lower_g11_layered_store(nir_builder *b, nir_intrinsic_instr *intr,
++                        UNUSED void *data)
++{
++   b->cursor = nir_before_instr(&intr->instr);
++
++   if (intr->intrinsic != nir_intrinsic_bindless_image_store ||
++       !agx_g11_layered_store(nir_intrinsic_image_dim(intr),
++                              nir_intrinsic_image_array(intr)))
++      return false;
++
++   nir_def *coord = nir_u2u32(b, intr->src[1].ssa);
++   nir_def *desc = nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
++   bool is_1d = nir_intrinsic_image_dim(intr) == GLSL_SAMPLER_DIM_1D;
++   nir_def *index = libagx_g11_layered_index(b, desc, nir_pad_vec4(b, coord),
++                                             nir_imm_bool(b, is_1d));
++   nir_def *coord2d = coords_for_buffer_texture(b, index);
++
++   nir_src_rewrite(&intr->src[1], nir_pad_vector(b, coord2d, 4));
++   nir_intrinsic_set_image_dim(intr, GLSL_SAMPLER_DIM_2D);
++   nir_intrinsic_set_image_array(intr, false);
++
++   /* The 2D write is not clipped to the image, skip it */
++   nir_instr_remove(&intr->instr);
++   nir_push_if(b, nir_ult_imm(b, nir_channel(b, coord, 0), 0x4000));
++   nir_builder_instr_insert(b, &intr->instr);
++   nir_pop_if(b, NULL);
++   return true;
++}
++
++bool
++agx_nir_lower_g11_layered_image_store(nir_shader *s)
++{
++   return nir_shader_intrinsics_pass(s, lower_g11_layered_store,
++                                     nir_metadata_none, NULL);
++}
++
+ bool
+ agx_nir_lower_multisampled_image_store(nir_shader *s)
+ {
 diff --git a/src/asahi/compiler/agx_nir_opt_preamble.c b/src/asahi/compiler/agx_nir_opt_preamble.c
 index 3eb80e9..c8740d8 100644
 --- a/src/asahi/compiler/agx_nir_opt_preamble.c
@@ -873,7 +1041,7 @@ index 6baad35..309b825 100644
                 I->imm = compact;
                 BITSET_SET(replaced, v);
 diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
-index 6236c3c..2509ed1 100644
+index 6236c3c..da72ea1 100644
 --- a/src/asahi/compiler/agx_pack.c
 +++ b/src/asahi/compiler/agx_pack.c
 @@ -553,6 +553,26 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
@@ -1136,9 +1304,9 @@ index 6236c3c..2509ed1 100644
 +         pack_assert(I, Rt && !Cs && Dt && D == 0);
 +
 +         /* Arrays take the sample's 0x80 and two-byte tail with three
-+          * coordinates. Without them a write to an array writes nothing.
-+          *
-+          * ponytail: 3D is assumed to match the sample, untested
++          * coordinates. Without them a write to an array writes nothing,
++          * with them it writes and ends the thread (Vulkan avoids them, see
++          * lower_g11_layered_store).
 +          */
 +         bool three = I->dim == AGX_DIM_3D || agx_g11_array(I->dim);
 +         uint64_t raw = 0x31 | (three ? 0x80 : 0) | (agx_g11_dims[I->dim] << 8) |
@@ -2007,7 +2175,7 @@ index bf7dfb9..0cff297 100644
  
  static enum agx_sample_count
 diff --git a/src/asahi/lib/agx_linker.c b/src/asahi/lib/agx_linker.c
-index 445b939..4f71c72 100644
+index 445b939..ed4010a 100644
 --- a/src/asahi/lib/agx_linker.c
 +++ b/src/asahi/lib/agx_linker.c
 @@ -40,6 +40,12 @@ static const uint8_t sample_loop_header[] = {
@@ -2049,14 +2217,26 @@ index 445b939..4f71c72 100644
     agx_pack(&linked->shader, USC_SHADER, cfg) {
        cfg.code = agx_usc_addr(dev, linked->bo->va->addr);
        cfg.unk_2 = fragment ? 2 : 3;
+@@ -212,6 +223,8 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
+          linked->no_op = true;
+       }
+ 
++      linked->reads_tib = reads_tib;
++
+       agx_pack(&linked->fragment_control, FRAGMENT_CONTROL, cfg) {
+          cfg.tag_write_disable = tag_write_disable;
+          cfg.disable_tri_merging = disable_tri_merging;
 diff --git a/src/asahi/lib/agx_linker.h b/src/asahi/lib/agx_linker.h
-index 419dccf..0704fb3 100644
+index 419dccf..8745ca8 100644
 --- a/src/asahi/lib/agx_linker.h
 +++ b/src/asahi/lib/agx_linker.h
-@@ -30,6 +30,9 @@ struct agx_linked_shader {
+@@ -30,6 +30,12 @@ struct agx_linked_shader {
     /* Whether the program is a no-op and can be skipped. */
     bool no_op;
  
++   /* Whether the fragment program reads the render targets */
++   bool reads_tib;
++
 +   /* Register count, for G11's combined shader word */
 +   unsigned nr_gprs;
 +
@@ -2585,7 +2765,7 @@ index d8266b6..45270ba 100644
     if (start_halfs & BITFIELD_BIT(8)) {
        agx_usc_pack(b, UNIFORM_HIGH, cfg) {
 diff --git a/src/asahi/libagx/texture.cl b/src/asahi/libagx/texture.cl
-index f6bf75a..c710a25 100644
+index f6bf75a..090b2b0 100644
 --- a/src/asahi/libagx/texture.cl
 +++ b/src/asahi/libagx/texture.cl
 @@ -32,12 +32,8 @@ libagx_txs(constant struct agx_texture_packed *ptr, uint16_t lod,
@@ -2603,6 +2783,59 @@ index f6bf75a..c710a25 100644
        size.z = d.depth_linear;
  
     /* 1D Arrays have their second component as the layer count */
+@@ -133,7 +129,15 @@ libagx_twiddle_coordinates(ushort2 coord, uint16_t tile_w_px,
+    uint32_t tile_mask = upsample(tile_mask_vec.y, tile_mask_vec.x);
+    uint32_t coord_xy = upsample(coord.y, coord.x);
+    ushort2 offs_px = as_ushort2(coord_xy & tile_mask);
++#if AGX_G11
++   /* Y in the low bit, extra bits of oblong tiles on top (ail tiling.cc) */
++   uint side = min(tile_w_px, tile_h_px);
++   uint32_t offset_within_tile_px =
++      nir_interleave(offs_px.y & (side - 1), offs_px.x & (side - 1)) +
++      ((offs_px.x | offs_px.y) / side) * side * side;
++#else
+    uint32_t offset_within_tile_px = nir_interleave(offs_px.x, offs_px.y);
++#endif
+ 
+    /* Get the coordinates of the corner of the tile */
+    ushort2 tile_px = as_ushort2(coord_xy & ~tile_mask);
+@@ -204,6 +208,36 @@ libagx_image_texel_address(constant const struct agx_pbe_packed *ptr,
+              (uint64_t)total_sa * bytes_per_sample_B;
+ }
+ 
++/*
++ * Texel index for G11 writes to arrays, 3D and cubes, which go through a 2D
++ * buffer-like PBE (hk_image_view.c). Log2 of the texel size is in bits 145:147.
++ */
++uint
++libagx_g11_layered_index(constant const struct agx_pbe_packed *ptr, uint4 coord,
++                         bool is_1d)
++{
++   agx_unpack(NULL, ptr, PBE, d);
++
++   uint log2_B = (((constant uint *)ptr)[4] >> 17) & 7;
++   uint px = is_1d ? coord.x
++                   : libagx_twiddle_coordinates(convert_ushort2(coord.xy),
++                                                d.tile_width_sw, d.tile_height_sw,
++                                                d.aligned_width_msaa_sw);
++
++   return px + coord[is_1d ? 1 : 2] * (d.layer_stride_sw >> log2_B);
++}
++
++uint64_t
++libagx_g11_layered_address(constant const struct agx_pbe_packed *ptr,
++                           uint4 coord, bool is_1d)
++{
++   agx_unpack(NULL, ptr, PBE, d);
++
++   uint log2_B = (((constant uint *)ptr)[4] >> 17) & 7;
++   uint index = libagx_g11_layered_index(ptr, coord, is_1d);
++   return d.buffer + ((uint64_t)index << log2_B);
++}
++
+ uint64_t
+ libagx_buffer_texel_address(constant const struct agx_pbe_packed *ptr,
+                             uint4 coord, uint bytes_per_pixel_B)
 diff --git a/src/asahi/vulkan/hk_cmd_buffer.c b/src/asahi/vulkan/hk_cmd_buffer.c
 index b527e97..e291bb8 100644
 --- a/src/asahi/vulkan/hk_cmd_buffer.c
@@ -2920,7 +3153,7 @@ index 7cb08bb..9f56d29 100644
  
     hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
 diff --git a/src/asahi/vulkan/hk_cmd_draw.c b/src/asahi/vulkan/hk_cmd_draw.c
-index b29bcbc..d2de3b5 100644
+index b29bcbc..24a73cd 100644
 --- a/src/asahi/vulkan/hk_cmd_draw.c
 +++ b/src/asahi/vulkan/hk_cmd_draw.c
 @@ -412,6 +412,10 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
@@ -3510,7 +3743,7 @@ index b29bcbc..d2de3b5 100644
     uint64_t stat_ia_verts = hk_pipeline_stat_addr(
        cmd, VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT);
  
-@@ -3550,6 +3930,9 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3550,7 +3930,28 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
  
     hk_foreach_view(cmd) {
        struct agx_draw draw = draw_;
@@ -3518,9 +3751,28 @@ index b29bcbc..d2de3b5 100644
 +      hk_g11_heap_reserve(cmd, draw);
 +#endif
        struct hk_cs *cs = hk_flush_gfx_state(cmd, draw_id, draw);
++#if AGX_G11
++      /* G11 blends through the texture unit, which does not see what earlier
++       * draws in the render wrote (agx_draw_vbo does the same). Start a new
++       * render, which has a clean texture cache.
++       *
++       * ponytail: one render per such draw, slow; the tilebuffer is the real
++       * fix and overlap within one draw is still wrong
++       */
++      struct hk_linked_shader *g11_fs =
++         cmd->state.gfx.linked[MESA_SHADER_FRAGMENT];
++
++      if (cs && cs->stats.calls && g11_fs && g11_fs->b.reads_tib) {
++         perf_debug(cmd, "Splitting control stream for a G11 blend");
++         hk_cmd_buffer_end_graphics(cmd);
++         hk_g11_heap_reserve(cmd, draw);
++         cs = hk_flush_gfx_state(cmd, draw_id, draw);
++      }
++#endif
        /* If we failed to allocate a control stream, we've already lost the
         * device. Just drop the draw so we don't crash.
-@@ -3631,6 +4014,18 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+        */
+@@ -3631,6 +4032,18 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
        }
  
        enum agx_primitive topology = cmd->state.gfx.topology;
@@ -3540,10 +3792,30 @@ index b29bcbc..d2de3b5 100644
           assert(!geom && !tess && !adj);
           perf_debug(cmd, "lowering robust index buffer");
 diff --git a/src/asahi/vulkan/hk_cmd_meta.c b/src/asahi/vulkan/hk_cmd_meta.c
-index abe4eb7..abc8d8f 100644
+index abe4eb7..039c19d 100644
 --- a/src/asahi/vulkan/hk_cmd_meta.c
 +++ b/src/asahi/vulkan/hk_cmd_meta.c
-@@ -976,9 +976,9 @@ hk_meta_copy_buffer_to_image2(struct vk_command_buffer *cmd,
+@@ -62,6 +62,7 @@ hk_device_init_meta(struct hk_device *dev)
+       return result;
+ 
+    dev->meta.use_gs_for_layer = false;
++   dev->meta.blit_per_layer = AGX_G11;
+    dev->meta.use_stencil_export = true;
+    dev->meta.use_rect_list_pipeline = true;
+    dev->meta.cmd_bind_map_buffer = hk_cmd_bind_map_buffer;
+@@ -289,6 +290,11 @@ canonical_format_pipe(enum pipe_format fmt)
+ #undef CASE
+ 
+    enum agx_channels channels = ail_pixel_format[fmt].channels;
++
++   /* G11 writes R9G9B9E5 wrong, copy the bits */
++   if (AGX_G11 && channels == AGX_CHANNELS_R9G9B9E5)
++      return PIPE_FORMAT_R32_UINT;
++
+    assert(channels < ARRAY_SIZE(map) && "all valid channels handled");
+    assert(map[channels] != PIPE_FORMAT_NONE && "all valid channels handled");
+    return map[channels];
+@@ -976,9 +982,9 @@ hk_meta_copy_buffer_to_image2(struct vk_command_buffer *cmd,
              .dst_format = canonical_format_pipe(
                 hk_format_to_pipe_format(aspect_format(image->format, aspect))),
  
@@ -3556,7 +3828,7 @@ index abe4eb7..abc8d8f 100644
           };
  
           VkPipelineLayout pipeline_layout;
-@@ -1138,9 +1138,9 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
+@@ -1138,9 +1144,9 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
                 .dst_format = canonical_format_pipe(hk_format_to_pipe_format(
                    aspect_format(dst_image->format, dst_aspect_mask))),
  
@@ -3677,7 +3949,7 @@ index 6a01a05..5ab8530 100644
                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
     if (!image)
 diff --git a/src/asahi/vulkan/hk_image_view.c b/src/asahi/vulkan/hk_image_view.c
-index 27e13e7..0dab72f 100644
+index 27e13e7..22c5195 100644
 --- a/src/asahi/vulkan/hk_image_view.c
 +++ b/src/asahi/vulkan/hk_image_view.c
 @@ -53,6 +53,15 @@ static enum agx_texture_dimension
@@ -3783,6 +4055,69 @@ index 27e13e7..0dab72f 100644
        }
  
        if (layout->compressed && usage != HK_DESC_USAGE_EMRT) {
+@@ -516,6 +546,62 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+          }
+       }
+    };
++
++   /* G11 writes arrays, 3D and cubes as 2D through this buffer-like PBE, see
++    * lower_g11_layered_store. The sideband gives the texel index.
++    */
++   VkImageViewType vt = view->vk.view_type;
++   if (AGX_G11 && usage == HK_DESC_USAGE_STORAGE && !msaa &&
++       (hk_image_view_type_is_array(vt) || vt == VK_IMAGE_VIEW_TYPE_3D ||
++        vt == VK_IMAGE_VIEW_TYPE_CUBE)) {
++
++      unsigned blocksize_B = util_format_get_blocksize(p_format);
++      bool linear = layout->tiling == AIL_TILING_LINEAR;
++      unsigned size_px =
++         (layout->size_B - ail_get_layer_level_B(layout, layer, level)) /
++         blocksize_B;
++      struct ail_tile tile = layout->tilesize_el[level];
++
++      assert(util_is_power_of_two_nonzero(blocksize_B));
++      assert(util_is_aligned(layout->layer_stride_B, 128));
++
++      agx_pack(out, PBE, cfg) {
++         cfg.dimension = AGX_TEXTURE_DIMENSION_2D;
++         cfg.layout = AGX_LAYOUT_LINEAR;
++         cfg.channels = ail_pixel_format[p_format].channels;
++         cfg.type = ail_pixel_format[p_format].type;
++         cfg.srgb = util_format_is_srgb(p_format);
++
++         for (unsigned i = 0; i < desc->nr_channels; ++i) {
++            if (desc->swizzle[i] == 0)
++               cfg.swizzle_r = i;
++            else if (desc->swizzle[i] == 1)
++               cfg.swizzle_g = i;
++            else if (desc->swizzle[i] == 2)
++               cfg.swizzle_b = i;
++            else if (desc->swizzle[i] == 3)
++               cfg.swizzle_a = i;
++         }
++
++         cfg.buffer = base_addr + ail_get_layer_level_B(layout, layer, level);
++         cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
++         cfg.height = DIV_ROUND_UP(size_px, cfg.width);
++         cfg.stride = (cfg.width * blocksize_B) - AGX_PBE_STRIDE_BIAS;
++         cfg.layers = 1;
++         cfg.levels = 1;
++
++         cfg.aligned_width_msaa_sw =
++            linear ? ail_get_linear_stride_B(layout, level) / blocksize_B
++                   : align(util_format_get_nblocksx(
++                              layout->format, u_minify(layout->width_px, level)),
++                           tile.width_el);
++         cfg.tile_width_sw = linear ? 1 : tile.width_el;
++         cfg.tile_height_sw = linear ? 1 : tile.height_el;
++         cfg.layer_stride_sw = layout->layer_stride_B;
++      }
++
++      out->opaque[4] |= util_logbase2(blocksize_B) << 17;
++   }
+ }
+ 
+ static VkResult
 diff --git a/src/asahi/vulkan/hk_physical_device.c b/src/asahi/vulkan/hk_physical_device.c
 index bbfda00..572f67a 100644
 --- a/src/asahi/vulkan/hk_physical_device.c
@@ -4064,7 +4399,7 @@ index e7e6aec..7a56372 100644
  
     return VK_SUCCESS;
 diff --git a/src/asahi/vulkan/hk_shader.c b/src/asahi/vulkan/hk_shader.c
-index e12393a..766e28c 100644
+index e12393a..041768e 100644
 --- a/src/asahi/vulkan/hk_shader.c
 +++ b/src/asahi/vulkan/hk_shader.c
 @@ -105,6 +105,28 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
@@ -4273,7 +4608,16 @@ index e12393a..766e28c 100644
     NIR_PASS(_, nir, hk_nir_lower_descriptors, rs, set_layout_count,
              set_layouts);
     NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
-@@ -996,6 +1155,123 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
+@@ -928,6 +1087,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+ 
+    NIR_PASS(_, nir, agx_nir_lower_texture);
+    NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
++   if (AGX_G11)
++      NIR_PASS(_, nir, agx_nir_lower_g11_layered_image_store);
+ 
+    agx_preprocess_nir(nir);
+ 
+@@ -996,6 +1157,123 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
                                        : VK_SUCCESS;
  }
  
@@ -4397,7 +4741,7 @@ index e12393a..766e28c 100644
  static bool
  lower_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  {
-@@ -1073,6 +1349,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1073,6 +1351,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                 struct hk_shader *shader, mesa_shader_stage sw_stage, bool hw,
                 nir_xfb_info *xfb_info, unsigned set_count)
  {
@@ -4405,7 +4749,7 @@ index e12393a..766e28c 100644
     unsigned nr_vbos = 0;
     bool kill_psiz = false;
  
-@@ -1158,6 +1435,18 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1158,6 +1437,18 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
  
     shader->info.set_count = set_count;
  
@@ -4424,7 +4768,7 @@ index e12393a..766e28c 100644
     /* XXX: rename */
     NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos);
     NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
-@@ -1178,7 +1467,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1178,7 +1469,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        .no_stop = nir->info.stage == MESA_SHADER_FRAGMENT,
        .has_scratch = !nir->info.internal,
        .promote_constants = true,
@@ -4434,7 +4778,7 @@ index e12393a..766e28c 100644
     };
  
     /* For now, sample shading is always dynamic. Indicate that. */
-@@ -1283,10 +1573,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
+@@ -1283,10 +1575,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
        hk_shader_destroy(dev, shader);
     }
  
@@ -4447,7 +4791,7 @@ index e12393a..766e28c 100644
  }
  
  static void dump_shader_ir(
-@@ -1952,6 +2242,20 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1952,6 +2244,20 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
        agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
     }
  
@@ -4468,7 +4812,7 @@ index e12393a..766e28c 100644
     if (s->b.uses_txf)
        agx_usc_push_packed(&b, SAMPLER, dev->dev.txf_sampler);
  
-@@ -1961,6 +2265,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1961,6 +2267,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
  
     if (fragment)
        agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, s->b.fragment_props);
@@ -6178,3 +6522,59 @@ index d6b3a07..921e88e 100644
     ret = thrd_create(thrd, thread_routine, paramp);
     pthread_sigmask(SIG_SETMASK, &saved_set, NULL);
  #else
+diff --git a/src/vulkan/runtime/vk_meta.h b/src/vulkan/runtime/vk_meta.h
+index a1a6816..7dfdc53 100644
+--- a/src/vulkan/runtime/vk_meta.h
++++ b/src/vulkan/runtime/vk_meta.h
+@@ -110,6 +110,8 @@ struct vk_meta_device {
+ 
+    uint32_t max_bind_map_buffer_size_B;
+    bool use_layered_rendering;
++   /* Blit one layer per render, through 2D views (no layered rendering) */
++   bool blit_per_layer;
+    bool use_gs_for_layer;
+    bool use_stencil_export;
+ 
+diff --git a/src/vulkan/runtime/vk_meta_blit_resolve.c b/src/vulkan/runtime/vk_meta_blit_resolve.c
+index 17fbb48..7d68827 100644
+--- a/src/vulkan/runtime/vk_meta_blit_resolve.c
++++ b/src/vulkan/runtime/vk_meta_blit_resolve.c
+@@ -525,6 +525,27 @@ do_blit(struct vk_command_buffer *cmd,
+    const struct vk_device_dispatch_table *disp = &device->dispatch_table;
+    VkResult result;
+ 
++   if (meta->blit_per_layer && (dst_layer_count > 1 || dst_rect->layer)) {
++      for (uint32_t l = 0; l < dst_layer_count; l++) {
++         uint32_t z = dst_rect->layer + l;
++         VkImageSubresourceLayers sub = dst_subres;
++         sub.baseArrayLayer =
++            dst_image->image_type == VK_IMAGE_TYPE_3D ? z : sub.baseArrayLayer + z;
++         sub.layerCount = 1;
++
++         struct vk_meta_rect rect = *dst_rect;
++         rect.layer = 0;
++
++         struct vk_meta_blit_push_data p = *push;
++         p.z_off += z * p.z_scale;
++
++         do_blit(cmd, meta, src_image, src_format, src_image_layout, src_subres,
++                 dst_image, dst_format, dst_image_layout, sub, sampler, key, &p,
++                 &rect, 1);
++      }
++      return;
++   }
++
+    VkPipelineLayout pipeline_layout;
+    result = get_blit_pipeline_layout(device, meta, &pipeline_layout);
+    if (unlikely(result != VK_SUCCESS)) {
+@@ -630,7 +651,9 @@ do_blit(struct vk_command_buffer *cmd,
+          .pNext = &dst_view_usage,
+          .flags = VK_IMAGE_VIEW_CREATE_DRIVER_INTERNAL_BIT_MESA,
+          .image = vk_image_to_handle(dst_image),
+-         .viewType = vk_image_sampled_view_type(dst_image),
++         .viewType = meta->blit_per_layer
++                        ? vk_image_render_view_type(dst_image, 1)
++                        : vk_image_sampled_view_type(dst_image),
+          .format = dst_format,
+          .subresourceRange = {
+             .aspectMask = dst_subres.aspectMask,
