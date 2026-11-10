@@ -3,7 +3,7 @@
 ## Console
 
 - Output goes to the framebuffer until the display driver takes it over.
-- `m1n1-0011` adds a 132 pixel notch, so `fb0` is 1242x2556.
+- `fb0` is the whole panel, 1242x2688, notch included.
 - Input is the USB gadget: telnet on `172.16.42.1`, DHCP gives the host
   `172.16.42.2`, and a getty on `/dev/ttyGS0` that waits for input.
 - UART0 works for `earlycon` with a cable on the Lightning pins.

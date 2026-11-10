@@ -39,7 +39,7 @@ new file mode 100644
 index 000000000..a65700ba2
 --- /dev/null
 +++ b/drivers/gpu/drm/tiny/apple-h11p.c
-@@ -0,0 +1,495 @@
+@@ -0,0 +1,492 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple H11P display pipe, as found on T8020
@@ -386,12 +386,9 @@ index 000000000..a65700ba2
 +		return ret;
 +
 +	/*
-+	 * The two do not match exactly, and should not: the loader hands over
-+	 * the framebuffer shifted down past the notch, so the node sits
-+	 * stride * 132 further in than the pipe's own base. On D331p that is
-+	 * 4992 * 132, which is 0xa0e00, and the numbers came out exactly that
-+	 * far apart. All this needs is the high half, which the register
-+	 * cannot hold.
++	 * A loader that keeps a notch out of the framebuffer hands it over
++	 * further in than the pipe's own base, never behind it. All this
++	 * needs is the high half, which the register cannot hold.
 +	 */
 +	live = readl(h11p->read + GP_SURFACE);
 +	if (lower_32_bits(res.start) < live) {

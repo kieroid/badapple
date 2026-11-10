@@ -63,7 +63,6 @@ CPID:8020 ... BDID:1A ... PWND:[usbliter8]
 | 0008 | CPU start block at pmgr + 0xd4000 |
 | 0009 | A12 chicken bits |
 | 0010 | dwc2 errors on the framebuffer |
-| 0011 | notch for board 0x1a |
 | 0012 | hand the CPU and GPU rails to software |
 | 0013 | PCIe on T8020 |
 | 0015 | enable the GPU coprocessor nodes when iBoot loaded their firmware |
