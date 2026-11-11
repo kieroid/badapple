@@ -476,6 +476,16 @@ job's fence. The firmware cannot be reset, so a job that times out wedges
 the GPU until the next boot. Unbinds wait until the VM has no jobs queued
 or running.
 
+A render queues its 3D job together with the TA job, behind a barrier on
+the TA's stamp that the firmware resolves itself, so no round trip through
+the CPU sits between them (glmark2 152 to 289 at 740 MHz). Render stamps
+count up by 0x100 per job: bits 14:8 are the job's slot in the firmware's
+table for its event, which must come in order, and a barrier waits while
+target minus stamp is positive. The barrier type that links jobs in the
+firmware's dependency graph never released the 3D job, so the barrier is
+the polling type, and RegionC +0x8970 has the scheduler keep polling while
+one waits; otherwise it only looks again when a new message arrives.
+
 After a job times out, the driver prints the MMU fault status (RGX 0x17040).
 
 ## Queues

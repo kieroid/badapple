@@ -49,10 +49,10 @@ index 000000000..5b8b471d7
 +agx-y := agx_drv.o agx_fw.o agx_vm.o
 diff --git a/drivers/gpu/drm/agx/agx.h b/drivers/gpu/drm/agx/agx.h
 new file mode 100644
-index 000000000..437eeb28c
+index 000000000..7a783fe98
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx.h
-@@ -0,0 +1,109 @@
+@@ -0,0 +1,111 @@
 +/* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 +/*
 + * Apple A12 GPU (AGX G11P). The firmware's structures are described in the
@@ -118,8 +118,10 @@ index 000000000..437eeb28c
 +	struct { u32 cmd, evc, useq, scratch; } slot[4];
 +	/* Render: one job's commands and the buffer manager, see agx_fw_render(). */
 +	struct {
-+		u32 bmd, bms, init, ta, frag, scratch, tilemap, tpc, heapmeta, pre;
-+		bool frag_pending;
++		u32 bmd, bms, init, barrier, ta, frag, scratch, tilemap, tpc, heapmeta,
++		    pre;
++		/* last stamp values, see agx_fw_render() */
++		u32 ta_stamp, frag_stamp;
 +	} rn;
 +	bool wedged;
 +
@@ -128,7 +130,7 @@ index 000000000..437eeb28c
 +	spinlock_t fence_lock;
 +	u64 fence_ctx, fence_seqno;
 +	struct dma_fence *active;
-+	u32 active_stamp;
++	u32 active_stamp, active_value;
 +
 +	struct mutex ctx_lock;
 +	unsigned long ctx_used[BITS_TO_LONGS(AGX_NR_CTX)];
@@ -946,10 +948,10 @@ index 000000000..bb19c5842
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..7d43eaa12
+index 000000000..6bc9f6e95
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1082 @@
+@@ -0,0 +1,1111 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -1008,6 +1010,13 @@ index 000000000..7d43eaa12
 +#define EV_3D			7
 +#define RGX_MMU_FAULT_STATUS	0x17040
 +#define DONE_STAMP		0xcafe0003
++/*
++ * Render stamps count up by 0x100 per job, as Apple's do: bits 14:8 are the
++ * job's slot in the firmware's table for its event, which must come in
++ * order (FUN_0001d8d8), and a barrier waits while target - stamp is
++ * positive as a signed int.
++ */
++#define STAMP_STEP		0x100
 +
 +/* One entry of the ADT's segment-ranges. */
 +struct asc_segment {
@@ -1207,6 +1216,11 @@ index 000000000..7d43eaa12
 +	put32(agx, C, 0x1);
 +	/* The first power-up installs the job handlers only when set. */
 +	put32(agx, C + 0xb1cc, 1);
++	/*
++	 * While a barrier waits, the scheduler only looks again when a channel
++	 * has a new message, unless this is set (FUN_000075fc, FUN_0000e048).
++	 */
++	put32(agx, C + 0x8970, 1);
 +
 +	/* Mem-desc table: va, pa >> 12, 0, 16K pages, flags */
 +	put_unaligned_le64(AGX_CHUNK_VA, table);
@@ -1411,6 +1425,7 @@ index 000000000..7d43eaa12
 +	spin_lock_irq(&agx->fence_lock);
 +	agx->active = dma_fence_get(fence);
 +	agx->active_stamp = scratch + 0x10;
++	agx->active_value = DONE_STAMP;
 +	spin_unlock_irq(&agx->fence_lock);
 +
 +	agx->nr_cmds++;
@@ -1474,6 +1489,7 @@ index 000000000..7d43eaa12
 +	agx->rn.frag = agx_alloc(agx, 0xd00, 0x100);	/* cmd, evc +0xa00, useq +0xb00 */
 +	agx->rn.scratch = agx_alloc(agx, 0x100, 0x100);
 +	agx->rn.init = agx_alloc(agx, 0x40, 0x40);
++	agx->rn.barrier = agx_alloc(agx, 0x40, 0x40);
 +	agx->rn.tilemap = agx_alloc(agx, t.rgn_pages * SZ_4K, AGX_PAGE);
 +	agx->rn.tpc = agx_alloc(agx, t.tpc_pages * SZ_4K, AGX_PAGE);
 +	agx->rn.heapmeta = agx_alloc(agx, AGX_PAGE, AGX_PAGE);
@@ -1591,7 +1607,7 @@ index 000000000..7d43eaa12
 +	/* stamp record {target, ?, value, event}, retired by FUN_0000d704 */
 +	put64(agx, cmd + 0x560, fw_va(sc));
 +	put64(agx, cmd + 0x568, fw_va(sc));
-+	put32(agx, cmd + 0x570, DONE_STAMP);
++	put32(agx, cmd + 0x570, agx->rn.ta_stamp);
 +	*(u8 *)(agx->buf + cmd + 0x574) = EV_TA;
 +	put32(agx, cmd + 0x580, EV_TA);
 +
@@ -1685,7 +1701,7 @@ index 000000000..7d43eaa12
 +	put64(agx, evc, fw_va(sc + 0x48));
 +	put64(agx, cmd + 0x8c4, fw_va(sc + 0x40));
 +	put64(agx, cmd + 0x8cc, fw_va(sc + 0x40));
-+	put32(agx, cmd + 0x8d4, DONE_STAMP);
++	put32(agx, cmd + 0x8d4, agx->rn.frag_stamp);
 +	*(u8 *)(agx->buf + cmd + 0x8d8) = EV_3D;
 +	put32(agx, cmd + 0x8e4, EV_3D);
 +
@@ -1731,15 +1747,15 @@ index 000000000..7d43eaa12
 +}
 +
 +/*
-+ * Queue the TA job behind an InitBuffer. The 3D job waits in its ring until
-+ * agx_complete() sees the TA stamp.
++ * Queue the TA job behind an InitBuffer, and the 3D job behind a barrier on
++ * the TA's stamp, which the firmware resolves itself.
 + */
 +struct dma_fence *agx_fw_render(struct agx_device *agx, u32 ctx,
 +				const struct drm_asahi_cmd_render *r)
 +{
 +	struct dma_fence *fence;
 +	struct rn_tiling t;
-+	u32 sc = agx->rn.scratch, init = agx->rn.init;
++	u32 sc = agx->rn.scratch, init = agx->rn.init, bar = agx->rn.barrier;
 +	u64 utile = (r->utile_width_px / 16) << 12 | (r->utile_height_px / 16) << 14 |
 +		    ilog2(r->samples);
 +
@@ -1750,7 +1766,11 @@ index 000000000..7d43eaa12
 +		return ERR_PTR(-ENOMEM);
 +
 +	rn_tiling(r->width_px, r->height_px, r->utile_width_px, r->utile_height_px, &t);
-+	memset(agx->buf + sc, 0, 0x100);
++	agx->rn.ta_stamp += STAMP_STEP;
++	agx->rn.frag_stamp += STAMP_STEP;
++	/* everything but the stamps at +0 and +0x40, which only count up */
++	memset(agx->buf + sc + 8, 0, 0x38);
++	memset(agx->buf + sc + 0x48, 0, 0xb8);
 +	put64(agx, sc + 0x20, 1);
 +	put64(agx, sc + 0x60, 1);
 +	rn_ta(agx, ctx, r, &t, utile);
@@ -1761,7 +1781,7 @@ index 000000000..7d43eaa12
 +	spin_lock_irq(&agx->fence_lock);
 +	agx->active = dma_fence_get(fence);
 +	agx->active_stamp = sc + 0x40;
-+	agx->rn.frag_pending = true;
++	agx->active_value = agx->rn.frag_stamp;
 +	spin_unlock_irq(&agx->fence_lock);
 +
 +	/*
@@ -1772,39 +1792,47 @@ index 000000000..7d43eaa12
 +	put32(agx, init, 6);
 +	put32(agx, init + 4, ctx);
 +	put64(agx, init + 0x14, fw_va(agx->rn.bmd));
-+	put32(agx, init + 0x1c, DONE_STAMP);
++	put32(agx, init + 0x1c, agx->rn.ta_stamp);
 +	agx_push(agx, &agx->taq, init);
 +	agx_push(agx, &agx->taq, agx->rn.ta);
++
++	/*
++	 * Barrier {4, u64 stamp, target, event slot waited on, this queue's next
++	 * stamp, uuid, type}: the stamp's bits 14:8 pick the job slot on each
++	 * side (FUN_0001fb60). Type 0 links the jobs in the firmware's DAG,
++	 * which never released the 3D job. Other types have the scheduler poll
++	 * the stamp before starting the job (FUN_0001def8), see RegionC +0x8970.
++	 */
++	memset(agx->buf + bar, 0, 0x40);
++	put32(agx, bar, 4);
++	put64(agx, bar + 0x4, fw_va(sc));
++	put32(agx, bar + 0xc, agx->rn.ta_stamp);
++	put32(agx, bar + 0x10, EV_TA);
++	put32(agx, bar + 0x14, agx->rn.frag_stamp);
++	put32(agx, bar + 0x1c, 1);
++	agx_push(agx, &agx->fragq, bar);
 +	agx_push(agx, &agx->fragq, agx->rn.frag);
++
 +	agx_kick(agx, &agx->taq, CH_TA, EV_TA);
++	agx_kick(agx, &agx->fragq, CH_3D, EV_3D);
 +	return fence;
 +}
 +
-+/*
-+ * Signal the running job's fence if its stamp has landed, or kick a
-+ * render's 3D job once its TA job is done.
-+ */
++/* Signal the running job's fence if its stamp has landed. */
 +static bool agx_complete(struct agx_device *agx)
 +{
 +	struct dma_fence *fence = NULL;
 +	unsigned long flags;
-+	bool kick = false;
 +
 +	spin_lock_irqsave(&agx->fence_lock, flags);
-+	if (agx->rn.frag_pending &&
-+	    READ_ONCE(*(u32 *)(agx->buf + agx->rn.scratch)) == DONE_STAMP) {
-+		agx->rn.frag_pending = false;
-+		kick = true;
-+	} else if (agx->active &&
-+	    READ_ONCE(*(u32 *)(agx->buf + agx->active_stamp)) == DONE_STAMP) {
++	if (agx->active &&
++	    READ_ONCE(*(u32 *)(agx->buf + agx->active_stamp)) == agx->active_value) {
 +		dma_rmb();
 +		fence = agx->active;
 +		agx->active = NULL;
 +		dma_fence_signal_locked(fence);
 +	}
 +	spin_unlock_irqrestore(&agx->fence_lock, flags);
-+	if (kick)
-+		agx_kick(agx, &agx->fragq, CH_3D, EV_3D);
 +	if (fence)
 +		dma_fence_put(fence);
 +	return fence;
@@ -1859,12 +1887,15 @@ index 000000000..7d43eaa12
 +		"job timed out, GPU wedged; MMU fault %#llx: VA %#llx ctx %llu requester %llu %s type %llu\n",
 +		st, (st >> 24) & ~0x3fULL, (st >> 16) & 0x3f, (st >> 8) & 0xff,
 +		st & BIT(4) ? "read" : "write", (st >> 1) & 7);
-+	if (agx->rn.frag_pending)
++	if (agx->active_stamp == agx->rn.scratch + 0x40 &&
++	    READ_ONCE(*(u32 *)(agx->buf + agx->rn.scratch)) != agx->rn.ta_stamp)
 +		dev_err(agx->dev, "render stuck in its TA job\n");
++	dev_err(agx->dev, "stamps: ta %#x of %#x, 3d %#x of %#x\n",
++		get32(agx, agx->rn.scratch), agx->rn.ta_stamp,
++		get32(agx, agx->rn.scratch + 0x40), agx->rn.frag_stamp);
 +	agx_dump_trace(agx);
 +	agx->wedged = true;
 +	spin_lock_irq(&agx->fence_lock);
-+	agx->rn.frag_pending = false;
 +	fence = agx->active;
 +	agx->active = NULL;
 +	if (fence) {
