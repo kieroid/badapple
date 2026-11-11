@@ -237,8 +237,10 @@ cl_fill_images pass. Still wrong:
 - twiddled writes of 8-byte formats from 128x64 up, seen before ail had the
   upright tiles and not checked since (unused, images are linear);
 - linear filtering: only 16-bit unorm is within CTS tolerance. 8-bit, snorm,
-  half and sRGB filter with about 1/32 weights, and float32 does not filter.
-  The sampler has no precision bit.
+  half and sRGB filter with about 1/32 weights, and float32 does not filter,
+  so neither driver offers float32 linear filtering (OES_texture_float_linear,
+  FILTER_LINEAR on 32-bit float colour formats). The sampler has no precision
+  bit.
 
 Metal's own samplers load indirectly, `0x07 | start << 8 | count << 20 |
 index << 27`, and the index is not understood. A bad sampler load breaks
@@ -428,13 +430,14 @@ without compression, and the G11 PBE stride bias and level handling.
 | texture registers | samples, image writes and tile accesses reach r0-r31 only. The allocator moves their operands there before the instruction, trying the emptiest aligned ranges first, also for a result that can reuse a source dying at that instruction |
 | R9G9B9E5 copies | copied as R32_UINT, G11 writes the shared exponent format wrong |
 
-dEQP-VK, every 200th case of the mustpass (16112): 3916 pass, 31 fail, 10900
+dEQP-VK, every 200th case of the mustpass (16112): 3916 pass, 28 fail, 10903
 not supported and 40 internal errors (the test cannot handle the format), and
 none wedges the GPU. `textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment`
 times out and is left out of the runs. The fails are shaders reading more
 than 16 textures, some compressed texel views, offsets with mirrored repeat,
-clip distances read in the fragment shader, fp16 denormals, multisampling and
-a few blits and copies. Two ubo cases fail now and then. Vulkan 1.3 is reported: 1.4
+clip distances (they do not clip at all), fp16 denormals, multisampling and
+compressed image to buffer copies. Two ubo cases fail now and then. Vulkan
+1.3 is reported: 1.4
 needs subgroup operations G11 does not have (only barriers and elect work),
 and the GPU caps at 740 MHz unless told otherwise (see Power).
 

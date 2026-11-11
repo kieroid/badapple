@@ -4786,7 +4786,7 @@ index 28c2b49..425e64e 100644
     if (mod == DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED &&
         !hk_can_compress_format(dev, vk_format))
 diff --git a/src/asahi/vulkan/hk_image.c b/src/asahi/vulkan/hk_image.c
-index 6a01a05..5ab8530 100644
+index 6a01a05..f1ebd3a 100644
 --- a/src/asahi/vulkan/hk_image.c
 +++ b/src/asahi/vulkan/hk_image.c
 @@ -54,6 +54,20 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
@@ -4810,7 +4810,21 @@ index 6a01a05..5ab8530 100644
     /* Linear block-compressed images are all sorts of problematic, not sure
      * if AGX even supports them. Don't try.
      */
-@@ -226,8 +240,8 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
+@@ -67,7 +81,12 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
+       /* We can sample integer formats but it doesn't make sense to linearly
+        * filter them.
+        */
+-      if (!util_format_is_pure_integer(p_format)) {
++      if (!util_format_is_pure_integer(p_format) &&
++          !(AGX_G11 && util_format_is_float(p_format) &&
++            util_format_get_component_bits(p_format, UTIL_FORMAT_COLORSPACE_RGB,
++                                           0) == 32 &&
++            !util_format_is_depth_or_stencil(p_format))) {
++         /* G11 does not filter 32-bit float colour */
+          features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+       }
+ 
+@@ -226,8 +245,8 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
        format = (plane == 0) ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_S8_UINT;
     }
  
@@ -4821,7 +4835,7 @@ index 6a01a05..5ab8530 100644
        return false;
  
     /* TODO: Handle compression with sparse. This should be doable but it's a bit
-@@ -456,7 +470,7 @@ hk_GetPhysicalDeviceImageFormatProperties2(
+@@ -456,7 +475,7 @@ hk_GetPhysicalDeviceImageFormatProperties2(
        maxMipLevels = 1;
  
     VkSampleCountFlags sampleCounts = VK_SAMPLE_COUNT_1_BIT;
@@ -4830,7 +4844,7 @@ index 6a01a05..5ab8530 100644
         pImageFormatInfo->type == VK_IMAGE_TYPE_2D && ycbcr_info == NULL &&
         (features & (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
                      VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
-@@ -724,6 +738,17 @@ hk_map_tiling(struct hk_device *dev, const VkImageCreateInfo *info,
+@@ -724,6 +743,17 @@ hk_map_tiling(struct hk_device *dev, const VkImageCreateInfo *info,
        return AIL_TILING_LINEAR;
  
     case VK_IMAGE_TILING_OPTIMAL:
@@ -4848,7 +4862,7 @@ index 6a01a05..5ab8530 100644
        return AIL_TILING_GPU;
  
     case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT:
-@@ -757,11 +782,12 @@ static uint32_t
+@@ -757,11 +787,12 @@ static uint32_t
  modifier_get_score(uint64_t mod)
  {
     switch (mod) {
@@ -4863,7 +4877,7 @@ index 6a01a05..5ab8530 100644
  
     case DRM_FORMAT_MOD_LINEAR:
        return 1;
-@@ -997,6 +1023,12 @@ hk_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo,
+@@ -997,6 +1028,12 @@ hk_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo,
        return wsi_common_create_swapchain_image(&pdev->wsi_device, pCreateInfo,
                                                 pImage);
  
@@ -6366,7 +6380,7 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..1c17af8 100644
+index ab205bf..5ce50e3 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
 @@ -144,8 +144,10 @@ agx_resource_setup(struct agx_device *dev, struct agx_resource *nresource)
@@ -6482,9 +6496,13 @@ index ab205bf..1c17af8 100644
  }
  
  static void
-@@ -2054,7 +2097,8 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+@@ -2052,9 +2095,11 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+    caps->indep_blend_enable = true;
+    caps->indep_blend_func = true;
     caps->uma = true;
-    caps->texture_float_linear = true;
+-   caps->texture_float_linear = true;
++   /* G11 does not filter 32-bit float */
++   caps->texture_float_linear = !AGX_G11;
     caps->texture_half_float_linear = true;
 -   caps->texture_mirror_clamp_to_edge = true;
 +   /* G11's wrap modes stop at clamp to border (AGXMetalA12) */
@@ -6492,7 +6510,7 @@ index ab205bf..1c17af8 100644
     caps->shader_array_components = true;
     caps->packed_uniforms = true;
     caps->quads_follow_provoking_vertex_convention = true;
-@@ -2182,11 +2226,14 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+@@ -2182,11 +2227,14 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        BITFIELD_BIT(MESA_PRIM_TRIANGLES_ADJACENCY) |
        BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) |
        BITFIELD_BIT(MESA_PRIM_PATCHES);
@@ -6510,7 +6528,7 @@ index ab205bf..1c17af8 100644
  
     caps->context_priority_mask =
        PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM |
-@@ -2253,6 +2300,18 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
+@@ -2253,6 +2301,18 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
        if (!ail_is_valid_pixel_format(tex_format))
           return false;
  
