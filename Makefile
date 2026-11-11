@@ -312,7 +312,7 @@ SYSROOT_PKGS := musl-dev gcc g++ libdrm-dev llvm21-dev clang21-dev clang21-libcl
 	spirv-llvm-translator-dev spirv-tools-dev libclc-dev expat-dev zlib-dev zstd-dev \
 	elfutils-dev opencl-headers opencl-icd-loader-dev wayland-dev wayland-protocols
 ROOTFS_PKGS := alpine-baselayout busybox musl libdrm zlib zstd-libs expat spirv-tools \
-	llvm21-libs clang21-libs spirv-llvm-translator-libs libstdc++ libgcc opencl-icd-loader strace \
+	llvm21-libs clang21-libs spirv-llvm-translator-libs libstdc++ libgcc opencl-icd-loader \
 	wayland-libs-client wayland-libs-server wayland-libs-egl vulkan-loader vulkan-tools
 RUST_DIR  := build/rust
 RUST_VER  := 1.98.1

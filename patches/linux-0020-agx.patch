@@ -946,10 +946,10 @@ index 000000000..bb19c5842
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..2899e0f73
+index 000000000..7d43eaa12
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1109 @@
+@@ -0,0 +1,1082 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -962,13 +962,11 @@ index 000000000..2899e0f73
 + * Copyright (c) 2026 kiki <kieran@lavato.net>
 + */
 +
-+#include <linux/debugfs.h>
 +#include <linux/delay.h>
 +#include <linux/dma-fence.h>
 +#include <linux/dma-mapping.h>
 +#include <linux/io.h>
 +#include <linux/iopoll.h>
-+#include <linux/seq_file.h>
 +#include <linux/slab.h>
 +#include <linux/soc/apple/rtkit.h>
 +#include <linux/unaligned.h>
@@ -1941,30 +1939,6 @@ index 000000000..2899e0f73
 +	.shmem_destroy = agx_shmem_destroy,
 +};
 +
-+static int agx_dbg_show(struct seq_file *m, void *v)
-+{
-+	struct agx_device *agx = m->private;
-+	int i;
-+
-+	seq_printf(m, "pa %pad va %#llx gva %#llx size %#x free %#x\n", &agx->pa,
-+		   AGX_CHUNK_VA, AGX_CHUNK_GVA, AGX_CHUNK_SIZE, agx->off);
-+	seq_printf(m, "B %#x C %#x info %#x\n", agx->B, agx->C, agx->cpq.info);
-+	for (i = 0; i < ARRAY_SIZE(agx->chan_state); i++)
-+		seq_printf(m, "chan %d state %#x ring %#x\n", i, agx->chan_state[i],
-+			   agx->chan_ring[i]);
-+	seq_printf(m, "ctx %*pb\n", AGX_NR_CTX, agx->ctx_used);
-+	seq_printf(m, "rn ta %#x frag %#x\n", agx->rn.ta, agx->rn.frag);
-+	return 0;
-+}
-+DEFINE_SHOW_ATTRIBUTE(agx_dbg);
-+
-+static void agx_debugfs(struct agx_device *agx)
-+{
-+	struct dentry *d = debugfs_create_dir("agx", NULL);
-+
-+	debugfs_create_file("info", 0400, d, agx, &agx_dbg_fops);
-+}
-+
 +/*
 + * Boot the firmware, hand it the init block and bring the GPU up. The
 + * firmware cannot be restarted, so this runs once per boot.
@@ -2041,7 +2015,6 @@ index 000000000..2899e0f73
 +	ret = agx_render_init(agx);
 +	if (ret)
 +		return ret;
-+	agx_debugfs(agx);
 +	dev_info(dev, "firmware up, chunk at %pad\n", &agx->pa);
 +	return 0;
 +}
