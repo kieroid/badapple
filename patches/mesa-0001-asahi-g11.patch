@@ -1,8 +1,16 @@
 diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
-index e131bcf..9cd3dd3 100644
+index e131bcf..a6cd71a 100644
 --- a/src/asahi/compiler/agx_compile.c
 +++ b/src/asahi/compiler/agx_compile.c
-@@ -686,8 +686,12 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
+@@ -21,6 +21,7 @@
+ #include "agx_compiler.h"
+ #include "agx_debug.h"
+ #include "agx_nir.h"
++#include "agx_nir_texture.h"
+ #include "agx_opcodes.h"
+ #include "glsl_types.h"
+ #include "nir.h"
+@@ -686,8 +687,12 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
     agx_index collected = agx_emit_collect(b, compact_count, compacted);
     agx_index coords = explicit ? agx_src_index(&instr->src[2]) : agx_null();
  
@@ -16,7 +24,7 @@ index e131bcf..9cd3dd3 100644
                        agx_format_for_pipe(nir_intrinsic_format(instr)),
                        nir_intrinsic_write_mask(instr),
                        nir_intrinsic_base(instr), explicit);
-@@ -730,7 +734,9 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
+@@ -730,7 +735,9 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
     agx_wait_pixel_mask(b, 0x8);
  
     unsigned nr_comps = instr->def.num_components;
@@ -27,7 +35,7 @@ index e131bcf..9cd3dd3 100644
                    agx_format_for_pipe(nir_intrinsic_format(instr)),
                    BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false);
     agx_emit_cached_split(b, dest, nr_comps);
-@@ -977,7 +983,7 @@ translate_atomic_opcode(nir_atomic_op op)
+@@ -977,7 +984,7 @@ translate_atomic_opcode(nir_atomic_op op)
  static agx_index
  agx_local_base(nir_src src)
  {
@@ -36,7 +44,7 @@ index e131bcf..9cd3dd3 100644
        return agx_zero();
     else
        return agx_src_index(&src);
-@@ -1106,6 +1112,18 @@ agx_expand_tex_to(agx_builder *b, nir_def *def, agx_index src, bool masked)
+@@ -1106,6 +1113,18 @@ agx_expand_tex_to(agx_builder *b, nir_def *def, agx_index src, bool masked)
     return mask;
  }
  
@@ -55,7 +63,7 @@ index e131bcf..9cd3dd3 100644
  static agx_instr *
  agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
  {
-@@ -1173,6 +1191,16 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
+@@ -1173,6 +1192,16 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
        lod = agx_zero();
     }
  
@@ -72,7 +80,7 @@ index e131bcf..9cd3dd3 100644
     agx_index coords = agx_emit_collect(b, coord_comps, coord);
     agx_index tmp = agx_vec_temp(b->shader, dst.size, sparse ? 8 : 4);
  
-@@ -1501,6 +1529,18 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+@@ -1501,6 +1530,18 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
           b, dst, instr, AGX_SR_THREAD_POSITION_IN_THREADGROUP_X);
  
     case nir_intrinsic_load_local_invocation_index:
@@ -91,7 +99,7 @@ index e131bcf..9cd3dd3 100644
        return agx_get_sr_to(b, dst, AGX_SR_THREAD_INDEX_IN_THREADGROUP);
  
     case nir_intrinsic_load_layer_id:
-@@ -1520,7 +1560,9 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+@@ -1520,7 +1561,9 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
              /* Pull out all the big hammers to make cross-workgroup memory
               * barriers work.
               */
@@ -102,7 +110,7 @@ index e131bcf..9cd3dd3 100644
                 agx_unknown_barrier_1(b);
                 agx_memory_barrier_2(b);
  
-@@ -1567,7 +1609,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+@@ -1567,7 +1610,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
     case nir_intrinsic_fence_mem_to_tex_agx: {
        /* Flush out the atomic to main memory... Found experimentally... */
        agx_memory_barrier(b);
@@ -114,7 +122,7 @@ index e131bcf..9cd3dd3 100644
  
        /* TODO: Which ones do we actually need? */
        agx_image_barrier_1(b);
-@@ -1576,14 +1621,20 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+@@ -1576,14 +1622,20 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
        agx_image_barrier_4(b);
  
        /* Flush out the texture cache */
@@ -137,7 +145,7 @@ index e131bcf..9cd3dd3 100644
        agx_image_barrier_3(b);
        return NULL;
     }
-@@ -2260,18 +2311,31 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+@@ -2260,18 +2312,31 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
        case nir_tex_src_texture_offset:
           texture = index;
           break;
@@ -172,7 +180,7 @@ index e131bcf..9cd3dd3 100644
           texture =
              agx_translate_bindless_handle(b, &instr->src[i].src, &bindless);
           break;
-@@ -2352,6 +2416,20 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+@@ -2352,6 +2417,20 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
     else if (!agx_is_null(compare))
        compare_offset = compare;
  
@@ -193,7 +201,7 @@ index e131bcf..9cd3dd3 100644
     agx_index tmp = agx_vec_temp(b->shader, dst.size, instr->is_sparse ? 8 : 4);
     agx_instr *I = agx_texture_sample_to(
        b, tmp, coords, lod, bindless, texture, sampler, compare_offset,
-@@ -2359,6 +2437,10 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+@@ -2359,6 +2438,18 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
        !agx_is_null(packed_offset), !agx_is_null(compare),
        instr->op == nir_texop_lod, agx_gather_for_nir(instr), instr->is_sparse);
  
@@ -201,10 +209,18 @@ index e131bcf..9cd3dd3 100644
 +   b->shader->out->sampler_state_count =
 +      MAX2(b->shader->out->sampler_state_count, 1);
 +
++   /* A fetch above level 0 samples through the driver's txf-lod sampler
++    * (g11_txf_to_txl), which Vulkan binds with the txf one
++    */
++   int handle = nir_tex_instr_src_index(instr, nir_tex_src_sampler_handle);
++   if (AGX_G11 && handle >= 0 && nir_src_is_const(instr->src[handle].src) &&
++       nir_src_as_uint(instr->src[handle].src) == AGX_G11_TXF_LOD_SAMPLER)
++      b->shader->out->uses_txf = true;
++
     if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
        I->op = AGX_OPCODE_TEXTURE_LOAD;
        b->shader->out->uses_txf = true;
-@@ -2853,6 +2935,205 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
+@@ -2853,6 +2944,205 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
     return false;
  }
  
@@ -410,7 +426,7 @@ index e131bcf..9cd3dd3 100644
  static void
  agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
                   uint8_t *ts_count, uint8_t *ss_count)
-@@ -2900,7 +3181,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2900,7 +3190,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
        .lower_subgroup_masks = true,
     };
  
@@ -421,7 +437,7 @@ index e131bcf..9cd3dd3 100644
  
     /* Lower addressing modes. The sooner we do this, the sooner we get rid of
      * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
-@@ -2968,7 +3251,23 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2968,7 +3260,23 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
     /* Force preamble generation for internal shaders since hk's meta copies
      * depend on it for correctness with imgwblk intrinsics.
      */
@@ -446,7 +462,7 @@ index e131bcf..9cd3dd3 100644
         (!(agx_compiler_debug & AGX_DBG_NOPREAMBLE) || nir->info.internal)) {
        unsigned sizes[] = {
           *preamble_size,
-@@ -3034,6 +3333,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -3034,6 +3342,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
      * do it after fusing constant shifts. Constant folding will clean up.
      */
     NIR_PASS(_, nir, agx_nir_lower_algebraic_late);
@@ -457,7 +473,7 @@ index e131bcf..9cd3dd3 100644
     NIR_PASS(_, nir, agx_nir_fuse_selects);
     NIR_PASS(_, nir, nir_opt_constant_folding);
     NIR_PASS(_, nir, nir_opt_combine_barriers, NULL, NULL);
-@@ -3412,7 +3715,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3412,7 +3724,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     AGX_PASS(ctx, agx_ra);
     agx_lower_64bit_postra(ctx);
  
@@ -467,7 +483,7 @@ index e131bcf..9cd3dd3 100644
        /* Apple always allocate 40 more bytes in the entrypoint and align to 4. */
        uint64_t stack_size = align(DIV_ROUND_UP(ctx->scratch_size_B, 4) + 10, 4);
  
-@@ -3502,7 +3806,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3502,7 +3815,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
      */
     bool dump_shaders = agx_should_dump(nir, AGX_DBG_SHADERS);
  #ifndef NDEBUG
@@ -477,7 +493,7 @@ index e131bcf..9cd3dd3 100644
  #else
     bool selftest = false;
  #endif
-@@ -3512,7 +3817,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3512,7 +3826,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
        bool errors =
           agx2_disassemble(binary->data + offset, binary->size - offset, fp);
  
@@ -486,7 +502,7 @@ index e131bcf..9cd3dd3 100644
           /* In a self-test, disassemble again to get something the user can look
            * at to figure out what went wrong.
            */
-@@ -3592,9 +3897,16 @@ agx_preprocess_nir(nir_shader *nir)
+@@ -3592,9 +3906,16 @@ agx_preprocess_nir(nir_shader *nir)
  
     NIR_PASS(_, nir, nir_lower_vars_to_ssa);
  
@@ -1454,10 +1470,10 @@ index 6236c3c..d1e888f 100644
                         (I->zs << 29);
  
 diff --git a/src/asahi/compiler/agx_register_allocate.c b/src/asahi/compiler/agx_register_allocate.c
-index 87a0335..123e276 100644
+index 87a0335..033f008 100644
 --- a/src/asahi/compiler/agx_register_allocate.c
 +++ b/src/asahi/compiler/agx_register_allocate.c
-@@ -1042,6 +1042,184 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
+@@ -1042,6 +1042,186 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
     }
  }
  
@@ -1548,34 +1564,31 @@ index 87a0335..123e276 100644
 +
 +/*
 + * Find an aligned range of n registers in r0-r31 avoiding the reserved
-+ * registers and those in pinned, emptying it. Returns ~0 if impossible.
++ * registers and those in pinned, emptying it. Ranges with fewer occupants are
++ * tried first, up to max_used of them. Returns ~0 if impossible.
 + */
 +static unsigned
 +g11_low_range(struct ra_ctx *rctx, unsigned n, const BITSET_WORD *pinned,
-+              struct util_dynarray *copies)
++              struct util_dynarray *copies, unsigned max_used)
 +{
-+   unsigned best = ~0, best_used = ~0;
 +   unsigned top = MIN2(G11_LOW_REGS, rctx->bound[RA_GPR]);
 +
-+   for (unsigned base = 0; base + n <= top; base += n) {
-+      if (base < reserved_size(rctx->shader) ||
-+          BITSET_TEST_RANGE(pinned, base, base + n - 1))
-+         continue;
++   for (unsigned want = 0; want <= MIN2(n, max_used); ++want) {
++      for (unsigned base = 0; base + n <= top; base += n) {
++         if (base < reserved_size(rctx->shader) ||
++             BITSET_TEST_RANGE(pinned, base, base + n - 1))
++            continue;
 +
-+      unsigned nr_used = 0;
-+      for (unsigned r = base; r < base + n; ++r)
-+         nr_used += BITSET_TEST(rctx->used_regs[RA_GPR], r);
++         unsigned nr_used = 0;
++         for (unsigned r = base; r < base + n; ++r)
++            nr_used += BITSET_TEST(rctx->used_regs[RA_GPR], r);
 +
-+      if (nr_used < best_used) {
-+         best = base;
-+         best_used = nr_used;
++         if (nr_used == want && g11_evict_range(rctx, base, n, copies))
++            return base;
 +      }
 +   }
 +
-+   if (best == ~0 || !g11_evict_range(rctx, best, n, copies))
-+      return ~0;
-+
-+   return best;
++   return ~0;
 +}
 +
 +static void
@@ -1609,7 +1622,7 @@ index 87a0335..123e276 100644
 +         continue;
 +      }
 +
-+      unsigned reg = g11_low_range(rctx, n, pinned, &copies);
++      unsigned reg = g11_low_range(rctx, n, pinned, &copies, n);
 +      if (reg == ~0)
 +         continue;
 +
@@ -1623,7 +1636,11 @@ index 87a0335..123e276 100644
 +   g11_emit_copies(rctx, I, &copies);
 +}
 +
-+/* Pick a destination in r0-r31 for a G11 sample, freeing one if needed */
++/*
++ * Pick a destination in r0-r31 for a G11 sample, freeing one if needed. With
++ * sources killed early their registers count as free but are still read, so
++ * then only an empty range will do: copies could land in them.
++ */
 +static unsigned
 +g11_low_dest(struct ra_ctx *rctx, agx_instr *I, unsigned reg, unsigned n,
 +             const BITSET_WORD *pinned)
@@ -1632,7 +1649,8 @@ index 87a0335..123e276 100644
 +      return reg;
 +
 +   struct util_dynarray copies = UTIL_DYNARRAY_INIT;
-+   unsigned low = g11_low_range(rctx, n, pinned, &copies);
++   unsigned low = g11_low_range(rctx, n, pinned, &copies,
++                                rctx->early_killed ? 0 : n);
 +
 +   g11_emit_copies(rctx, I, &copies);
 +
@@ -1642,7 +1660,7 @@ index 87a0335..123e276 100644
  /** Assign registers to SSA values in a block. */
  
  static void
-@@ -1123,6 +1301,11 @@ agx_ra_assign_local(struct ra_ctx *rctx)
+@@ -1123,6 +1303,11 @@ agx_ra_assign_local(struct ra_ctx *rctx)
           continue;
        }
  
@@ -1654,14 +1672,14 @@ index 87a0335..123e276 100644
        /* Search for regions of contiguous killed sources to early-kill. */
        rctx->early_killed = false;
  
-@@ -1155,7 +1338,22 @@ agx_ra_assign_local(struct ra_ctx *rctx)
+@@ -1155,7 +1340,22 @@ agx_ra_assign_local(struct ra_ctx *rctx)
           if (I->op == AGX_OPCODE_PHI && I->dest[d].has_reg)
              continue;
  
 -         assign_regs(rctx, I->dest[d], pick_regs(rctx, I, d));
 +         unsigned reg = pick_regs(rctx, I, d);
 +
-+         if (g11_low && g11_low_operand(I, -1) && !rctx->early_killed) {
++         if (g11_low && g11_low_operand(I, -1)) {
 +            BITSET_SET_COUNT(rctx->used_regs[RA_GPR], reg,
 +                             rctx->ncomps[I->dest[d].value]);
 +            unsigned low = g11_low_dest(rctx, I, reg,
@@ -1678,7 +1696,7 @@ index 87a0335..123e276 100644
        }
  
        /* Free late-killed sources */
-@@ -1451,8 +1649,11 @@ agx_ra(agx_context *ctx)
+@@ -1451,8 +1651,11 @@ agx_ra(agx_context *ctx)
     enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
     BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
     unsigned max_ncomps = 1;
@@ -1690,7 +1708,7 @@ index 87a0335..123e276 100644
        /* Record collects/phis so we can coalesce when assigning */
        if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
            I->op == AGX_OPCODE_EXPORT || I->op == AGX_OPCODE_SPLIT) {
-@@ -1497,6 +1698,15 @@ agx_ra(agx_context *ctx)
+@@ -1497,6 +1700,15 @@ agx_ra(agx_context *ctx)
  
     max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
  

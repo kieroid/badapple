@@ -419,20 +419,22 @@ without compression, and the G11 PBE stride bias and level handling.
 | blending | targets with a tilebuffer copy blend there. Otherwise blends read the render target through the texture unit, which does not see what earlier draws in the render wrote, and a draw that reads its render targets after other draws starts a new render, as in GL. The new render's background program reloads the tilebuffer copies |
 | layered writes | an image write to an array, 3D or cube image ends the thread. Such storage views get a 2D buffer-like PBE and the shader writes at the texel's index (`lower_g11_layered_store`), from the tile size, aligned width and layer stride in the PBE's software words; image atomics use the same address |
 | twiddling | Y takes the low bit, and the long side's extra bits of an oblong tile sit on top (8 byte texels have 32x64 tiles). Shader-side addressing follows ail's CPU tiling |
+| fetch above level 0 | a txl through the txf-lod sampler (slot 15), so the shader counts as using the txf samplers and Vulkan binds them in vertex shaders too |
 | fetch out of bounds | a fetch above level 0 is a txl through the txf-lod sampler, which clamps the level and layer: an out of range level or layer moves the texel out of bounds to read the zero border |
 | barriers | `memory_barrier_2` and the texture flush end the thread, so the fence after an image atomic is only `memory_barrier` and the image barriers |
 | blits | one layer per render, through 2D views of the layer or 3D slice (`blit_per_layer` in vk_meta) |
 | border colours | the sampler has no border colour (Metal has none on A12 either): clamp to border reads transparent black, after the swizzle for colour formats (an RG format's alpha reads 0) and before it for depth and stencil. For an opaque border the shader adds the border colour times the filter weight of texels outside the image, from the coordinates, the LOD and the sampler word in the descriptor (`g11_lower_border`). A second sample through a state swizzled to 1 does not give the weight, it reads 1 at the border too. Shaders with more than 32 samples skip it: robustness2 shaders past about 100 KiB of code ran wrong. Anisotropy and depth compares are not covered |
 | preambles | a preamble that samples drops a triangle now and then, so shaders with texture instructions get none. Vulkan's bindless textures leave `textures_used` empty, so the compiler looks for texture instructions |
+| texture registers | samples, image writes and tile accesses reach r0-r31 only. The allocator moves their operands there before the instruction, trying the emptiest aligned ranges first, also for a result that can reuse a source dying at that instruction |
 | R9G9B9E5 copies | copied as R32_UINT, G11 writes the shared exponent format wrong |
 
-dEQP-VK, every 200th case of the mustpass (16112): 3903 pass, 44 fail, 10900
+dEQP-VK, every 200th case of the mustpass (16112): 3916 pass, 31 fail, 10900
 not supported and 40 internal errors (the test cannot handle the format), and
 none wedges the GPU. `textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment`
 times out and is left out of the runs. The fails are shaders reading more
-than 16 textures, compressed texel views, cube array suballocations, 3D texel
-fetches, clip distances read in the fragment shader, fp16 denormals and a few
-blits and copies. Two ubo cases fail now and then. Vulkan 1.3 is reported: 1.4
+than 16 textures, some compressed texel views, offsets with mirrored repeat,
+clip distances read in the fragment shader, fp16 denormals, multisampling and
+a few blits and copies. Two ubo cases fail now and then. Vulkan 1.3 is reported: 1.4
 needs subgroup operations G11 does not have (only barriers and elect work),
 and the GPU caps at 740 MHz unless told otherwise (see Power).
 
