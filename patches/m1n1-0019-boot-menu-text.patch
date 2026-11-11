@@ -1,0 +1,113 @@
+diff --git a/rust/src/chainload.rs b/rust/src/chainload.rs
+index c4c0cd6..91e938d 100644
+--- a/rust/src/chainload.rs
++++ b/rust/src/chainload.rs
+@@ -34,6 +34,8 @@ impl From<gpt::Error<storage::Error>> for Error {
+ 
+ extern "C" {
+     fn chainload_buttons() -> u32;
++    fn chainload_menu_clear();
++    fn chainload_menu_line(row: u32, text: *const u8, len: usize, selected: bool);
+     fn udelay(d: u32);
+ }
+ 
+@@ -57,16 +59,16 @@ fn wait_buttons(pressed: bool) -> u32 {
+ 
+ fn menu(names: &[String]) -> usize {
+     let mut sel = 0;
++    unsafe { chainload_menu_clear() };
+     loop {
+-        println!("");
+         for (i, name) in names.iter().enumerate() {
+-            println!("{} {}", if i == sel { ">" } else { " " }, name);
++            unsafe { chainload_menu_line(i as u32, name.as_ptr(), name.len(), i == sel) };
+         }
+-        println!("Volume buttons move, side button boots");
+ 
+         wait_buttons(false);
+         let b = wait_buttons(true);
+         if b & BTN_SIDE != 0 {
++            unsafe { chainload_menu_clear() };
+             return sel;
+         }
+         if b & BTN_UP != 0 && sel > 0 {
+diff --git a/src/chainload.c b/src/chainload.c
+index 669f2b6..1c82131 100644
+--- a/src/chainload.c
++++ b/src/chainload.c
+@@ -6,6 +6,7 @@
+ #include "adt.h"
+ #include "malloc.h"
+ #include "memory.h"
++#include "fb.h"
+ #include "nvme.h"
+ #include "smc.h"
+ #include "soc.h"
+@@ -32,6 +33,22 @@ u32 chainload_buttons(void)
+     }
+     return ret;
+ }
++
++// Boot menu rows, 96 pixels each, drawn over a cleared screen
++#define MENU_SCALE 3
++#define MENU_ROW   (32 * MENU_SCALE)
++
++void chainload_menu_clear(void)
++{
++    fb_clear((rgb_t){0});
++    fb_text(MENU_ROW / 2, MENU_ROW, "germin8", 7, MENU_SCALE, false);
++    fb_text(MENU_ROW / 2, MENU_ROW * 2 + MENU_ROW / 2, "Volume moves, side boots", 24, 2, false);
++}
++
++void chainload_menu_line(u32 row, const char *text, size_t len, bool selected)
++{
++    fb_text(MENU_ROW / 2, MENU_ROW * (4 + row), text, len, MENU_SCALE, selected);
++}
+ #endif
+ 
+ extern u8 _chainload_stub_start[];
+diff --git a/src/fb.c b/src/fb.c
+index fc5c389..56e6050 100644
+--- a/src/fb.c
++++ b/src/fb.c
+@@ -217,6 +217,28 @@ void fb_clear(rgb_t color)
+     fb_update();
+ }
+ 
++// Large text without the console, for the boot menu: the retina font, scaled
++void fb_text(u32 x, u32 y, const char *s, size_t len, u32 scale, bool invert)
++{
++    if (!console.initialized)
++        return;
++
++    for (size_t n = 0; n < len && x + 16 * scale <= fb.width; n++, x += 16 * scale) {
++        u8 c = s[n] < 0x20 || s[n] > 0x7e ? '?' : s[n];
++        const u8 *glyph = _binary_build_font_retina_bin_start + (c - 0x20) * 16 * 32;
++
++        for (u32 i = 0; i < 32 * scale; i++) {
++            for (u32 j = 0; j < 16 * scale; j++) {
++                u8 v = glyph[(i / scale) * 16 + j / scale];
++                if (invert)
++                    v = ~v;
++                fb_set_pixel(x + j, y + i, (rgb_t){.r = v, .g = v, .b = v});
++            }
++        }
++    }
++    fb_update();
++}
++
+ void fb_blit_image(u32 x, u32 y, const struct image *img)
+ {
+     if (!console.initialized)
+diff --git a/src/fb.h b/src/fb.h
+index 08f52f4..d250f7a 100644
+--- a/src/fb.h
++++ b/src/fb.h
+@@ -45,6 +45,7 @@ void fb_blit(u32 x, u32 y, u32 w, u32 h, void *data, u32 stride, pix_fmt_t forma
+ void fb_unblit(u32 x, u32 y, u32 w, u32 h, void *data, u32 stride);
+ void fb_fill(u32 x, u32 y, u32 w, u32 h, rgb_t color);
+ void fb_clear(rgb_t color);
++void fb_text(u32 x, u32 y, const char *s, size_t len, u32 scale, bool invert);
+ void fb_clear_direct(void);
+ 
+ void fb_display_logo(void);

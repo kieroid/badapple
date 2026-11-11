@@ -78,7 +78,7 @@ pwn the phone again and run:
 tools/iboot-boot.sh build/iboot/kernelcache-chainload.img4
 ```
 
-That kernelcache is m1n1 alone, 424 KB. It boots the newest `.bin` on the FAT
+That kernelcache is m1n1 alone, about 420 KB. It boots the newest `.bin` on the FAT
 partition, which holds m1n1 and Linux. Hold volume down at boot for a menu of
 them: the volume buttons move, the side button boots.
 
