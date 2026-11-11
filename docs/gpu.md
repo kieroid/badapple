@@ -291,7 +291,7 @@ blending, and depth and stencil tests draw. Layouts are from AGXMetalA12
 | fragment shader word | the combined word plus imageblock: bit 8 uses local memory, 23:16 its size in 256 B, 25:24 log2 samples, 31:26 tile layout (32x32 47, 32x16 63, 16x16 54), 35:32 bytes per sample / 8 |
 | `st_var` | `0x01 \| last << 7 \| 1 << 8 \| reg halves << 10 \| slot << 16 \| 1 << 22 \| 0x8 << 28`, high register bits at 24 and slot bits at 26 as on G13. Immediate slots only (none of Apple's set bit 22 clear), so the geometry shader copy program that transform feedback draws through is compiled per fragment shader flat/linear inputs |
 | `iter`, `iterproj`, `ldcf` | `0x11`, `0x51`, `0x91` (G13's minus 0x10; 0x21 is the texture sample): destination 15:8, cf 21:16, channels 23:22, W's cf 29:24; bit 31 adds G13's upper word (sample index, interpolation, destination bits 9:8 at 56). Immediate cf only, so Mesa lowers indexed varyings |
-| `st_tile`, `ld_tile` | `0x09`, `0x79`: register 14:7, offset byte 2, coordinates byte 4 with bit 49, mask 55:52, sample mask 63:56 |
+| `st_tile`, `ld_tile` | `0x09`, `0x79`: format 9:7 (I16 1, I32 2, U8NORM 4), register in 16-bit halves 15:10 (r0-r31 only), byte offset << 4 in byte 2, coordinates byte 4 with bit 49, load bit 51, mask 55:52, sample mask 63:56. The format sets the register size: 32-bit for I32, else 16-bit |
 | `zs_emit` | `0x41`, G13's with the sample mask a bit higher (immediate 9, low bits 15:10) and the depth/stencil register two bits higher (23:18) |
 | `sample_mask` | `0xc1`, the samples as for `zs_emit`, then the value: immediate 17, low bits 23:18. Apple's discard is `c1fe0603` |
 | scissor | 8 bytes, G13's without the Z range |
@@ -317,21 +317,28 @@ shader.
 | face | 7:0 stencil reference, 15:8 line width, 19:17 depth compare, 20 shader writes depth (without it the test uses the interpolated depth; the written depth is not clamped, so Mesa saturates it), 21 depth write off, 26:24 pass type, 31:28 object type (5 and 6 line and point filled triangles) |
 | stencil | as G13 |
 | cull | as G13, clamp W in bit 5, no cull 2 |
-| shader counts | as G13 up to bit 11; from 15 the tilebuffer words the shader writes, 0 while every render target is spilled |
+| shader counts | as G13 up to bit 11; from 15 the tilebuffer words the shader writes, 0 without a tilebuffer |
 
-The block store (`imgwblk`) encoding is unknown and `ld_tile` hangs in the
-end of tile program, so Mesa spills every render target: the background and
-fragment programs write the image directly (PBE at state register 2 rt + 1,
-32-bit data) and the end of tile program does nothing. Render targets are
-bound as 2D at their first layer: the array write ends the thread, which
-dropped every render target after the first.
-For the same reason Mesa's compute blitter, which stores through `imgwblk`,
-is off: blits and `glGenerateMipmap` draw. The blend epilog reads the render
-target through Mesa's txf sampler, so the fragment pipeline loads samplers
-whenever render targets spill, even when the shader has none of its own.
-The texture unit does not see what the clear or earlier draws wrote in the
-same pass, so a draw that blends, masks or reads the framebuffer after them
-starts a new pass. That is slow, and overlap within one draw is still wrong.
+The block store (`imgwblk`) encoding is unknown, so the end of tile
+program does nothing and every render target lives in memory: the
+background and fragment programs write the image directly (PBE at state
+register 2 rt + 1, 32-bit data). Render targets are bound as 2D at their
+first layer: the array write ends the thread, which dropped every render
+target after the first. For the same reason Mesa's compute blitter, which
+stores through `imgwblk`, is off: blits and `glGenerateMipmap` draw.
+
+Single-sampled U8NORM, I16 and F16 targets also get a copy in the
+tilebuffer, up to 16 bytes per pixel, and blends read it with `ld_tile`, as
+Apple's G11 blends do. Fragment programs write both. The background program
+reloads the copy from memory and does not write memory back: that write
+raced the draws. F16 goes through the tile as I16, its own format did not
+round trip, and with I32 even plain clears came out wrong.
+
+Other targets blend through Mesa's txf sampler, so the fragment pipeline
+loads samplers whenever render targets spill. The texture unit does not see
+what the clear or earlier draws wrote in the same pass, so a draw that reads
+such a target after them starts a new pass. That is slow, and overlap within
+one draw is still wrong there.
 
 A12 has no BC (S3TC, RGTC, BPTC) decoding; sampling S3TC hangs it. Mesa
 decompresses those formats on upload instead. It has no ASTC HDR either: HDR
@@ -403,7 +410,7 @@ without compression, and the G11 PBE stride bias and level handling.
 | spilled targets | fragment shaders read a spilled render target's size from its descriptor through u0_u1, which points at the draw's texture states |
 | draws | an indexed draw follows a restart token, as in GL. libagx kernels that write draws into the stream fill exactly the G11 size: a gap is read as more words |
 | LOD query | not in hardware: computed from coordinate derivatives, without the sampler's bias and clamps. A null texture queries zero |
-| blending | blends read the spilled render target through the texture unit, which does not see what earlier draws in the render wrote. A draw that reads its render targets after other draws starts a new render, as in GL |
+| blending | targets with a tilebuffer copy blend there. Otherwise blends read the render target through the texture unit, which does not see what earlier draws in the render wrote, and a draw that reads its render targets after other draws starts a new render, as in GL. The new render's background program reloads the tilebuffer copies |
 | layered writes | an image write to an array, 3D or cube image ends the thread. Such storage views get a 2D buffer-like PBE and the shader writes at the texel's index (`lower_g11_layered_store`), from the tile size, aligned width and layer stride in the PBE's software words; image atomics use the same address |
 | twiddling | Y takes the low bit, and the long side's extra bits of an oblong tile sit on top (8 byte texels have 32x64 tiles). Shader-side addressing follows ail's CPU tiling |
 | fetch out of bounds | a fetch above level 0 is a txl through the txf-lod sampler, which clamps the level and layer: an out of range level or layer moves the texel out of bounds to read the zero border |
@@ -413,9 +420,10 @@ without compression, and the G11 PBE stride bias and level handling.
 | preambles | a preamble that samples drops a triangle now and then, so shaders with texture instructions get none. Vulkan's bindless textures leave `textures_used` empty, so the compiler looks for texture instructions |
 | R9G9B9E5 copies | copied as R32_UINT, G11 writes the shared exponent format wrong |
 
-dEQP-VK, every 200th case of the mustpass (16112): 3891 pass, 45 fail, 10857
-not supported, 40 internal errors (the test cannot handle the format) and 2
-that time out, and none wedges the GPU. The fails are shaders reading more
+dEQP-VK, every 200th case of the mustpass (16112): 3903 pass, 44 fail, 10900
+not supported and 40 internal errors (the test cannot handle the format), and
+none wedges the GPU. `textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment`
+times out and is left out of the runs. The fails are shaders reading more
 than 16 textures, compressed texel views, cube array suballocations, 3D texel
 fetches, clip distances read in the fragment shader, fp16 denormals and a few
 blits and copies. Two ubo cases fail now and then. Vulkan 1.3 is reported: 1.4
