@@ -1,0 +1,5 @@
+table inet filter {
+	chain input {
+		iifname "usb*" tcp dport 23 accept comment "badapple telnet shell on the USB link"
+	}
+}

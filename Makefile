@@ -260,12 +260,13 @@ $(IBOOT)/kernelcache-m1n1.img4: $(M1N1) FORCE | $(IBOOT)
 # the kernel itself has not changed. Packing costs a couple of seconds.
 # m1n1 keeps only the last initramfs it finds, so firmware cannot be a second
 # payload. Linux reads cpio archives back to back in one stream, though, so the
-# firmware cpios go on the end of Hoolock's, inside the same gzip.
+# firmware cpios and our /init go on the end of Hoolock's, inside the same gzip.
 FW_CPIOS = $(wildcard $(IBOOT)/mtfw.cpio $(IBOOT)/bcmfw.cpio)
-BOOT_INITRAMFS = $(if $(FW_CPIOS),$(IBOOT)/initramfs-fw.gz,$(INITRAMFS))
+BOOT_INITRAMFS = $(IBOOT)/initramfs-fw.gz
 
-$(IBOOT)/initramfs-fw.gz: $(INITRAMFS) $(FW_CPIOS)
-	{ gzip -dc $(INITRAMFS); cat $(FW_CPIOS); } | gzip -9 > $@
+$(IBOOT)/initramfs-fw.gz: $(INITRAMFS) $(FW_CPIOS) tools/initramfs/init
+	{ gzip -dc $(INITRAMFS); cat $(FW_CPIOS); \
+	  cd tools/initramfs && echo init | cpio -o -H newc -R 0:0 2>/dev/null; } | gzip -9 > $@
 
 $(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(BOOT_INITRAMFS) FORCE | $(IBOOT)
 	{ cat $(M1N1); \
@@ -305,21 +306,23 @@ $(MESA_SRC)/build/build.ninja: $(wildcard patches/mesa-*.patch)
 # root: a sysroot with the -dev packages to build against, and the runtime
 # rootfs. Mesa's build-time compilers come from the host build above.
 ALPINE     := build/alpine
-ALPINE_URL := https://dl-cdn.alpinelinux.org/alpine/v3.23
+ALPINE_URL := https://dl-cdn.alpinelinux.org/alpine/v3.24
 APK = $(ALPINE)/sbin/apk.static --arch aarch64 --usermode --allow-untrusted --no-scripts \
 	-X $(ALPINE_URL)/main -X $(ALPINE_URL)/community
-SYSROOT_PKGS := musl-dev gcc g++ libdrm-dev llvm21-dev clang21-dev clang21-libclang \
+SYSROOT_PKGS := musl-dev gcc g++ libdrm-dev llvm22-dev clang22-dev clang22-libclang \
 	spirv-llvm-translator-dev spirv-tools-dev libclc-dev expat-dev zlib-dev zstd-dev \
-	elfutils-dev opencl-headers opencl-icd-loader-dev wayland-dev wayland-protocols
+	elfutils-dev opencl-headers opencl-icd-loader-dev wayland-dev wayland-protocols \
+	libx11-dev libxext-dev libxfixes-dev libxshmfence-dev libxxf86vm-dev libxrandr-dev libxcb-dev xorgproto
 ROOTFS_PKGS := alpine-baselayout busybox musl libdrm zlib zstd-libs expat spirv-tools \
-	llvm21-libs clang21-libs spirv-llvm-translator-libs libstdc++ libgcc opencl-icd-loader \
-	wayland-libs-client wayland-libs-server wayland-libs-egl vulkan-loader vulkan-tools
+	llvm22-libs clang22-libs spirv-llvm-translator-libs libstdc++ libgcc opencl-icd-loader \
+	wayland-libs-client wayland-libs-server wayland-libs-egl vulkan-loader vulkan-tools \
+	libx11 libxext libxfixes libxshmfence libxxf86vm libxrandr libxcb
 RUST_DIR  := build/rust
 RUST_VER  := 1.98.1
 RUSTC     := $(RUST_DIR)/rustup/toolchains/$(RUST_VER)-x86_64-unknown-linux-gnu/bin/rustc
 MESA_A12  := $(MESA_SRC)/build-a12
 # Meson wants the build machine's wayland-scanner at the target's version
-WL_VER    := 1.24.0
+WL_VER    := 1.25.0
 WL_DIR    := build/wayland-scanner
 WL_SCANNER := $(WL_DIR)/bin/wayland-scanner
 A12_CC    := clang --target=aarch64-alpine-linux-musl --sysroot=$(ALPINE)/root -fuse-ld=lld
@@ -363,8 +366,8 @@ $(ALPINE)/rootfs.tar: $(MESA_SRC)/build/build.ninja $(ALPINE)/cross.ini $(RUSTC)
 	    src/compiler/spirv/vtn_bindgen2
 	test -d $(MESA_A12) || $(HOST_PATH) meson setup $(MESA_A12) $(MESA_SRC) \
 	    --cross-file $(ALPINE)/cross.ini -Dgallium-drivers=asahi -Dvulkan-drivers=asahi \
-	    -Dgallium-rusticl=true -Dllvm=enabled -Dshared-llvm=enabled -Dplatforms=wayland \
-	    -Dglx=disabled -Degl=enabled -Dgbm=enabled -Dgles1=disabled -Dgles2=enabled \
+	    -Dgallium-rusticl=true -Dllvm=enabled -Dshared-llvm=enabled -Dplatforms=x11,wayland \
+	    -Dglx=dri -Degl=enabled -Dgbm=enabled -Dgles1=enabled -Dgles2=enabled \
 	    -Dopengl=true \
 	    -Dmesa-clc=system -Dprecomp-compiler=system -Dmesa-clc-bundle-headers=enabled \
 	    -Dstatic-libclc=all -Dbuildtype=release -Dprefix=/usr -Dlibdir=lib

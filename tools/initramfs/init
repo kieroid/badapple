@@ -1,0 +1,37 @@
+#!/bin/busybox sh
+# Hoolock's /init, plus hl_rd=nvme: switch to the root filesystem on
+# /dev/nvme0n1p2. The USB gadget and its address stay up across the switch.
+set -a
+LOG_PREFIX="[HL-rd]"
+. ./init_functions.sh
+
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+/bin/busybox --install -s
+lzma -dc /extract.cpio.lzma | cpio -id
+rm -f /extract.cpio.lzma
+/bin/busybox-extras --install -s
+
+mount_proc_sys_dev
+setup_log
+setup_usb_network
+start_unudhcpd
+setup_mdev
+
+if [ "$hl_rd" = nvme ]; then
+	setup_usb_configfs_udc
+	mkdir -p /sysroot
+	for i in $(seq 20); do
+		mount -o rw /dev/nvme0n1p2 /sysroot && break
+		sleep 1
+	done
+	if [ -L /sysroot/sbin/init ] || [ -x /sysroot/sbin/init ]; then
+		for d in dev proc sys run; do mount --move /$d /sysroot/$d; done
+		mount --move /config /sysroot/sys/kernel/config
+		exec switch_root /sysroot /sbin/init \
+			</sysroot/dev/console >/sysroot/dev/console 2>&1
+	fi
+	echo "no root filesystem on NVMe"
+fi
+
+debug_shell
+while true; do sleep 255; done

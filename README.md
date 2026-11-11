@@ -55,6 +55,31 @@ Pwn the phone, then run `make boot`. It shows up as `05ac:4142` with telnet
 on `172.16.42.1`. `tools/tsh.py "cmd"` runs one command. The first USB attach
 often fails and the phone retries, so give it a minute.
 
+## postmarketOS
+
+Phosh on the NVMe, with our kernel and Mesa. Needs `pmbootstrap` and sudo.
+
+```sh
+make rootfs && tools/pmos/build.sh
+```
+
+Then boot the plain ramdisk with `make boot`, serve the repo with
+`python3 -m http.server 8003 --bind 172.16.42.2`, and run:
+
+```sh
+tools/tsh.py "wget -qO- http://172.16.42.2:8003/tools/pmos/install.sh | sh"
+```
+
+It erases `nvme0n1p2`. To boot pmOS, pwn the phone again and run:
+
+```sh
+make kernelcache KERNELCACHE=build/iboot/kernelcache-pmos.img4 \
+    BOOTARGS="earlycon console=tty0 ignore_loglevel cma=64M hl_rd=nvme"
+tools/iboot-boot.sh build/iboot/kernelcache-pmos.img4
+```
+
+The user is `user`, password `147147`.
+
 ## Status
 
 | Display | Touch | USB | Storage | SMP | cpufreq | Wifi | Bluetooth | Audio | Cellular | GPU |

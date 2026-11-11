@@ -1,12 +1,13 @@
 #!/bin/sh
 # llvm-config for the Alpine aarch64 sysroot in build/alpine/root, whose own
 # llvm-config is an aarch64 binary. Answers what meson asks when it looks
-# for LLVM; component names come from LLVM 21's build.
-L=$(readlink -f "$(dirname "$(readlink -f "$0")")/../build/alpine/root/usr/lib/llvm21")
+# for LLVM; the version comes from the sysroot's headers.
+L=$(readlink -f "$(dirname "$(readlink -f "$0")")"/../build/alpine/root/usr/lib/llvm[0-9]*)
+V=$(sed -n 's/^#define LLVM_VERSION_STRING "\(.*\)"/\1/p' "$L/include/llvm/Config/llvm-config.h")
 F="-I$L/include -D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS"
 for a; do
 	case $a in
-	--version) echo 21.1.2 ;;
+	--version) echo $V ;;
 	--prefix) echo "$L" ;;
 	--bindir) echo "$L/bin" ;;
 	--libdir) echo "$L/lib" ;;
@@ -14,14 +15,14 @@ for a; do
 	--cppflags|--cflags) echo "$F" ;;
 	--cxxflags) echo "$F -std=c++17" ;;
 	--ldflags) echo "-L$L/lib" ;;
-	--libs) echo "-lLLVM-21" ;;
-	--libfiles) echo "$L/lib/libLLVM-21.so" ;;
+	--libs) echo "-lLLVM-${V%%.*}" ;;
+	--libfiles) echo "$L/lib/libLLVM-${V%%.*}.so" ;;
 	--system-libs) echo ;;
 	--shared-mode) echo shared ;;
 	--has-rtti) echo YES ;;
 	--assertion-mode) echo OFF ;;
 	--targets-built) echo AArch64 AMDGPU ARM AVR BPF Hexagon Lanai LoongArch Mips MSP430 NVPTX PowerPC RISCV Sparc SPIRV SystemZ VE WebAssembly X86 XCore ;;
-	--components) /usr/lib/llvm/22/bin/llvm-config --components ;;
+	--components) /usr/lib/llvm/${V%%.*}/bin/llvm-config --components ;;
 	*) ;;
 	esac
 done
