@@ -428,6 +428,7 @@ without compression, and the G11 PBE stride bias and level handling.
 | border colours | the sampler has no border colour (Metal has none on A12 either): clamp to border reads transparent black, after the swizzle for colour formats (an RG format's alpha reads 0) and before it for depth and stencil. For an opaque border the shader adds the border colour times the filter weight of texels outside the image, from the coordinates, the LOD and the sampler word in the descriptor (`g11_lower_border`). A second sample through a state swizzled to 1 does not give the weight, it reads 1 at the border too. Shaders with more than 32 samples skip it: robustness2 shaders past about 100 KiB of code ran wrong. Anisotropy and depth compares are not covered |
 | preambles | a preamble that samples drops a triangle now and then, so shaders with texture instructions get none. Vulkan's bindless textures leave `textures_used` empty, so the compiler looks for texture instructions |
 | texture registers | samples, image writes and tile accesses reach r0-r31 only. The allocator moves their operands there before the instruction, trying the emptiest aligned ranges first, also for a result that can reuse a source dying at that instruction |
+| clip distances | output select bits 31:24 (the point size's word plus one) must also be set when only clip distances follow the varyings, or nothing clips. Then the first plane clips; where G11 reads the others is not known (packed after the first, or one per four words, both fail) |
 | R9G9B9E5 copies | copied as R32_UINT, G11 writes the shared exponent format wrong |
 
 dEQP-VK, every 200th case of the mustpass (16112): 3916 pass, 28 fail, 10903
@@ -435,7 +436,7 @@ not supported and 40 internal errors (the test cannot handle the format), and
 none wedges the GPU. `textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment`
 times out and is left out of the runs. The fails are shaders reading more
 than 16 textures, some compressed texel views, offsets with mirrored repeat,
-clip distances (they do not clip at all), fp16 denormals, multisampling and
+clip distances past the first plane, fp16 denormals, multisampling and
 compressed image to buffer copies. Two ubo cases fail now and then. Vulkan
 1.3 is reported: 1.4
 needs subgroup operations G11 does not have (only barriers and elect work),

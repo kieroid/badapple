@@ -2210,7 +2210,7 @@ index f158e0e..8c8103f 100644
     dev->vm_id = vm_create.vm_id;
  
 diff --git a/src/asahi/lib/agx_helpers.h b/src/asahi/lib/agx_helpers.h
-index bf7dfb9..e62bdda 100644
+index bf7dfb9..818b19f 100644
 --- a/src/asahi/lib/agx_helpers.h
 +++ b/src/asahi/lib/agx_helpers.h
 @@ -11,6 +11,7 @@
@@ -2246,7 +2246,7 @@ index bf7dfb9..e62bdda 100644
     }
  }
  
-@@ -139,6 +158,111 @@ agx_pack_zls_control(struct agx_zls_control_packed *packed,
+@@ -139,6 +158,117 @@ agx_pack_zls_control(struct agx_zls_control_packed *packed,
              agx_translate_zls_tiling(s->tiling);
        }
     }
@@ -2312,7 +2312,13 @@ index bf7dfb9..e62bdda 100644
 +{
 +   uint32_t osel = uvs->osel.opaque[0] | fs_osel | BITFIELD_BIT(16);
 +
-+   if (uvs->group_offs[UVS_LAYER_VIEWPORT] > uvs->group_offs[UVS_PSIZ])
++   /* Clip distances need it too: the first plane is read from there.
++    *
++    * ponytail: only the first plane clips; where G11 reads the others is
++    * not known
++    */
++   if (uvs->group_offs[UVS_LAYER_VIEWPORT] > uvs->group_offs[UVS_PSIZ] ||
++       uvs->size > uvs->group_offs[UVS_CLIP_DIST])
 +      osel |= (uvs->group_offs[UVS_PSIZ] + 1) << 24;
 +
 +   return osel;
