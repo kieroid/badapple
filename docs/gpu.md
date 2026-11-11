@@ -329,7 +329,10 @@ stores through `imgwblk`, is off: blits and `glGenerateMipmap` draw.
 
 Single-sampled U8NORM, I16 and F16 targets also get a copy in the
 tilebuffer, up to 16 bytes per pixel, and blends read it with `ld_tile`, as
-Apple's G11 blends do. Fragment programs write both. The background program
+Apple's G11 blends do. Fragment programs write both. The copy costs every
+fragment a tile store (glmark2's plain scenes ran 10% slower), so in GL a
+batch starts without it and the first draw that reads its render targets
+turns it on, in a new batch. Vulkan always keeps it. The background program
 reloads the copy from memory and does not write memory back: that write
 raced the draws. F16 goes through the tile as I16, its own format did not
 round trip, and with I32 even plain clears came out wrong.
