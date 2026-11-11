@@ -3548,7 +3548,7 @@ index b527e97..f4ff255 100644
     struct agx_ptr T = hk_pool_alloc(cmd, size, 256);
  
 diff --git a/src/asahi/vulkan/hk_cmd_buffer.h b/src/asahi/vulkan/hk_cmd_buffer.h
-index 6a06060..7450a8f 100644
+index 6a06060..f7db4d4 100644
 --- a/src/asahi/vulkan/hk_cmd_buffer.h
 +++ b/src/asahi/vulkan/hk_cmd_buffer.h
 @@ -100,6 +100,11 @@ struct hk_root_descriptor_table {
@@ -3563,7 +3563,7 @@ index 6a06060..7450a8f 100644
           /* Mapping from varying slots written by the last vertex stage to UVS
            * indices. This mapping must be compatible with the fragment shader.
            */
-@@ -201,6 +206,14 @@ struct hk_rendering_state {
+@@ -201,6 +206,17 @@ struct hk_rendering_state {
  
     struct agx_tilebuffer_layout tilebuffer;
     struct hk_render_registers cr;
@@ -3575,10 +3575,13 @@ index 6a06060..7450a8f 100644
 +   uint32_t g11_layers, g11_layer;
 +   uint64_t g11_rt_stride_B[HK_MAX_RTS], g11_z_stride_B, g11_s_stride_B;
 +   struct hk_cs *g11_cs[HK_G11_MAX_LAYERS];
++
++   /* G11: render targets have a tilebuffer copy, see hk_g11_tib_on */
++   bool g11_tib;
  };
  
  struct hk_index_buffer_state {
-@@ -269,6 +282,9 @@ struct hk_graphics_state {
+@@ -269,6 +285,9 @@ struct hk_graphics_state {
        uint16_t index;
     } occlusion;
  
@@ -3588,7 +3591,7 @@ index 6a06060..7450a8f 100644
     /* Fast linked shader data structures */
     uint64_t varyings;
     struct agx_varyings_vs linked_varyings;
-@@ -359,6 +375,9 @@ struct hk_cs {
+@@ -359,6 +378,9 @@ struct hk_cs {
     /* Whether there is more than just the root chunk */
     bool stream_linked;
  
@@ -3598,7 +3601,7 @@ index 6a06060..7450a8f 100644
     /* Whether the sampler heap is required. Although we always must maintain the
      * heap for correctness, it's often not necessary since we can push lots of
      * samplers (especially for GL/DX11-era engines).
-@@ -712,12 +731,18 @@ hk_cmd_buffer_end_compute(struct hk_cmd_buffer *cmd)
+@@ -712,12 +734,18 @@ hk_cmd_buffer_end_compute(struct hk_cmd_buffer *cmd)
  void hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd);
  
  static void
@@ -3621,12 +3624,12 @@ index 6a06060..7450a8f 100644
     } else if (cs) {
        /* Scissor and depth bias arrays are staged to dynamic arrays on the
         * CPU. When we end the control stream, they're done growing and are
-@@ -732,7 +757,22 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
+@@ -732,7 +760,22 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
        /* TODO: maybe free scissor/depth_bias now? */
        cs->current = agx_vdm_terminate(cs->current);
     }
 +}
- 
++
 +static void
 +hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 +{
@@ -3639,12 +3642,12 @@ index 6a06060..7450a8f 100644
 +
 +      render->g11_cs[l] = NULL;
 +   }
-+
+ 
 +   hk_cmd_buffer_end_graphics_cs(cmd, cmd->current_cs.gfx);
     cmd->current_cs.gfx = NULL;
  
     hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.pre_gfx);
-@@ -796,6 +836,17 @@ void hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
+@@ -796,6 +839,17 @@ void hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
  void hk_cmd_bind_vertex_buffer(struct hk_cmd_buffer *cmd, uint32_t vb_idx,
                                 struct hk_addr_range addr_range);
  
@@ -3662,7 +3665,7 @@ index 6a06060..7450a8f 100644
  static inline struct hk_descriptor_state *
  hk_get_descriptors_state(struct hk_cmd_buffer *cmd,
                           VkPipelineBindPoint bind_point)
-@@ -816,6 +867,9 @@ void hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
+@@ -816,6 +870,9 @@ void hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
  void hk_meta_resolve_rendering(struct hk_cmd_buffer *cmd,
                                 const VkRenderingInfo *pRenderingInfo);
  
@@ -3672,7 +3675,7 @@ index 6a06060..7450a8f 100644
  uint64_t hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
                                     VkPipelineBindPoint bind_point);
  
-@@ -852,7 +906,17 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -852,7 +909,17 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     uint32_t usc = hk_upload_usc_words(cmd, s, s->only_linked);
  
     hk_reserve_scratch(cmd, cs, s);
@@ -3706,7 +3709,7 @@ index 7cb08bb..9f56d29 100644
  
     hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
 diff --git a/src/asahi/vulkan/hk_cmd_draw.c b/src/asahi/vulkan/hk_cmd_draw.c
-index b29bcbc..3df5823 100644
+index b29bcbc..576bf8d 100644
 --- a/src/asahi/vulkan/hk_cmd_draw.c
 +++ b/src/asahi/vulkan/hk_cmd_draw.c
 @@ -200,6 +200,7 @@ hk_cmd_buffer_begin_graphics(struct hk_cmd_buffer *cmd,
@@ -3876,7 +3879,22 @@ index b29bcbc..3df5823 100644
     /* Choose a tilebuffer layout given the framebuffer key */
     enum pipe_format formats[HK_MAX_RTS] = {0};
     for (unsigned i = 0; i < render->color_att_count; ++i) {
-@@ -668,6 +736,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+@@ -616,6 +684,14 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+       (render->view_mask &&
+        render->view_mask != BITFIELD64_MASK(render->cr.layers));
+ 
++   /* G11 turns the tilebuffer copy on at the first read (hk_g11_tib_on).
++    * Layered renders record every layer's stream up front and keep it, and
++    * so do renders that clear part of the image with draws.
++    */
++   render->g11_tib = render->g11_layers != 0 || incomplete_render_area;
++   if (!render->g11_tib)
++      agx_tilebuffer_drop_g11_tib(&render->tilebuffer);
++
+    perf_debug(cmd, "Rendering %ux%ux%u@%u %s%s", render->cr.width,
+               render->cr.height, render->cr.layers,
+               render->tilebuffer.nr_samples,
+@@ -668,6 +744,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
  
        unsigned stride_pages = z_layout->layer_stride_B / AIL_PAGESIZE;
        render->cr.depth.stride = ((stride_pages - 1) << 14) | 1;
@@ -3884,7 +3902,7 @@ index b29bcbc..3df5823 100644
  
        assert(z_layout->tiling != AIL_TILING_LINEAR && "must tile");
  
-@@ -719,6 +788,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+@@ -719,6 +796,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
               "Page aligned S layers");
        unsigned stride_pages = s_layout->layer_stride_B / AIL_PAGESIZE;
        render->cr.stencil.stride = ((stride_pages - 1) << 14) | 1;
@@ -3892,7 +3910,7 @@ index b29bcbc..3df5823 100644
  
        if (s_layout->compressed) {
           render->cr.stencil.meta =
-@@ -750,6 +820,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+@@ -750,6 +828,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
      * hk_set_view_index will dirty the root each draw.
      */
     cmd->state.gfx.descriptors.root.draw.view_index = 0;
@@ -3900,7 +3918,7 @@ index b29bcbc..3df5823 100644
     cmd->state.gfx.descriptors.root_dirty = true;
  
     if (render->flags & VK_RENDERING_RESUMING_BIT)
-@@ -759,12 +830,32 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+@@ -759,12 +838,32 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
      * the clears. Create it and swap in the clear.
      */
     assert(!cmd->current_cs.gfx && "not already in a render pass");
@@ -3917,7 +3935,9 @@ index b29bcbc..3df5823 100644
 +      cs = hk_g11_layer_cs(cmd, l);
 +      if (!cs)
 +         return;
-+
+ 
+-   cs->cr.bg.main = render->cr.bg.main;
+-   cs->cr.zls_control = render->cr.zls_control;
 +      cs->cr.bg.main = hk_build_bg_eot(cmd, pRenderingInfo, false, false,
 +                                       incomplete_render_area);
 +      cs->cr.zls_control = render->cr.zls_control;
@@ -3929,16 +3949,14 @@ index b29bcbc..3df5823 100644
 +      cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
 +      if (!cs)
 +         return;
- 
--   cs->cr.bg.main = render->cr.bg.main;
--   cs->cr.zls_control = render->cr.zls_control;
++
 +      cs->cr.bg.main = render->cr.bg.main;
 +      cs->cr.zls_control = render->cr.zls_control;
 +   }
  
     /* Reordering barrier for post-gfx, in case we had any. */
     hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
-@@ -899,6 +990,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
+@@ -899,6 +998,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
         * fast clearing and then storing.
         */
        cs->cr.process_empty_tiles = resolved_clear;
@@ -3948,7 +3966,7 @@ index b29bcbc..3df5823 100644
     }
  }
  
-@@ -917,6 +1011,11 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
+@@ -917,6 +1019,11 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
        cs->cr.eot.main = render->cr.eot.main;
     }
  
@@ -3960,7 +3978,7 @@ index b29bcbc..3df5823 100644
     perf_debug(cmd, "End rendering");
     hk_cmd_buffer_end_graphics(cmd);
  
-@@ -2041,7 +2140,8 @@ hk_stencil_test_enabled(struct hk_cmd_buffer *cmd)
+@@ -2041,7 +2148,8 @@ hk_stencil_test_enabled(struct hk_cmd_buffer *cmd)
            render->stencil_att.vk_format != VK_FORMAT_UNDEFINED;
  }
  
@@ -3970,7 +3988,7 @@ index b29bcbc..3df5823 100644
  hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
  {
     const struct vk_dynamic_graphics_state *dyn =
-@@ -2089,16 +2189,18 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2089,16 +2197,18 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
     }
  
     /* Upload a hardware scissor for each viewport, whether there's a
@@ -3994,7 +4012,7 @@ index b29bcbc..3df5823 100644
           cfg.min_x = minx[i];
           cfg.min_y = miny[i];
           cfg.max_x = maxx[i];
-@@ -2118,11 +2220,22 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2118,11 +2228,22 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
              cfg.max_z = 1.0;
           }
        }
@@ -4018,7 +4036,7 @@ index b29bcbc..3df5823 100644
        .region_clip = true,
        .viewport = true,
        .viewport_count = count,
-@@ -2131,21 +2244,17 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2131,21 +2252,17 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
     size_t size = agx_ppp_update_size(&present);
     struct agx_ptr T = hk_pool_alloc(cmd, size, AGX_PPP_HEADER_ALIGN);
     if (!T.cpu)
@@ -4045,7 +4063,7 @@ index b29bcbc..3df5823 100644
           cfg.min_x = minx[i] / 32;
           cfg.min_y = miny[i] / 32;
           cfg.max_x = DIV_ROUND_UP(MAX2(maxx[i], 1), 32);
-@@ -2153,8 +2262,10 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2153,8 +2270,10 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
        }
     }
  
@@ -4058,7 +4076,7 @@ index b29bcbc..3df5823 100644
  
     /* Upload viewports */
     for (unsigned i = 0; i < count; ++i) {
-@@ -2172,6 +2283,7 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
+@@ -2172,6 +2291,7 @@ hk_flush_vp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
     }
  
     agx_ppp_fini(out, &ppp);
@@ -4066,7 +4084,7 @@ index b29bcbc..3df5823 100644
  }
  
  static enum agx_object_type
-@@ -2634,6 +2746,240 @@ agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
+@@ -2634,6 +2754,240 @@ agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
     }
  }
  
@@ -4307,17 +4325,16 @@ index b29bcbc..3df5823 100644
  static void
  hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                         uint32_t draw_id, struct agx_draw draw)
-@@ -2892,6 +3238,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -2892,6 +3246,8 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  
        key.epilog.link.already_ran_zs |= nontrivial_force_early;
  
-+      /* Vulkan always keeps G11's tilebuffer copy */
-+      key.epilog.g11_tib = true;
++      key.epilog.g11_tib = cmd->state.gfx.render.g11_tib;
 +
        struct hk_rendering_state *render = &cmd->state.gfx.render;
        for (uint32_t i = 0; i < render->color_att_count; i++) {
           key.epilog.rt_formats[i] =
-@@ -3055,7 +3404,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3055,7 +3411,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  
     if ((gfx->dirty & HK_DIRTY_PROVOKING) || vgt_dirty || linked_fs_dirty) {
        unsigned bindings = linked_fs->b.cf.nr_bindings;
@@ -4328,7 +4345,7 @@ index b29bcbc..3df5823 100644
           size_t linkage_size =
              AGX_CF_BINDING_HEADER_LENGTH + (bindings * AGX_CF_BINDING_LENGTH);
  
-@@ -3067,6 +3418,10 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3067,6 +3425,10 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
              t.cpu, &gfx->linked_varyings, hw_vs->info.uvs.user_size,
              &linked_fs->b.cf, gfx->provoking, 0, &gfx->generate_primitive_id);
  
@@ -4339,7 +4356,7 @@ index b29bcbc..3df5823 100644
           gfx->varyings = agx_usc_addr(&dev->dev, t.gpu);
        } else {
           gfx->varyings = 0;
-@@ -3123,6 +3478,11 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3123,6 +3485,11 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        /* TODO: Do less often? */
        hk_reserve_scratch(cmd, cs, hw_vs);
  
@@ -4351,7 +4368,7 @@ index b29bcbc..3df5823 100644
        agx_push(out, VDM_STATE, cfg) {
           cfg.vertex_shader_word_0_present = true;
           cfg.vertex_shader_word_1_present = true;
-@@ -3150,6 +3510,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3150,6 +3517,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        /* Pad up to a multiple of 8 bytes */
        memset(out, 0, 4);
        out += 4;
@@ -4359,7 +4376,7 @@ index b29bcbc..3df5823 100644
     }
  
     if (IS_DIRTY(RS_DEPTH_BIAS_FACTORS)) {
-@@ -3171,16 +3532,25 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+@@ -3171,16 +3539,25 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     }
  
     /* Hardware viewport/scissor state is entangled with depth bias. */
@@ -4385,7 +4402,7 @@ index b29bcbc..3df5823 100644
     cs->current = out;
  
     vk_dynamic_graphics_state_clear_dirty(dyn);
-@@ -3385,7 +3755,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
+@@ -3385,7 +3762,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     if (desc->push_dirty)
        hk_cmd_buffer_flush_push_descriptors(cmd, desc);
  
@@ -4395,7 +4412,7 @@ index b29bcbc..3df5823 100644
        hk_flush_index(cmd, cs);
  
     hk_flush_dynamic_state(cmd, cs, draw_id, draw);
-@@ -3449,7 +3820,15 @@ hk_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding,
+@@ -3449,7 +3827,15 @@ hk_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer, uint32_t firstBinding,
  static bool
  hk_set_view_index(struct hk_cmd_buffer *cmd, uint32_t view_idx)
  {
@@ -4412,7 +4429,7 @@ index b29bcbc..3df5823 100644
        cmd->state.gfx.descriptors.root.draw.view_index = view_idx;
        cmd->state.gfx.descriptors.root_dirty = true;
     }
-@@ -3457,13 +3836,24 @@ hk_set_view_index(struct hk_cmd_buffer *cmd, uint32_t view_idx)
+@@ -3457,13 +3843,24 @@ hk_set_view_index(struct hk_cmd_buffer *cmd, uint32_t view_idx)
     return true;
  }
  
@@ -4439,7 +4456,7 @@ index b29bcbc..3df5823 100644
        if (hk_set_view_index(cmd, view_idx))
  
  static void
-@@ -3513,6 +3903,91 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
+@@ -3513,6 +3910,138 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
     }
  }
  
@@ -4476,6 +4493,53 @@ index b29bcbc..3df5823 100644
 +
 +static void hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id,
 +                    struct agx_draw draw_);
++
++#if AGX_G11
++/*
++ * The tilebuffer copy costs every fragment a tile store, so a render starts
++ * without it (agx_tilebuffer_drop_g11_tib) and the first draw that reads its
++ * render targets turns it on: a new stream, whose partial background program
++ * reloads the copy from memory. Returns false if no target can have one.
++ */
++static bool
++hk_g11_tib_on(struct hk_cmd_buffer *cmd)
++{
++   struct hk_rendering_state *render = &cmd->state.gfx.render;
++   VkRenderingAttachmentInfo atts[HK_MAX_RTS] = {0};
++   struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout(
++      render->tilebuffer.logical_format, render->color_att_count,
++      render->tilebuffer.nr_samples, true);
++
++   if (!agx_g11_tib_size_B(&tib))
++      return false;
++
++   for (unsigned i = 0; i < render->color_att_count; ++i) {
++      atts[i] = (VkRenderingAttachmentInfo){
++         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
++         .imageView = hk_image_view_to_handle(render->color_att[i].iview),
++         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
++      };
++   }
++
++   const VkRenderingInfo info = {
++      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
++      .colorAttachmentCount = render->color_att_count,
++      .pColorAttachments = atts,
++   };
++
++   perf_debug(cmd, "Splitting control stream for the G11 tilebuffer copy");
++   if (cmd->current_cs.gfx)
++      hk_cmd_buffer_end_graphics(cmd);
++
++   render->tilebuffer = tib;
++   render->g11_tib = true;
++   render->cr.bg.partial = hk_build_bg_eot(cmd, &info, false, true, false);
++   render->cr.eot.main = hk_build_bg_eot(cmd, &info, true, false, false);
++   render->cr.eot.partial = hk_build_bg_eot(cmd, &info, true, true, false);
++   hk_cmd_buffer_dirty_all(cmd);
++   return true;
++}
++#endif
 +
 +#if AGX_G11
 +/* Split a direct draw too big for G11's tiler heap into list or strip pieces */
@@ -4531,7 +4595,7 @@ index b29bcbc..3df5823 100644
  static void
  hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
  {
-@@ -3527,6 +4002,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3527,6 +4056,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
     draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
     draw_.index_size = cmd->state.gfx.index.size;
  
@@ -4543,7 +4607,7 @@ index b29bcbc..3df5823 100644
     uint64_t stat_ia_verts = hk_pipeline_stat_addr(
        cmd, VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT);
  
-@@ -3550,7 +4030,30 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3550,7 +4084,37 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
  
     hk_foreach_view(cmd) {
        struct agx_draw draw = draw_;
@@ -4563,6 +4627,13 @@ index b29bcbc..3df5823 100644
 +      struct hk_linked_shader *g11_fs =
 +         cmd->state.gfx.linked[MESA_SHADER_FRAGMENT];
 +
++      if (cs && g11_fs && g11_fs->b.reads_tib &&
++          !cmd->state.gfx.render.g11_tib && hk_g11_tib_on(cmd)) {
++         hk_g11_heap_reserve(cmd, draw);
++         cs = hk_flush_gfx_state(cmd, draw_id, draw);
++         g11_fs = cmd->state.gfx.linked[MESA_SHADER_FRAGMENT];
++      }
++
 +      if (cs && cs->stats.calls && g11_fs && g11_fs->b.reads_tib &&
 +          !agx_g11_tib_all(&cmd->state.gfx.render.tilebuffer)) {
 +         perf_debug(cmd, "Splitting control stream for a G11 blend");
@@ -4574,7 +4645,7 @@ index b29bcbc..3df5823 100644
        /* If we failed to allocate a control stream, we've already lost the
         * device. Just drop the draw so we don't crash.
         */
-@@ -3631,6 +4134,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3631,6 +4195,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
        }
  
        enum agx_primitive topology = cmd->state.gfx.topology;
