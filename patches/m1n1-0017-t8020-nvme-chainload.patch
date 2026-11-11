@@ -1,0 +1,350 @@
+diff --git a/src/asc.c b/src/asc.c
+index d9e25b4..88cb0a6 100644
+--- a/src/asc.c
++++ b/src/asc.c
+@@ -206,6 +206,11 @@ asc_dev_t *asc_init(const char *path)
+             printf("asc: Error getting T8015 ANS2 %s CPU base address.\n", path);
+             return NULL;
+         }
++    } else if (adt_is_compatible(adt, node, "iop,ascwrap-v2")) {
++        // A12: T8015 style mailbox, CPU control as in v4
++        asc->cpu_base = base;
++        asc->base = base + 0x8000;
++        asc->ops = &t8015_ans2_ops;
+     } else if (adt_is_compatible(adt, node, "iop,ascwrap-v4") ||
+                adt_is_compatible(adt, node, "iop-sep,ascwrap-v4")) {
+         asc->cpu_base = base;
+diff --git a/src/chainload.c b/src/chainload.c
+index 1dd7c68..1f058ed 100644
+--- a/src/chainload.c
++++ b/src/chainload.c
+@@ -7,6 +7,7 @@
+ #include "malloc.h"
+ #include "memory.h"
+ #include "nvme.h"
++#include "soc.h"
+ #include "string.h"
+ #include "types.h"
+ #include "utils.h"
+@@ -47,6 +48,10 @@ int chainload_image(void *image, size_t size, char **vars, size_t var_cnt)
+         printf("chainload: Failed to find SEPFW\n");
+         return -1;
+     }
++    // A12 restore boots reserve 149MB here, more than the heap, and Linux
++    // does not use the SEP
++    if (chip_id == T8020)
++        sepfw[1] = 0;
+ 
+     image_size += sepfw[1];
+     image_size = ALIGN_UP(image_size, SZ_16K);
+@@ -120,13 +125,14 @@ int chainload_load(const char *spec, char **vars, size_t var_cnt)
+     size_t size;
+     int ret;
+ 
+-    if (!nvme_init()) {
+-        printf("chainload: NVME init failed\n");
++    // main_storage_read() only works after main_storage_init()
++    if (!main_storage_init()) {
++        printf("chainload: storage init failed\n");
+         return -1;
+     }
+ 
+     ret = rust_load_image(spec, &image, &size);
+-    nvme_shutdown();
++    main_storage_shutdown();
+     if (ret < 0)
+         return ret;
+ 
+diff --git a/src/nvme.c b/src/nvme.c
+index e6e3aa0..1d2b602 100644
+--- a/src/nvme.c
++++ b/src/nvme.c
+@@ -3,10 +3,12 @@
+ #include "adt.h"
+ #include "assert.h"
+ #include "malloc.h"
++#include "memory.h"
+ #include "nvme.h"
+ #include "pmgr.h"
+ #include "rtkit.h"
+ #include "sart.h"
++#include "soc.h"
+ #include "string.h"
+ #include "utils.h"
+ 
+@@ -62,6 +64,8 @@
+ #define NVME_ADMIN_CMD_CREATE_SQ 0x01
+ #define NVME_ADMIN_CMD_DELETE_CQ 0x04
+ #define NVME_ADMIN_CMD_CREATE_CQ 0x05
++#define NVME_ADMIN_CMD_SET_FEATURES 0x09
++#define NVME_FEAT_NUM_QUEUES     0x07
+ #define NVME_QUEUE_CONTIGUOUS    BIT(0)
+ 
+ #define NVME_CMD_FLUSH 0x00
+@@ -73,6 +77,8 @@
+ 
+ #define NVME_IOSQES_128 128
+ 
++#define NVMMU_TCBS 64
++
+ struct nvme_command {
+     u8 opcode;
+     u8 flags;
+@@ -131,6 +137,7 @@ static_assert(sizeof(struct apple_nvmmu_tcb) == 128, "invalid apple_nvmmu_tcb si
+ 
+ static enum {
+     NVME_T8015 = 2,
++    NVME_T8020 = 3, // NVMMU, but an ordinary SQ ring
+     NVME_T8103 = 4,
+     NVME_T8132 = 5,
+ } nvme_type;
+@@ -151,7 +158,7 @@ static struct nvme_queue adminq, ioq;
+ static bool alloc_queue(struct nvme_queue *q, bool adminq)
+ {
+     size_t cmdq_size;
+-    if (adminq || nvme_type >= NVME_T8103)
++    if (adminq || nvme_type >= NVME_T8020)
+         cmdq_size = nvme_queue_size * sizeof(*q->cmds);
+     else
+         cmdq_size = nvme_queue_size * NVME_IOSQES_128;
+@@ -166,16 +173,20 @@ static bool alloc_queue(struct nvme_queue *q, bool adminq)
+     if (!q->cqes)
+         goto free_cmds;
+ 
+-    if (nvme_type >= NVME_T8103) {
+-        q->tcbs = memalign(SZ_16K, nvme_queue_size * sizeof(*q->tcbs));
++    if (nvme_type >= NVME_T8020) {
++        q->tcbs = memalign(SZ_16K, NVMMU_TCBS * sizeof(*q->tcbs));
+         if (!q->tcbs)
+             goto free_cqes;
+ 
+-        memset(q->tcbs, 0, nvme_queue_size * sizeof(*q->tcbs));
++        memset(q->tcbs, 0, NVMMU_TCBS * sizeof(*q->tcbs));
++        dc_civac_range(q->tcbs, NVMMU_TCBS * sizeof(*q->tcbs));
+     }
+ 
+     memset(q->cmds, 0, cmdq_size);
+     memset(q->cqes, 0, nvme_queue_size * sizeof(*q->cqes));
++    // T8020's ANS is not coherent
++    dc_civac_range(q->cmds, cmdq_size);
++    dc_civac_range(q->cqes, nvme_queue_size * sizeof(*q->cqes));
+     q->cq_head = 0;
+     q->cq_phase = 1;
+     q->adminq = adminq;
+@@ -195,6 +206,19 @@ static void free_queue(struct nvme_queue *q)
+     free(q->cqes);
+ }
+ 
++// T8020: SART is the only thing between ANS and memory, and wants 4K units
++static bool nvme_sart_allow(void *p, size_t sz)
++{
++    return sart_add_allowed_region(nvme_sart, p, ALIGN_UP(sz, SZ_4K));
++}
++
++static bool nvme_sart_allow_queue(struct nvme_queue *q)
++{
++    return nvme_sart_allow(q->cmds, nvme_queue_size * sizeof(*q->cmds)) &&
++           nvme_sart_allow(q->cqes, nvme_queue_size * sizeof(*q->cqes)) &&
++           nvme_sart_allow(q->tcbs, NVMMU_TCBS * sizeof(*q->tcbs));
++}
++
+ static void nvme_poll_syslog(void)
+ {
+     struct rtkit_message msg;
+@@ -235,8 +259,26 @@ static bool nvme_ctrl_shutdown(void)
+     return FIELD_GET(NVME_CSTS_SHST, read32(nvme_base + NVME_CSTS)) == NVME_CSTS_SHST_DONE;
+ }
+ 
++static void nvme_fill_tcb(struct apple_nvmmu_tcb *tcb, struct nvme_command *cmd)
++{
++    memset(tcb, 0, sizeof(*tcb));
++    tcb->opcode = 0;
++    if (!cmd->prp1)
++        tcb->dma_flags = 0;
++    else if (cmd->opcode & 1)
++        tcb->dma_flags = NVMMU_TCB_DMA_TO_DEVICE;
++    else
++        tcb->dma_flags = NVMMU_TCB_DMA_FROM_DEVICE;
++    tcb->slot_id = cmd->tag;
++    tcb->len = cmd->cdw12;
++    tcb->prp1 = cmd->prp1;
++    tcb->prp2 = cmd->prp2;
++    dc_cvac_range(tcb, sizeof(*tcb));
++}
++
+ /*
+- * Submit command using non-standard 128-byte IOSQEs
++ * Submit command using non-standard 128-byte IOSQEs, or on T8020 64-byte ones
++ * with an NVMMU TCB per ring slot
+  * Returns: Expected tag in CQ
+  */
+ static u8 nvme_submit_command_t8015(struct nvme_queue *q, struct nvme_command *cmd)
+@@ -244,7 +286,7 @@ static u8 nvme_submit_command_t8015(struct nvme_queue *q, struct nvme_command *c
+     u8 tag = q->sq_tail;
+     struct nvme_command *queue_cmd;
+ 
+-    if (q->adminq)
++    if (q->adminq || nvme_type == NVME_T8020)
+         queue_cmd = &q->cmds[tag];
+     else
+         queue_cmd = (void *)q->cmds + (tag * NVME_IOSQES_128);
+@@ -252,6 +294,10 @@ static u8 nvme_submit_command_t8015(struct nvme_queue *q, struct nvme_command *c
+     memcpy(queue_cmd, cmd, sizeof(*cmd));
+ 
+     queue_cmd->tag = ++(q->sq_tail);
++    dc_cvac_range(queue_cmd, sizeof(*queue_cmd));
++    // the NVMMU finds the TCB by ring slot, not by tag
++    if (nvme_type == NVME_T8020)
++        nvme_fill_tcb(&q->tcbs[tag], queue_cmd);
+     if (q->sq_tail == nvme_queue_size)
+         q->sq_tail = 0;
+ 
+@@ -281,19 +327,7 @@ static u8 nvme_submit_command_t8103(struct nvme_queue *q, struct nvme_command *c
+ 
+     tcb = &q->tcbs[tag];
+     queue_cmd->tag = tag;
+-
+-    memset(tcb, 0, sizeof(*tcb));
+-    tcb->opcode = 0;
+-    if (!queue_cmd->prp1)
+-        tcb->dma_flags = 0;
+-    else if (queue_cmd->opcode & 1)
+-        tcb->dma_flags = NVMMU_TCB_DMA_TO_DEVICE;
+-    else
+-        tcb->dma_flags = NVMMU_TCB_DMA_FROM_DEVICE;
+-    tcb->slot_id = tag;
+-    tcb->len = queue_cmd->cdw12;
+-    tcb->prp1 = queue_cmd->prp1;
+-    tcb->prp2 = queue_cmd->prp2;
++    nvme_fill_tcb(tcb, queue_cmd);
+ 
+     /* make sure ANS3 can see the command and tcb before triggering it */
+     dma_wmb();
+@@ -326,6 +360,7 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
+ 
+         /* we need a DMA read barrier here since the CQ will be updated using DMA */
+         dma_rmb();
++        dc_civac_range(&q->cqes[q->cq_head], sizeof(cqe));
+         memcpy(&cqe, &q->cqes[q->cq_head], sizeof(cqe));
+         if ((cqe.status & 1) != q->cq_phase)
+             continue;
+@@ -338,7 +373,7 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
+             printf("nvme: invalid tag in CQ: expected %d but got %d\n", cq_tag, cqe.tag);
+         }
+ 
+-        if (nvme_type >= NVME_T8103) {
++        if (nvme_type >= NVME_T8020) {
+             write32(nvmmu_base + NVMMU_TCB_INVAL, cqe.tag);
+             if (read32(nvmmu_base + NVMMU_TCB_STAT))
+                 printf("nvme: NVMMU invalidation for tag %d failed\n", cqe.tag);
+@@ -389,6 +424,9 @@ bool nvme_init(void)
+     if (adt_is_compatible(adt, node, "iop-ans2,t8015"))
+         // A11 has NVMe with normal submission queues and 16 tags.
+         nvme_type = NVME_T8015;
++    else if (chip_id == T8020)
++        // A12 adds the NVMMU, still with normal submission queues.
++        nvme_type = NVME_T8020;
+     else if (adt_get_property(adt, node, "nvme-secure-bar"))
+         // M4+ generations have the nvme-secure-bar property and 10+ regs.
+         // They use reg[3] for NVMMU registers and reg[9] for NVMe registers,
+@@ -446,6 +484,18 @@ bool nvme_init(void)
+     if (!nvme_rtkit)
+         goto out_sart;
+ 
++    if (nvme_type == NVME_T8020) {
++        if (!nvme_sart_allow_queue(&adminq) || !nvme_sart_allow_queue(&ioq))
++            goto out_rtkit;
++
++        // iBoot leaves its own admin queue programmed, and the firmware
++        // fetches from it as soon as it boots, before the setup below.
++        write32(nvme_base + NVME_CC, 0);
++        write32(nvme_base + NVME_AQA, ((nvme_queue_size - 1) << 16) | (nvme_queue_size - 1));
++        write64_lo_hi(nvme_base + NVME_ASQ, (u64)adminq.cmds);
++        write64_lo_hi(nvme_base + NVME_ACQ, (u64)adminq.cqes);
++    }
++
+     if (!rtkit_boot(nvme_rtkit))
+         goto out_rtkit;
+ 
+@@ -462,6 +512,11 @@ bool nvme_init(void)
+         write32(nvmmu_base + NVMMU_NUM, nvme_queue_size - 1);
+         write64_lo_hi(nvmmu_base + NVMMU_ASQ_BASE, (u64)adminq.tcbs);
+         write64_lo_hi(nvmmu_base + NVMMU_IOSQ_BASE, (u64)ioq.tcbs);
++    } else if (nvme_type == NVME_T8020) {
++        write32(nvme_base + NVME_MAX_PEND_CMDS_CTRL, (nvme_queue_size << 16) | nvme_queue_size);
++        write32(nvmmu_base + NVMMU_NUM, NVMMU_TCBS - 1);
++        write64_lo_hi(nvmmu_base + NVMMU_ASQ_BASE, (u64)adminq.tcbs);
++        write64_lo_hi(nvmmu_base + NVMMU_IOSQ_BASE, (u64)ioq.tcbs);
+     }
+ 
+     /* setup admin queue */
+@@ -480,6 +535,17 @@ bool nvme_init(void)
+     /* setup IO queue */
+     struct nvme_command cmd;
+ 
++    if (nvme_type == NVME_T8020) {
++        // T8020 rejects Create IO CQ until the queue count is set
++        memset(&cmd, 0, sizeof(cmd));
++        cmd.opcode = NVME_ADMIN_CMD_SET_FEATURES;
++        cmd.cdw10 = NVME_FEAT_NUM_QUEUES;
++        if (!nvme_exec_command(&adminq, &cmd, NULL)) {
++            printf("nvme: set queue count command failed\n");
++            goto out_disable_ctrl;
++        }
++    }
++
+     memset(&cmd, 0, sizeof(cmd));
+     cmd.opcode = NVME_ADMIN_CMD_CREATE_CQ;
+     cmd.prp1 = (u64)ioq.cqes;
+@@ -490,6 +556,9 @@ bool nvme_init(void)
+         printf("nvme: create cq command failed\n");
+         goto out_disable_ctrl;
+     }
++    // ANS2 wants each IO queue base in MMIO too, right after its command
++    if (nvme_type == NVME_T8020)
++        write64_lo_hi(nvme_base + NVME_IOQ_CQES, (u64)ioq.cqes);
+ 
+     memset(&cmd, 0, sizeof(cmd));
+     cmd.opcode = NVME_ADMIN_CMD_CREATE_SQ;
+@@ -502,6 +571,8 @@ bool nvme_init(void)
+         printf("nvme: create sq command failed\n");
+         goto out_delete_cq;
+     }
++    if (nvme_type == NVME_T8020)
++        write64_lo_hi(nvme_base + NVME_IOQ_CMDS, (u64)ioq.cmds);
+ 
+     if (nvme_type == NVME_T8132) {
+         // Extra write required to set up the IO queues on M4+.
+@@ -662,5 +733,14 @@ bool nvme_read(u32 nsid, u64 lba, void *buffer)
+     cmd.cdw11 = lba >> 32;
+     cmd.cdw12 = 0; // #blocks, 0-based -> 1 block a 4096 bytes
+ 
+-    return nvme_exec_command(&ioq, &cmd, NULL);
++    if (nvme_type != NVME_T8020)
++        return nvme_exec_command(&ioq, &cmd, NULL);
++
++    dc_civac_range(buffer, SZ_4K);
++    if (!nvme_sart_allow(buffer, SZ_4K))
++        return false;
++    bool ret = nvme_exec_command(&ioq, &cmd, NULL);
++    sart_remove_allowed_region(nvme_sart, buffer, SZ_4K);
++    dc_ivac_range(buffer, SZ_4K);
++    return ret;
+ }
+diff --git a/src/sart.c b/src/sart.c
+index 3e5e61d..66f76af 100644
+--- a/src/sart.c
++++ b/src/sart.c
+@@ -230,6 +230,12 @@ sart_dev_t *sart_init(const char *adt_path)
+             sart->set_entry = sart0_set_entry;
+             sart->flags_allow = APPLE_SART0_FLAGS_ALLOW;
+             break;
++        case 1:
++            // T8020: v2's layout, but iBoot allows data regions with 0x6f
++            sart->get_entry = sart2_get_entry;
++            sart->set_entry = sart2_set_entry;
++            sart->flags_allow = 0x6f;
++            break;
+         case 2:
+             sart->get_entry = sart2_get_entry;
+             sart->set_entry = sart2_set_entry;

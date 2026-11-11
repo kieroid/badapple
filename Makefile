@@ -15,6 +15,8 @@
 # kernelcache  pack m1n1, the device tree, the kernel and the initramfs as a
 #            fake restore kernelcache that bootx will take
 # m1n1cache  pack m1n1 on its own, for poking registers over its proxy
+# bootbin    boot.bin for the NVMe's FAT partition, and the small m1n1
+#            kernelcache that loads it
 # boot       build that and hand the whole chain to a phone in pwned DFU
 # rootfs     clone and patch Mesa, cross-build Rusticl and GLES for the phone
 #            against an Alpine aarch64 sysroot and pack them with
@@ -69,7 +71,7 @@ IPSW_FILE ?=
 BOOTARGS ?= earlycon console=tty0 ignore_loglevel cma=64M
 
 .PHONY: check deps patch pmgr m1n1 kernel initramfs images ticket kernelcache \
-	m1n1cache boot rootfs clean FORCE
+	m1n1cache bootbin boot rootfs clean FORCE
 FORCE:
 
 check: $(DTB)
@@ -275,6 +277,22 @@ $(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(BOOT_INITRAMFS) FORCE | $(IBOOT)
 	ipsw img4 create --input $(MACHO) --type rkrn --compress lzss \
 	    --extra $(MONITOR) --im4m $(IM4M) --output $@
 	@echo "built $@ ($$(stat -c%s $@) bytes)"
+
+# Boot from the NVMe. kernelcache-chainload.img4 is m1n1 alone, small enough for
+# the jig. It loads boot.bin, m1n1 with Linux, from the FAT partition that
+# tools/pmos/install.sh makes with this PARTUUID.
+BOOT_PART := 65f10032-02c6-4a7b-8623-373969fc66c4
+bootbin: $(IBOOT)/boot.bin $(IBOOT)/kernelcache-chainload.img4
+
+$(IBOOT)/boot.bin: $(M1N1) $(DTB) $(IMAGE) $(BOOT_INITRAMFS) FORCE | $(IBOOT)
+	{ cat $(M1N1_SRC)/build/m1n1.bin; \
+	  echo 'chosen.bootargs=$(BOOTARGS)'; \
+	  cat $(DTB) $(IMAGE) $(BOOT_INITRAMFS); } > $@
+
+$(IBOOT)/kernelcache-chainload.img4: $(M1N1) FORCE | $(IBOOT)
+	{ cat $(M1N1); echo 'chainload=$(BOOT_PART);boot.bin'; } > $(IBOOT)/chainload.macho
+	ipsw img4 create --input $(IBOOT)/chainload.macho --type rkrn --compress lzss \
+	    --extra $(MONITOR) --im4m $(IM4M) --output $@
 
 # Phone in DFU on the jig, exploit fires by itself, move the cable here.
 # iboot-boot.sh checks for the one-time images itself and says what is missing,

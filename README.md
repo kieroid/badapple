@@ -61,6 +61,7 @@ Phosh on the NVMe, with our kernel and Mesa. Needs `pmbootstrap` and sudo.
 
 ```sh
 make rootfs && tools/pmos/build.sh
+make bootbin BOOTARGS="earlycon console=tty0 ignore_loglevel cma=64M hl_rd=nvme"
 ```
 
 Then boot the plain ramdisk with `make boot`, serve the repo with
@@ -70,13 +71,15 @@ Then boot the plain ramdisk with `make boot`, serve the repo with
 tools/tsh.py "wget -qO- http://172.16.42.2:8003/tools/pmos/install.sh | sh"
 ```
 
-It erases `nvme0n1p2`. To boot pmOS, pwn the phone again and run:
+It erases `nvme0n1p2` and puts `boot.bin` on the FAT partition. To boot pmOS,
+pwn the phone again and run:
 
 ```sh
-make kernelcache KERNELCACHE=build/iboot/kernelcache-pmos.img4 \
-    BOOTARGS="earlycon console=tty0 ignore_loglevel cma=64M hl_rd=nvme"
-tools/iboot-boot.sh build/iboot/kernelcache-pmos.img4
+tools/iboot-boot.sh build/iboot/kernelcache-chainload.img4
 ```
+
+That kernelcache is m1n1 alone, 416 KB. It reads `boot.bin`, which holds
+Linux, from the NVMe.
 
 The user is `user`, password `147147`.
 
