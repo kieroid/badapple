@@ -279,8 +279,9 @@ $(KERNELCACHE): $(M1N1) $(DTB) $(IMAGE) $(BOOT_INITRAMFS) FORCE | $(IBOOT)
 	@echo "built $@ ($$(stat -c%s $@) bytes)"
 
 # Boot from the NVMe. kernelcache-chainload.img4 is m1n1 alone, small enough for
-# the jig. It loads boot.bin, m1n1 with Linux, from the FAT partition that
-# tools/pmos/install.sh makes with this PARTUUID.
+# the jig. It loads the newest .bin, m1n1 with Linux, from the FAT partition
+# that tools/pmos/install.sh makes with this PARTUUID, or with volume down held,
+# the one picked from a menu.
 BOOT_PART := 65f10032-02c6-4a7b-8623-373969fc66c4
 bootbin: $(IBOOT)/boot.bin $(IBOOT)/kernelcache-chainload.img4
 
@@ -290,7 +291,7 @@ $(IBOOT)/boot.bin: $(M1N1) $(DTB) $(IMAGE) $(BOOT_INITRAMFS) FORCE | $(IBOOT)
 	  cat $(DTB) $(IMAGE) $(BOOT_INITRAMFS); } > $@
 
 $(IBOOT)/kernelcache-chainload.img4: $(M1N1) FORCE | $(IBOOT)
-	{ cat $(M1N1); echo 'chainload=$(BOOT_PART);boot.bin'; } > $(IBOOT)/chainload.macho
+	{ cat $(M1N1); echo 'chainload=$(BOOT_PART);*'; } > $(IBOOT)/chainload.macho
 	ipsw img4 create --input $(IBOOT)/chainload.macho --type rkrn --compress lzss \
 	    --extra $(MONITOR) --im4m $(IM4M) --output $@
 

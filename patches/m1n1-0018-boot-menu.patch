@@ -1,0 +1,207 @@
+diff --git a/rust/src/chainload.rs b/rust/src/chainload.rs
+index fb420ec..c4c0cd6 100644
+--- a/rust/src/chainload.rs
++++ b/rust/src/chainload.rs
+@@ -5,6 +5,7 @@ use crate::c_size_t;
+ use crate::gpt;
+ use crate::println;
+ use crate::storage;
++use alloc::string::String;
+ use alloc::vec::Vec;
+ use core::ffi::{c_char, c_int, c_void, CStr};
+ use fatfs::{FileSystem, FsOptions, Read, Seek, SeekFrom};
+@@ -31,7 +32,53 @@ impl From<gpt::Error<storage::Error>> for Error {
+     }
+ }
+ 
+-fn load_image(spec: &str) -> Result<Vec<u8>, Error> {
++extern "C" {
++    fn chainload_buttons() -> u32;
++    fn udelay(d: u32);
++}
++
++const BTN_UP: u32 = 1 << 0;
++const BTN_DOWN: u32 = 1 << 1;
++const BTN_SIDE: u32 = 1 << 2;
++
++fn buttons() -> u32 {
++    unsafe { chainload_buttons() }
++}
++
++fn wait_buttons(pressed: bool) -> u32 {
++    loop {
++        let b = buttons();
++        if (b != 0) == pressed {
++            return b;
++        }
++        unsafe { udelay(20000) };
++    }
++}
++
++fn menu(names: &[String]) -> usize {
++    let mut sel = 0;
++    loop {
++        println!("");
++        for (i, name) in names.iter().enumerate() {
++            println!("{} {}", if i == sel { ">" } else { " " }, name);
++        }
++        println!("Volume buttons move, side button boots");
++
++        wait_buttons(false);
++        let b = wait_buttons(true);
++        if b & BTN_SIDE != 0 {
++            return sel;
++        }
++        if b & BTN_UP != 0 && sel > 0 {
++            sel -= 1;
++        }
++        if b & BTN_DOWN != 0 && sel + 1 < names.len() {
++            sel += 1;
++        }
++    }
++}
++
++fn load_image(spec: &str, show_menu: bool) -> Result<Vec<u8>, Error> {
+     println!("Chainloading {}", spec);
+ 
+     let mut args = spec.split(';');
+@@ -58,6 +105,30 @@ fn load_image(spec: &str) -> Result<Vec<u8>, Error> {
+     let opts = FsOptions::new().update_accessed_date(false);
+ 
+     let fs = FileSystem::new(storage, opts)?;
++
++    // "*" boots the newest .bin in the root, or the one picked in the menu.
++    // Ties, as when the phone's clock was never set, go to the later name.
++    let mut names = Vec::new();
++    if path == "*" {
++        let mut bins = Vec::new();
++        for e in fs.root_dir().iter() {
++            let e = e?;
++            let name = e.file_name();
++            if e.is_file() && name.to_ascii_lowercase().ends_with(".bin") {
++                let m = e.modified();
++                let t = (m.date.year, m.date.month, m.date.day, m.time.hour, m.time.min, m.time.sec);
++                bins.push((t, name));
++            }
++        }
++        bins.sort();
++        names = bins.into_iter().rev().map(|(_, name)| name).collect();
++    } else {
++        names.push(String::from(path));
++    }
++
++    let pick = if show_menu && !names.is_empty() { menu(&names) } else { 0 };
++    let path = names.get(pick).ok_or(Error::BadArgs)?;
++    println!("Booting {}", path);
+     let mut file = fs.root_dir().open_file(path)?;
+ 
+     let size = file.seek(SeekFrom::End(0))? as usize;
+@@ -79,12 +150,13 @@ fn load_image(spec: &str) -> Result<Vec<u8>, Error> {
+ #[no_mangle]
+ pub unsafe extern "C" fn rust_load_image(
+     raw_spec: *const c_char,
++    show_menu: bool,
+     image: *mut *mut c_void,
+     size: *mut c_size_t,
+ ) -> c_int {
+     let spec = unsafe { CStr::from_ptr(raw_spec).to_str().unwrap() };
+ 
+-    match load_image(spec) {
++    match load_image(spec, show_menu) {
+         Ok(buf) => {
+             unsafe {
+                 *size = buf.len();
+diff --git a/src/chainload.c b/src/chainload.c
+index 1f058ed..669f2b6 100644
+--- a/src/chainload.c
++++ b/src/chainload.c
+@@ -7,6 +7,7 @@
+ #include "malloc.h"
+ #include "memory.h"
+ #include "nvme.h"
++#include "smc.h"
+ #include "soc.h"
+ #include "string.h"
+ #include "types.h"
+@@ -14,7 +15,23 @@
+ #include "xnuboot.h"
+ 
+ #ifdef CHAINLOADING
+-int rust_load_image(const char *spec, void **image, size_t *size);
++int rust_load_image(const char *spec, bool menu, void **image, size_t *size);
++
++static smc_dev_t *chainload_smc;
++
++// For the boot menu: bit 0 volume up, bit 1 volume down, bit 2 side button
++u32 chainload_buttons(void)
++{
++    static const u32 keys[] = {0x62565550, 0x6256444e, 0x62484c44}; // bVUP bVDN bHLD
++    u32 ret = 0;
++
++    for (int i = 0; chainload_smc && i < 3; i++) {
++        u8 v = 0;
++        if (!smc_read(chainload_smc, keys[i], &v, 1) && v)
++            ret |= BIT(i);
++    }
++    return ret;
++}
+ #endif
+ 
+ extern u8 _chainload_stub_start[];
+@@ -131,7 +148,14 @@ int chainload_load(const char *spec, char **vars, size_t var_cnt)
+         return -1;
+     }
+ 
+-    ret = rust_load_image(spec, &image, &size);
++    // Holding volume down at boot opens the menu
++    chainload_smc = smc_init();
++    bool menu = chainload_buttons() & BIT(1);
++
++    ret = rust_load_image(spec, menu, &image, &size);
++    if (chainload_smc)
++        smc_shutdown(chainload_smc);
++    chainload_smc = NULL;
+     main_storage_shutdown();
+     if (ret < 0)
+         return ret;
+diff --git a/src/smc.c b/src/smc.c
+index a37708f..cd5ada2 100644
+--- a/src/smc.c
++++ b/src/smc.c
+@@ -189,6 +189,24 @@ out_free:
+     return NULL;
+ }
+ 
++// Keys up to 4 bytes; the value comes back in the reply itself
++int smc_read(smc_dev_t *smc, u32 key, void *buf, size_t size)
++{
++    assert(size <= 4);
++    u8 id = smc->msgid & 0xF;
++    u64 msg = FIELD_PREP(SMC_MSG_TYPE, SMC_READ_KEY);
++    msg |= FIELD_PREP(SMC_WRITE_KEY_SIZE, size);
++    msg |= FIELD_PREP(SMC_WRITE_KEY_KEY, key);
++
++    int ret = smc_cmd(smc, msg);
++    if (ret)
++        return ret;
++
++    u32 value = FIELD_GET(SMC_RESULT_VALUE, smc->ret[id]);
++    memcpy(buf, &value, size);
++    return 0;
++}
++
+ int smc_write_u32(smc_dev_t *smc, u32 key, u32 value)
+ {
+     memcpy(smc->shmem, &value, sizeof(value));
+diff --git a/src/smc.h b/src/smc.h
+index 731d905..9153497 100644
+--- a/src/smc.h
++++ b/src/smc.h
+@@ -10,6 +10,7 @@
+ typedef struct smc_dev smc_dev_t;
+ 
+ int smc_write_u32(smc_dev_t *smc, u32 key, u32 value);
++int smc_read(smc_dev_t *smc, u32 key, void *buf, size_t size);
+ 
+ smc_dev_t *smc_init(void);
+ void smc_power_on(void);
