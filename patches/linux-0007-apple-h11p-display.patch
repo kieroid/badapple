@@ -1,3 +1,32 @@
+diff --git a/drivers/gpu/drm/panel/panel-summit.c b/drivers/gpu/drm/panel/panel-summit.c
+index 84435be52..23e9512a3 100644
+--- a/drivers/gpu/drm/panel/panel-summit.c
++++ b/drivers/gpu/drm/panel/panel-summit.c
+@@ -58,7 +58,24 @@ static int summit_get_modes(struct drm_panel *panel,
+ 	return drm_connector_helper_get_modes_fixed(connector, &summit_mode);
+ }
+ 
++static int summit_enable(struct drm_panel *panel)
++{
++	struct summit_data *s_data = container_of(panel, struct summit_data, panel);
++
++	return mipi_dsi_dcs_set_display_on(s_data->dsi);
++}
++
++/* Brightness 0 only dims the phone's OLED, so blanking needs display off. */
++static int summit_disable(struct drm_panel *panel)
++{
++	struct summit_data *s_data = container_of(panel, struct summit_data, panel);
++
++	return mipi_dsi_dcs_set_display_off(s_data->dsi);
++}
++
+ static const struct drm_panel_funcs summit_panel_funcs = {
++	.enable = summit_enable,
++	.disable = summit_disable,
+ 	.get_modes = summit_get_modes,
+ };
+ 
 diff --git a/drivers/gpu/drm/tiny/Kconfig b/drivers/gpu/drm/tiny/Kconfig
 index f0e72d4b6..46c723e36 100644
 --- a/drivers/gpu/drm/tiny/Kconfig
@@ -36,10 +65,10 @@ index 48d30bf61..2fd47771f 100644
  obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
 diff --git a/drivers/gpu/drm/tiny/apple-h11p.c b/drivers/gpu/drm/tiny/apple-h11p.c
 new file mode 100644
-index 000000000..87b1422d0
+index 000000000..cd73b509c
 --- /dev/null
 +++ b/drivers/gpu/drm/tiny/apple-h11p.c
-@@ -0,0 +1,537 @@
+@@ -0,0 +1,557 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple H11P display pipe, as found on T8020
@@ -80,6 +109,7 @@ index 000000000..87b1422d0
 +#include <drm/drm_gem_dma_helper.h>
 +#include <drm/drm_gem_framebuffer_helper.h>
 +#include <drm/drm_managed.h>
++#include <drm/drm_panel.h>
 +#include <drm/drm_probe_helper.h>
 +#include <drm/drm_simple_kms_helper.h>
 +
@@ -136,6 +166,7 @@ index 000000000..87b1422d0
 +	struct dev_pm_domain_list *pds;
 +	void __iomem *read;
 +	void __iomem *write;
++	struct drm_panel *panel;
 +	/* high bits of the physical address the pipe is fetching from */
 +	u32 surface_hi;
 +	/* what the pipe was last told, so an unchanged flip writes nothing */
@@ -246,7 +277,19 @@ index 000000000..87b1422d0
 +	struct apple_h11p *h11p = to_h11p(pipe->crtc.dev);
 +
 +	apple_h11p_flip(h11p, plane_state);
++	drm_panel_enable(h11p->panel);
 +	apple_h11p_send_event(pipe);
++}
++
++/*
++ * The pipe keeps scanning out, since blanking it needs the run mode
++ * registers, which are not mapped. Turning the panel off is what makes the
++ * screen go dark when the compositor blanks it. Without this the last frame
++ * stays lit and the phone looks frozen.
++ */
++static void apple_h11p_pipe_disable(struct drm_simple_display_pipe *pipe)
++{
++	drm_panel_disable(to_h11p(pipe->crtc.dev)->panel);
 +}
 +
 +static void apple_h11p_pipe_update(struct drm_simple_display_pipe *pipe,
@@ -288,13 +331,12 @@ index 000000000..87b1422d0
 +
 +static const struct drm_simple_display_pipe_funcs apple_h11p_pipe_funcs = {
 +	.enable = apple_h11p_pipe_enable,
++	.disable = apple_h11p_pipe_disable,
 +	.update = apple_h11p_pipe_update,
 +	.check = apple_h11p_pipe_check,
 +	/*
-+	 * No .disable: blanking needs the run mode registers, which are not
-+	 * mapped, and a running scanout keeps the console readable. No
-+	 * .prepare_fb: the default waits on the implicit fence, which is all
-+	 * a contiguous buffer the hardware scans directly needs.
++	 * No .prepare_fb: the default waits on the implicit fence, which is
++	 * all a contiguous buffer the hardware scans directly needs.
 +	 */
 +};
 +
@@ -455,12 +497,19 @@ index 000000000..87b1422d0
 +{
 +	struct apple_h11p *h11p;
 +	struct drm_device *drm;
++	struct device_node *np;
 +	int ret;
 +
 +	h11p = devm_drm_dev_alloc(&pdev->dev, &apple_h11p_driver,
 +				  struct apple_h11p, drm);
 +	if (IS_ERR(h11p))
 +		return PTR_ERR(h11p);
++
++	np = of_parse_phandle(pdev->dev.of_node, "panel", 0);
++	h11p->panel = of_drm_find_panel(np);
++	of_node_put(np);
++	if (IS_ERR(h11p->panel))
++		return dev_err_probe(&pdev->dev, PTR_ERR(h11p->panel), "no panel\n");
 +
 +	drm = &h11p->drm;
 +	platform_set_drvdata(pdev, h11p);

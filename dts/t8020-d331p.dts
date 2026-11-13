@@ -124,6 +124,11 @@
 	};
 };
 
+/* The pipe turns the panel off and on when the compositor blanks. */
+&disp0 {
+	panel = <&panel>;
+};
+
 /*
  * The ADT calls the panel lcd,summit, the same name as the Touch Bar's, and
  * AppleSummitLCD sets brightness the same way: DCS 0x51, low byte first for
@@ -133,7 +138,7 @@
 &dsi {
 	status = "okay";
 
-	panel@0 {
+	panel: panel@0 {
 		compatible = "apple,d331p-summit", "apple,summit";
 		reg = <0>;
 		max-brightness = <2047>;

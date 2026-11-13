@@ -83,6 +83,9 @@ DCS 0x51 with an 11 bit level. Range 139 to 2047, iBoot leaves 740.
 ## Debugging
 
 - Keep simpledrm on the console while testing.
+- A screen that stays lit and frozen after the power button is a blanked CRTC.
+  The pipe keeps scanning out; only DCS display off (panel-summit `.disable`)
+  makes it dark. Brightness 0 only dims.
 - From the m1n1 proxy, power `disp0`, `dart-disp0` and `mipi-dsim` first. Do
   not scan, 0x230100000 faults, and so does part of 0x40000 to 0x50000.
 - ramoops does not work: iBSS clears DRAM on every boot.
