@@ -36,10 +36,10 @@ index 48d30bf61..2fd47771f 100644
  obj-$(CONFIG_DRM_BOCHS)			+= bochs.o
 diff --git a/drivers/gpu/drm/tiny/apple-h11p.c b/drivers/gpu/drm/tiny/apple-h11p.c
 new file mode 100644
-index 000000000..a65700ba2
+index 000000000..87b1422d0
 --- /dev/null
 +++ b/drivers/gpu/drm/tiny/apple-h11p.c
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,537 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Apple H11P display pipe, as found on T8020
@@ -108,6 +108,25 @@ index 000000000..a65700ba2
 + */
 +#define GP_FORMAT_XRGB8888	0x057c8000
 +#define GP_FORMAT_XRGB2101010	0x03dc8000
++
++/*
++ * White point correction, a 3x3 matrix with 16 bit s3.12 entries. iBoot
++ * fills it with primary-calibration-matrix from the ADT, the only color
++ * block it turns on, and leaves 1 in the latch.
++ */
++#define WPC_MATRIX		0x7801c
++#define WPC_LATCH		0x7804c
++
++/*
++ * Without the rest of iOS's color pipeline colors look faded. A 1.4x
++ * saturation (Rec. 709 luma) after the calibration looked right on the
++ * panel, picked by eye. s3.12.
++ */
++static const s32 apple_h11p_saturation[9] = {
++	5386, -1172, -118,
++	-348, 4563, -118,
++	-348, -1172, 5616,
++};
 +
 +struct apple_h11p {
 +	struct drm_device drm;
@@ -335,6 +354,31 @@ index 000000000..a65700ba2
 + * real: the blanking and the clock are made up, because nothing here ever
 + * programs the timing, and they exist so userspace has a mode to look at.
 + */
++/*
++ * Builds on what iBoot left, so it must run once per boot. The driver is
++ * built in, so it does.
++ */
++static void apple_h11p_boost_color(struct apple_h11p *h11p)
++{
++	s32 cal[9];
++	int r, c, k;
++
++	for (k = 0; k < 9; k++)
++		cal[k] = (s16)readl(h11p->read + WPC_MATRIX + 4 * k);
++
++	for (r = 0; r < 3; r++) {
++		for (c = 0; c < 3; c++) {
++			s32 v = 0;
++
++			for (k = 0; k < 3; k++)
++				v += cal[r * 3 + k] * apple_h11p_saturation[k * 3 + c];
++			writel((u16)DIV_ROUND_CLOSEST(v, 4096),
++			       h11p->write + WPC_MATRIX + 4 * (r * 3 + c));
++		}
++	}
++	writel(1, h11p->write + WPC_LATCH);
++}
++
 +static void apple_h11p_read_mode(struct apple_h11p *h11p)
 +{
 +	u32 size = readl(h11p->read + GP_DST_SIZE);
@@ -461,6 +505,7 @@ index 000000000..a65700ba2
 +				     "cannot tell where the pipe is fetching from\n");
 +
 +	apple_h11p_read_mode(h11p);
++	apple_h11p_boost_color(h11p);
 +
 +	ret = drmm_mode_config_init(drm);
 +	if (ret)

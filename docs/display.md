@@ -51,6 +51,27 @@ Bits 24-25 are the pixel size, 26-27 the channel order, 13-20 a swizzle.
 HDR is EDR: the panel has no PQ or HLG mode, so content is drawn below full
 code with the brightness turned up. Past 2047 is not found yet.
 
+## Color
+
+iBoot zeroes the color blocks and turns on only WPC, with the ADT's
+`primary-calibration-matrix`. Linux colors looked faded next to iOS. The
+driver multiplies a 1.4x saturation into that matrix at probe, picked by eye.
+
+| offset | block |
+|---|---|
+| 0x60000 | blend. 0x60004 = 1 is single layer passthrough |
+| 0x64000 | CM. Mode at 0x64004: bit 0 on, bit 3 matrix (0x64008 offsets, 0x64014 3x3, 0x64038 offsets), bit 6 3D LUT at 0x68000, bit 9 1D LUT at 0x70000, bit 11 1D LUT at 0x7240c |
+| 0x78000 | WPC. 3x3 at 0x7801c, 16 bit s3.12 |
+| 0x7c000 | PRC |
+| 0x80000 | dither |
+| 0xb0000 | PCC |
+
+- iOS loads a 17x17x17 3D LUT per panel vendor (`color-accuracy-index`) and
+  brightness (100 to 650 nits) from tables in the kext. They are close to
+  identity on gray.
+- WPC takes new values live. Turning on CM mode bit 3 live stalls the pipe on
+  solid red until reboot.
+
 ## Brightness
 
 ```sh
@@ -63,5 +84,5 @@ DCS 0x51 with an 11 bit level. Range 139 to 2047, iBoot leaves 740.
 
 - Keep simpledrm on the console while testing.
 - From the m1n1 proxy, power `disp0`, `dart-disp0` and `mipi-dsim` first. Do
-  not scan, 0x230100000 faults.
+  not scan, 0x230100000 faults, and so does part of 0x40000 to 0x50000.
 - ramoops does not work: iBSS clears DRAM on every boot.
