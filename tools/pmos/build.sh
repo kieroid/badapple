@@ -37,15 +37,28 @@ pmbootstrap -c $P/pmbootstrap.cfg -y install --no-image --password 147147
 pmbootstrap -c $P/pmbootstrap.cfg shutdown
 
 rm -rf $O
-mkdir -p $O/usr/lib $O/usr/share $O/etc/OpenCL $O/etc/phosh
+mkdir -p $O/usr/lib $O/usr/share $O/etc/OpenCL $O/etc/phosh $O/etc/apk/keys
 cp -a tools/pmos/overlay/. $O/
 cp -a $R/usr/lib/dri $R/usr/lib/gbm $R/usr/lib/libgallium-*.so $R/usr/lib/libvulkan_asahi.so \
     $R/usr/lib/lib{EGL,gbm,GL,GLESv1_CM,GLESv2,RusticlOpenCL}.so* $O/usr/lib/
 cp -a $R/usr/share/vulkan $R/usr/share/drirc.d $O/usr/share/
 cp -a $R/etc/OpenCL/vendors $O/etc/OpenCL/
 { cat $C/usr/share/phosh/phoc.ini; printf '\n[output:DSI-1]\nscale = 3\n'; } > $O/etc/phosh/phoc.ini
+# pmbootstrap leaves etc/apk/keys empty, and apk then refuses every package
+cp $C/usr/share/apk/keys/*.pub $C/usr/share/apk/keys/aarch64/*.pub $O/etc/apk/keys/
+# compile our gschema override in with the chroot's schemas
+S=$(mktemp -d)
+cp $C/usr/share/glib-2.0/schemas/* $O/usr/share/glib-2.0/schemas/* $S/
+glib-compile-schemas --targetdir=$O/usr/share/glib-2.0/schemas $S
+rm -rf $S
 # into usr/, since /lib is a link to it
 for c in build/iboot/mtfw.cpio build/iboot/bcmfw.cpio; do (cd $O/usr && cpio -idm --quiet) < $c; done
+# zram is built in, but without these modprobe fails and zram swap never starts
+K=$(cat build/linux/include/config/kernel.release)
+mkdir -p $O/usr/lib/modules/$K
+cp build/linux/modules.builtin build/linux/modules.builtin.modinfo $O/usr/lib/modules/$K/
+touch $O/usr/lib/modules/$K/modules.order
+depmod -b $O/usr $K
 
 # pmOS's own libgallium stays out, or apps that load it first crash ours
 sudo tar --numeric-owner --format=gnu --exclude='./usr/lib/libgallium-*' -C $C -cf $P/rootfs.tar .
