@@ -948,10 +948,10 @@ index 000000000..bb19c5842
 +MODULE_LICENSE("Dual MIT/GPL");
 diff --git a/drivers/gpu/drm/agx/agx_fw.c b/drivers/gpu/drm/agx/agx_fw.c
 new file mode 100644
-index 000000000..6bc9f6e95
+index 000000000..36aad1a6f
 --- /dev/null
 +++ b/drivers/gpu/drm/agx/agx_fw.c
-@@ -0,0 +1,1111 @@
+@@ -0,0 +1,1114 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * AGX G11P firmware: boot, init block, the compute queue and jobs.
@@ -1442,9 +1442,12 @@ index 000000000..6bc9f6e95
 + * context maps at AGX_CHUNK_GVA. Layouts: kext FUN_fffffff0084d22c8 (TA registers),
 + * FUN_fffffff0084cd07c (3D registers), firmware FUN_00017018 (microsequence).
 + */
-+#define RN_MAX		16384
-+/* The tiling buffers fit 16384x4096 worth of macrotiles, in any shape */
-+#define RN_BUDGET_W	16384
++#define RN_MAX		8192
++/*
++ * The tiling buffers fit 8192x4096 worth of macrotiles, in any shape. Twice
++ * that (16384x4096, 8192x8192) wedges the firmware, so such jobs fail here.
++ */
++#define RN_BUDGET_W	8192
 +#define RN_BUDGET_H	4096
 +#define RN_BLOCKS	64		/* parameter heap, 128K blocks */
 +#define RN_MAX_BLOCKS	128

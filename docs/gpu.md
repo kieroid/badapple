@@ -390,12 +390,18 @@ macrotile renders), and the kext's tiling sizes: region headers
 at 0x50 and 0x80 bytes per macrotile utile, and a buffer manager whose block
 list entries are eight 16K chunks. The parameter heap behind it is 8 MB of
 its own; 1 MB ran out at 3000 full screen triangles. The tiling buffers are
-sized for 16384x4096 worth of macrotiles, in any shape up to 16384 a side. There are no partial
+sized for 8192x4096 worth of macrotiles, in any shape up to 8192 a side.
+Twice that (16384x4096, 8192x8192) wedges the firmware, so the kernel
+rejects such jobs and Mesa caps textures at 8192 and render targets at
+8192x4096 pixels. There are no partial
 renders yet, so a frame that fills the heap hangs the TA. The scene's
 `+0x14` counts the 128K blocks a TA used: 14 B a point, 32 B a tiny
-triangle, about 0.6 B per 32x32 tile a primitive covers. Mesa keeps an
-estimate per render (4 B per vertex output plus 8, `agx_g11_heap_cost`),
-ends the render past 6 MB and splits draws bigger than half that.
+triangle, about 0.6 B per 32x32 tile a primitive covers. Each draw also
+costs 20-27 B per tile it touches, whatever its primitive count. Mesa
+keeps an estimate per render (4 B per vertex output plus 8, plus 24 B per
+tile in the draw's viewport and scissor, `agx_g11_heap_cost`), ends the
+render past 6 MB and splits draws bigger than half that. A full heap
+wedges the firmware silently: jobs complete but write zeros.
 
 ### Vulkan
 

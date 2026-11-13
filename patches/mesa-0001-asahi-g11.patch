@@ -1753,27 +1753,6 @@ index bfbd9c0..01e051e 100644
     .command_timestamp_frequency_hz = 1000000000,
  };
  
-diff --git a/src/asahi/genxml/agx_g11.h b/src/asahi/genxml/agx_g11.h
-new file mode 100644
-index 0000000..7bb3f09
---- /dev/null
-+++ b/src/asahi/genxml/agx_g11.h
-@@ -0,0 +1,15 @@
-+/*
-+ * Copyright 2026 kiki <kieran@lavato.net>
-+ * SPDX-License-Identifier: MIT
-+ */
-+
-+#pragma once
-+
-+/*
-+ * Target the A12 GPU (G11). In the compiler: the stop instruction is 0x0801,
-+ * threadgroup memory goes through the device load/store encoding, and there
-+ * are no SIMD reductions or G13 cache barriers. In command streams: CDM
-+ * block types sit in bits 31:30, and the USC shader, register and shared
-+ * memory words are one word. cmdbuf.xml has the G11 encodings.
-+ */
-+#define AGX_G11 1
 diff --git a/src/asahi/genxml/agx_pack_header.h b/src/asahi/genxml/agx_pack_header.h
 index 2f238f2..1c3294f 100644
 --- a/src/asahi/genxml/agx_pack_header.h
@@ -2210,7 +2189,7 @@ index f158e0e..8c8103f 100644
     dev->vm_id = vm_create.vm_id;
  
 diff --git a/src/asahi/lib/agx_helpers.h b/src/asahi/lib/agx_helpers.h
-index bf7dfb9..818b19f 100644
+index bf7dfb9..056c6b4 100644
 --- a/src/asahi/lib/agx_helpers.h
 +++ b/src/asahi/lib/agx_helpers.h
 @@ -11,6 +11,7 @@
@@ -2246,7 +2225,7 @@ index bf7dfb9..818b19f 100644
     }
  }
  
-@@ -139,6 +158,117 @@ agx_pack_zls_control(struct agx_zls_control_packed *packed,
+@@ -139,6 +158,126 @@ agx_pack_zls_control(struct agx_zls_control_packed *packed,
              agx_translate_zls_tiling(s->tiling);
        }
     }
@@ -2267,6 +2246,15 @@ index bf7dfb9..818b19f 100644
 + */
 +#define AGX_G11_HEAP_BUDGET   (6u << 20)
 +#define AGX_G11_HEAP_INDIRECT (AGX_G11_HEAP_BUDGET / 64)
++
++/*
++ * Each draw also takes heap per tile it touches, whatever its primitive
++ * count: 400 full-screen quad draws at 1024x1024 fit, 1500 overflowed, and a
++ * WebGL test's textured ones overflowed at about 400, so 20-27 B. Charged
++ * for every tile in the draw's viewport and scissor, since coverage is not
++ * known on the CPU.
++ */
++#define AGX_G11_HEAP_TILE_B 24
 +
 +static inline uint64_t
 +agx_g11_heap_cost(uint64_t vertices, unsigned outputs)
@@ -6386,7 +6374,7 @@ index 6a75c87..627ce59 100644
        return NULL;
     }
 diff --git a/src/gallium/drivers/asahi/agx_pipe.c b/src/gallium/drivers/asahi/agx_pipe.c
-index ab205bf..5ce50e3 100644
+index ab205bf..ad7f722 100644
 --- a/src/gallium/drivers/asahi/agx_pipe.c
 +++ b/src/gallium/drivers/asahi/agx_pipe.c
 @@ -144,8 +144,10 @@ agx_resource_setup(struct agx_device *dev, struct agx_resource *nresource)
@@ -6492,7 +6480,33 @@ index ab205bf..5ce50e3 100644
     /* Fail Piglit's obnoxious allocations */
     if (nresource->layout.size_B >= (1ull << 32)) {
        free(nresource);
-@@ -1993,7 +2035,8 @@ agx_init_compute_caps(struct pipe_screen *pscreen)
+@@ -579,6 +621,25 @@ agx_resource_create_with_modifiers(struct pipe_screen *screen,
+    if (bind & (PIPE_BIND_SCANOUT | PIPE_BIND_DISPLAY_TARGET | PIPE_BIND_SHARED))
+       create_flags |= AGX_BO_SHAREABLE;
+ 
++   /* GPU memory is pinned and shared with the CPU. On a 4 GB phone a 16384^2
++    * WebGL canvas (1 GB colour, 1.3 GB depth/stencil) swapped everything out
++    * and got processes killed. Failing instead lets Firefox retry smaller.
++    */
++   uint64_t ram;
++   if (os_get_total_physical_memory(&ram) && nresource->layout.size_B > ram / 4) {
++      FREE(nresource);
++      return NULL;
++   }
++
++   /* G11 renders over 8192x4096 pixels wedge the firmware (the kernel rejects
++    * them), so do not make targets that big. Callers retry smaller.
++    */
++   if (AGX_G11 && (bind & (PIPE_BIND_RENDER_TARGET | PIPE_BIND_DEPTH_STENCIL)) &&
++       (uint64_t)templ->width0 * templ->height0 > 8192 * 4096) {
++      FREE(nresource);
++      return NULL;
++   }
++
+    nresource->bo =
+       agx_bo_create(dev, nresource->layout.size_B, 0, create_flags, label);
+ 
+@@ -1993,7 +2054,8 @@ agx_init_compute_caps(struct pipe_screen *pscreen)
  
     caps->subgroup_sizes = 32;
     caps->max_variable_threads_per_block = 1024;
@@ -6502,7 +6516,7 @@ index ab205bf..5ce50e3 100644
  }
  
  static void
-@@ -2052,9 +2095,11 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+@@ -2052,9 +2114,11 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
     caps->indep_blend_enable = true;
     caps->indep_blend_func = true;
     caps->uma = true;
@@ -6516,7 +6530,22 @@ index ab205bf..5ce50e3 100644
     caps->shader_array_components = true;
     caps->packed_uniforms = true;
     caps->quads_follow_provoking_vertex_convention = true;
-@@ -2182,11 +2227,14 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+@@ -2116,8 +2180,12 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
+ 
+    caps->query_pipeline_statistics_single = true;
+ 
+-   caps->max_texture_2d_size = 16384;
+-   caps->max_texture_cube_levels = 15; /* Max 16384x16384 */
++   /* G11 renders to 16384 wide wedge the firmware (8192x4096 works), and GL
++    * ties render and viewport size to this. A 16384^2 RGBA texture is 1 GB
++    * on a 4 GB phone anyway.
++    */
++   caps->max_texture_2d_size = AGX_G11 ? 8192 : 16384;
++   caps->max_texture_cube_levels = AGX_G11 ? 14 : 15;
+    caps->max_texture_3d_levels = 12;   /* Max 2048x2048x2048 */
+ 
+    caps->fs_coord_origin_upper_left = true;
+@@ -2182,11 +2250,14 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
        BITFIELD_BIT(MESA_PRIM_TRIANGLES_ADJACENCY) |
        BITFIELD_BIT(MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) |
        BITFIELD_BIT(MESA_PRIM_PATCHES);
@@ -6534,7 +6563,7 @@ index ab205bf..5ce50e3 100644
  
     caps->context_priority_mask =
        PIPE_CONTEXT_PRIORITY_LOW | PIPE_CONTEXT_PRIORITY_MEDIUM |
-@@ -2253,6 +2301,18 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
+@@ -2253,6 +2324,18 @@ agx_is_format_supported(struct pipe_screen *pscreen, enum pipe_format format,
        if (!ail_is_valid_pixel_format(tex_format))
           return false;
  
@@ -6554,7 +6583,7 @@ index ab205bf..5ce50e3 100644
        if ((ent.channels == AGX_CHANNELS_R32G32B32_EMULATED ||
             util_format_is_luminance(tex_format) ||
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..a45af40 100644
+index 616dd6d..7c30f45 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
 @@ -29,6 +29,7 @@
@@ -7306,14 +7335,14 @@ index 616dd6d..a45af40 100644
 +         batch->tilebuffer_layout.tile_size);
 +   } else {
 +      agx_usc_push_packed(&b, SHARED, &batch->tilebuffer_layout.usc);
- 
--   agx_usc_pack(&b, REGISTERS, cfg)
--      cfg.register_count = shader->info.nr_gprs;
++
 +      agx_usc_pack(&b, SHADER, cfg) {
 +         cfg.code = agx_usc_addr(dev, shader->ptr + shader->info.main_offset);
 +         cfg.unk_2 = 0;
 +      }
-+
+ 
+-   agx_usc_pack(&b, REGISTERS, cfg)
+-      cfg.register_count = shader->info.nr_gprs;
 +      agx_usc_pack(&b, REGISTERS, cfg)
 +         cfg.register_count = shader->info.nr_gprs;
 +   }
@@ -7710,7 +7739,7 @@ index 616dd6d..a45af40 100644
     /* We must legalize feedback loops and transform feedback writes before
      * getting the batch, since once we have the batch we're not allowed to flush
      * the bound render targets.
-@@ -4919,6 +5480,75 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+@@ -4919,6 +5480,85 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     agx_legalize_xfb(ctx);
  
     struct agx_batch *batch = agx_get_batch(ctx);
@@ -7774,6 +7803,16 @@ index 616dd6d..a45af40 100644
 +                  : agx_g11_heap_cost((uint64_t)draws[0].count *
 +                                         MAX2(info->instance_count, 1),
 +                                      g11_outputs);
++      unsigned minx, miny, maxx, maxy;
++
++      agx_get_scissor_extents(&ctx->viewport[0],
++                              ctx->rast->base.scissor ? &ctx->scissor[0] : NULL,
++                              &batch->key, &minx, &miny, &maxx, &maxy);
++      if (maxx > minx && maxy > miny) {
++         cost += (uint64_t)AGX_G11_HEAP_TILE_B *
++                 (DIV_ROUND_UP(maxx, 32) - minx / 32) *
++                 (DIV_ROUND_UP(maxy, 32) - miny / 32);
++      }
 +
 +      if (batch->g11_heap_B && batch->g11_heap_B + cost > AGX_G11_HEAP_BUDGET) {
 +         agx_flush_batch_for_reason(ctx, batch, "G11 tiler heap");
@@ -7786,7 +7825,7 @@ index 616dd6d..a45af40 100644
     uint64_t ib = 0;
     size_t ib_extent = 0;
  
-@@ -5202,7 +5832,10 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+@@ -5202,7 +5842,10 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
  
     uint8_t *out = agx_encode_state(batch, batch->vdm.current);
  
@@ -7798,7 +7837,7 @@ index 616dd6d..a45af40 100644
        agx_push(out, VDM_STATE, cfg)
           cfg.restart_index_present = true;
  
-@@ -5314,6 +5947,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5314,6 +5957,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -7818,7 +7857,7 @@ index 616dd6d..a45af40 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +5990,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +6000,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);
@@ -8060,3 +8099,24 @@ index 17fbb48..7d68827 100644
           .format = dst_format,
           .subresourceRange = {
              .aspectMask = dst_subres.aspectMask,
+diff --git a/src/asahi/genxml/agx_g11.h b/src/asahi/genxml/agx_g11.h
+new file mode 100644
+index 0000000..7bb3f09
+--- /dev/null
++++ b/src/asahi/genxml/agx_g11.h
+@@ -0,0 +1,15 @@
++/*
++ * Copyright 2026 kiki <kieran@lavato.net>
++ * SPDX-License-Identifier: MIT
++ */
++
++#pragma once
++
++/*
++ * Target the A12 GPU (G11). In the compiler: the stop instruction is 0x0801,
++ * threadgroup memory goes through the device load/store encoding, and there
++ * are no SIMD reductions or G13 cache barriers. In command streams: CDM
++ * block types sit in bits 31:30, and the USC shader, register and shared
++ * memory words are one word. cmdbuf.xml has the G11 encodings.
++ */
++#define AGX_G11 1
