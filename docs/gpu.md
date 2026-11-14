@@ -400,7 +400,8 @@ triangle, about 0.6 B per 32x32 tile a primitive covers. Each draw also
 costs 20-27 B per tile it touches, whatever its primitive count. Mesa
 keeps an estimate per render (4 B per vertex output plus 8, plus 24 B per
 tile in the draw's viewport and scissor, `agx_g11_heap_cost`), ends the
-render past 6 MB and splits draws bigger than half that. A full heap
+render past 6 MB and splits draws bigger than half that. Honeykrisp ends
+the control stream the same way (`hk_g11_heap_reserve`). A full heap
 wedges the firmware silently: jobs complete but write zeros.
 
 ### Vulkan

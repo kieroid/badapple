@@ -3721,7 +3721,7 @@ index 7cb08bb..9f56d29 100644
  
     hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
 diff --git a/src/asahi/vulkan/hk_cmd_draw.c b/src/asahi/vulkan/hk_cmd_draw.c
-index b29bcbc..576bf8d 100644
+index b29bcbc..02148ec 100644
 --- a/src/asahi/vulkan/hk_cmd_draw.c
 +++ b/src/asahi/vulkan/hk_cmd_draw.c
 @@ -200,6 +200,7 @@ hk_cmd_buffer_begin_graphics(struct hk_cmd_buffer *cmd,
@@ -3938,7 +3938,9 @@ index b29bcbc..576bf8d 100644
 -   if (!cs)
 -      return;
 +   struct hk_cs *cs = NULL;
-+
+ 
+-   cs->cr.bg.main = render->cr.bg.main;
+-   cs->cr.zls_control = render->cr.zls_control;
 +   /* Each layer of a G11 layered render clears in its own render. Layer 0
 +    * is first in the command buffer, so compute queued before the current
 +    * render runs before all of them.
@@ -3947,9 +3949,7 @@ index b29bcbc..576bf8d 100644
 +      cs = hk_g11_layer_cs(cmd, l);
 +      if (!cs)
 +         return;
- 
--   cs->cr.bg.main = render->cr.bg.main;
--   cs->cr.zls_control = render->cr.zls_control;
++
 +      cs->cr.bg.main = hk_build_bg_eot(cmd, pRenderingInfo, false, false,
 +                                       incomplete_render_area);
 +      cs->cr.zls_control = render->cr.zls_control;
@@ -4468,7 +4468,7 @@ index b29bcbc..576bf8d 100644
        if (hk_set_view_index(cmd, view_idx))
  
  static void
-@@ -3513,6 +3910,138 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
+@@ -3513,6 +3910,176 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
     }
  }
  
@@ -4481,15 +4481,53 @@ index b29bcbc..576bf8d 100644
 +                                           : 64;
 +}
 +
++/* 32x32 tiles a draw can touch: its viewports and scissors, in the render */
++static uint64_t
++hk_g11_tiles(struct hk_cmd_buffer *cmd)
++{
++   const struct vk_dynamic_graphics_state *dyn =
++      &cmd->vk.dynamic_graphics_state;
++   const struct hk_render_registers *cr = &cmd->state.gfx.render.cr;
++   float minx = cr->width, miny = cr->height, maxx = 0, maxy = 0;
++
++   for (unsigned i = 0; i < dyn->vp.viewport_count; i++) {
++      const VkViewport *vp = &dyn->vp.viewports[i];
++      float x0 = MAX2(MIN2(vp->x, vp->x + vp->width), 0);
++      float y0 = MAX2(MIN2(vp->y, vp->y + vp->height), 0);
++      float x1 = MIN2(MAX2(vp->x, vp->x + vp->width), cr->width);
++      float y1 = MIN2(MAX2(vp->y, vp->y + vp->height), cr->height);
++
++      if (i < dyn->vp.scissor_count) {
++         const VkRect2D *s = &dyn->vp.scissors[i];
++
++         x0 = MAX2(x0, s->offset.x);
++         y0 = MAX2(y0, s->offset.y);
++         x1 = MIN2(x1, (float)s->offset.x + s->extent.width);
++         y1 = MIN2(y1, (float)s->offset.y + s->extent.height);
++      }
++      if (x1 > x0 && y1 > y0) {
++         minx = MIN2(minx, x0);
++         miny = MIN2(miny, y0);
++         maxx = MAX2(maxx, x1);
++         maxy = MAX2(maxy, y1);
++      }
++   }
++   if (maxx <= minx || maxy <= miny)
++      return 0;
++   return (uint64_t)(DIV_ROUND_UP((unsigned)ceilf(maxx), 32) - (unsigned)minx / 32) *
++          (DIV_ROUND_UP((unsigned)ceilf(maxy), 32) - (unsigned)miny / 32);
++}
++
 +/* End the render before G11's tiler heap fills, see agx_g11_heap_cost */
 +static void
 +hk_g11_heap_reserve(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 +{
 +   uint64_t cost =
-+      agx_is_indirect(draw.b)
-+         ? AGX_G11_HEAP_INDIRECT
-+         : agx_g11_heap_cost((uint64_t)draw.b.count[0] * draw.b.count[1],
-+                             hk_g11_outputs(cmd));
++      (agx_is_indirect(draw.b)
++          ? AGX_G11_HEAP_INDIRECT
++          : agx_g11_heap_cost((uint64_t)draw.b.count[0] * draw.b.count[1],
++                              hk_g11_outputs(cmd))) +
++      AGX_G11_HEAP_TILE_B * hk_g11_tiles(cmd);
 +   struct hk_cs *cs = cmd->current_cs.gfx;
 +
 +   if (cs && cs->g11_heap_B && cs->g11_heap_B + cost > AGX_G11_HEAP_BUDGET) {
@@ -4607,7 +4645,7 @@ index b29bcbc..576bf8d 100644
  static void
  hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
  {
-@@ -3527,6 +4056,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3527,6 +4094,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
     draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
     draw_.index_size = cmd->state.gfx.index.size;
  
@@ -4619,7 +4657,7 @@ index b29bcbc..576bf8d 100644
     uint64_t stat_ia_verts = hk_pipeline_stat_addr(
        cmd, VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT);
  
-@@ -3550,7 +4084,37 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3550,7 +4122,37 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
  
     hk_foreach_view(cmd) {
        struct agx_draw draw = draw_;
@@ -4657,7 +4695,7 @@ index b29bcbc..576bf8d 100644
        /* If we failed to allocate a control stream, we've already lost the
         * device. Just drop the draw so we don't crash.
         */
-@@ -3631,6 +4195,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
+@@ -3631,6 +4233,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
        }
  
        enum agx_primitive topology = cmd->state.gfx.topology;
