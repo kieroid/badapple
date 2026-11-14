@@ -64,6 +64,8 @@ depmod -b $O/usr $K
 sudo tar --numeric-owner --format=gnu --exclude='./usr/lib/libgallium-*' -C $C -cf $P/rootfs.tar .
 sudo chown "$(id -u):$(id -g)" $P/rootfs.tar
 tar --numeric-owner --owner=0 --group=0 --format=gnu -C $O -rf $P/rootfs.tar .
+# files for pmbootstrap's user, which exists before the overlay goes in
+tar --numeric-owner --owner=10000 --group=10000 --format=gnu -C tools/pmos/home -rf $P/rootfs.tar home/user/.config
 
 rm -rf $P/disktools
 build/alpine/sbin/apk.static --arch aarch64 --usermode --allow-untrusted --no-scripts \

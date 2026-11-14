@@ -1,3 +1,7 @@
 # Suspend works (s2idle), so let phosh offer it in the power menu
 [sm.puri.phosh]
 enable-suspend=true
+
+# The battery percentage does not fit beside the notch
+[org.gnome.desktop.interface]
+show-battery-percentage=false

@@ -78,7 +78,19 @@ driver multiplies a 1.4x saturation into that matrix at probe, picked by eye.
 echo 2047 > /sys/class/backlight/230400000.dsi.0/brightness
 ```
 
-DCS 0x51 with an 11 bit level. Range 139 to 2047, iBoot leaves 740.
+DCS 0x51 with an 11 bit level. Range 139 to 2047, iBoot leaves 740. The
+panel driver starts at 1023 and sends the level whenever the display turns
+on, so the backlight value and the panel agree.
+
+## Notch
+
+phosh learns the notch and rounded corners from gmobile, which only has
+panels built in; the phone runs a gmobile 0.7.2 with an `apple,d331p.json`
+(radius 117, notch x 308 to 934, 90 high), built by hand. Beside the notch
+there are about 97 logical pixels a side at scale 3, and phosh puts the
+clock on the right. To keep the battery clear of the notch, the battery
+percentage is off (gschema override) and the clock is smaller
+(`tools/pmos/home`, user CSS).
 
 ## Debugging
 

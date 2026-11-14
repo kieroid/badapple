@@ -1,0 +1,8 @@
+/*
+ * XS Max notch: phosh moves the clock right of the notch, and with the
+ * battery it must fit in the ~97 px there, even at 12:59 PM.
+ */
+phosh-top-panel .phosh-topbar-clock.right {
+  padding-left: 0;
+  font-size: 13px;
+}
