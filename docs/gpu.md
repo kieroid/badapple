@@ -334,7 +334,10 @@ tilebuffer, up to 16 bytes per pixel, and blends read it with `ld_tile`, as
 Apple's G11 blends do. Fragment programs write both. The copy costs every
 fragment a tile store (glmark2's plain scenes ran 10% slower), so in GL a
 batch starts without it and the first draw that reads its render targets
-turns it on, in a new batch. Vulkan does the same within a render: a new
+turns it on, in a new batch. A batch with only fast clears so far turns it on
+in place, since its background program writes the clear to the copy too: GTK
+clears then blends every pass, and this took Nautilus scrolling from about 5
+extra renders a frame to under 1. Vulkan does the same within a render: a new
 control stream whose background program reloads the copy. Layered renders
 and renders that clear part of the image with draws keep it from the start;
 switching there broke two dEQP render pass cases. The background program

@@ -6621,7 +6621,7 @@ index ab205bf..ad7f722 100644
        if ((ent.channels == AGX_CHANNELS_R32G32B32_EMULATED ||
             util_format_is_luminance(tex_format) ||
 diff --git a/src/gallium/drivers/asahi/agx_state.c b/src/gallium/drivers/asahi/agx_state.c
-index 616dd6d..7c30f45 100644
+index 616dd6d..85adacd 100644
 --- a/src/gallium/drivers/asahi/agx_state.c
 +++ b/src/gallium/drivers/asahi/agx_state.c
 @@ -29,6 +29,7 @@
@@ -7777,7 +7777,7 @@ index 616dd6d..7c30f45 100644
     /* We must legalize feedback loops and transform feedback writes before
      * getting the batch, since once we have the batch we're not allowed to flush
      * the bound render targets.
-@@ -4919,6 +5480,85 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+@@ -4919,6 +5480,90 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     agx_legalize_xfb(ctx);
  
     struct agx_batch *batch = agx_get_batch(ctx);
@@ -7819,9 +7819,14 @@ index 616dd6d..7c30f45 100644
 +      }
 +
 +      if (copied && !batch->g11_tib) {
-+         if (batch->initialized) {
++         if (batch->draw) {
 +            agx_flush_batch_for_reason(ctx, batch, "G11 tilebuffer copy");
 +            batch = agx_get_batch(ctx);
++         } else if (batch->initialized) {
++            /* Only fast clears so far, which the background program also
++             * writes to the copy. GTK clears then blends, every pass.
++             */
++            batch->tilebuffer_layout = tib;
 +         }
 +
 +         batch->g11_tib = true;
@@ -7863,7 +7868,7 @@ index 616dd6d..7c30f45 100644
     uint64_t ib = 0;
     size_t ib_extent = 0;
  
-@@ -5202,7 +5842,10 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
+@@ -5202,7 +5847,10 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
  
     uint8_t *out = agx_encode_state(batch, batch->vdm.current);
  
@@ -7875,7 +7880,7 @@ index 616dd6d..7c30f45 100644
        agx_push(out, VDM_STATE, cfg)
           cfg.restart_index_present = true;
  
-@@ -5314,6 +5957,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5314,6 +5962,19 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
        batch->incoherent_writes = true;
     }
  
@@ -7895,7 +7900,7 @@ index 616dd6d..7c30f45 100644
     agx_update_descriptors(batch, cs);
     agx_upload_uniforms(batch);
  
-@@ -5344,6 +6000,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
+@@ -5344,6 +6005,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           cs ? agx_nr_tex_descriptors(batch, cs) : 0;
        cfg.sampler_state_register_count =
           translate_sampler_state_count(ctx, stage);
