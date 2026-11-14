@@ -80,3 +80,12 @@ CPU hotplug does not work with spin-table.
 
 The low 16 bits are the temperature in 1/64 degrees. Sensor 2 reads zero and is
 skipped.
+
+## Suspend
+
+s2idle works: phosh's Suspend (`enable-suspend` in `sm.puri.phosh`), woken by
+the power button. genpd switches off at suspend every domain whose devices
+are all suspended, and a driver without PM callbacks counts as suspended. The
+GPU, display, GPIO, i2c3, touch and serial drivers have none and came back
+reset, the GPU firmware for good, so `t8020.dtsi` marks their domains always
+on. Wifi blocks suspend unless left in D0, see wireless.md.

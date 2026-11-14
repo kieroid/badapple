@@ -1,0 +1,34 @@
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+index 55f4d7b97..0749399db 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+@@ -2646,6 +2646,15 @@ static int brcmf_pcie_pm_enter_D3(struct device *dev)
+ 	brcmf_pcie_fwcon_timer(devinfo, false);
+ 	brcmf_bus_change_state(bus, BRCMF_BUS_DOWN);
+ 
++	/*
++	 * The BCM4377 firmware never takes the D3 request, it stays in the
++	 * mailbox and the whole suspend fails. Keep the chip running in D0.
++	 */
++	if (devinfo->ci->chip == BRCM_CC_4377_CHIP_ID) {
++		devinfo->pdev->dev_flags |= PCI_DEV_FLAGS_NO_D3;
++		return 0;
++	}
++
+ 	devinfo->mbdata_completed = false;
+ 	brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D3_INFORM);
+ 
+@@ -2676,6 +2685,13 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
+ 	devinfo = bus->bus_priv.pcie->devinfo;
+ 	brcmf_dbg(PCIE, "Enter, dev=%p, bus=%p\n", dev, bus);
+ 
++	/* Still in D0, see brcmf_pcie_pm_enter_D3() */
++	if (devinfo->ci->chip == BRCM_CC_4377_CHIP_ID) {
++		brcmf_bus_change_state(bus, BRCMF_BUS_UP);
++		brcmf_pcie_fwcon_timer(devinfo, true);
++		return 0;
++	}
++
+ 	/* Check if device is still up and running, if so we are ready */
+ 	if (brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->intmask) != 0) {
+ 		brcmf_dbg(PCIE, "Try to wakeup device....\n");

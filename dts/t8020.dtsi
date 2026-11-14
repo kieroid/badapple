@@ -1160,3 +1160,63 @@
 &ps_usb2dev {
 	apple,always-on;
 };
+
+/*
+ * Keep powered through suspend the blocks whose drivers have no suspend
+ * code. genpd switches off at s2idle every domain whose devices are all
+ * suspended, and a driver without PM callbacks counts as suspended, so these
+ * came back reset: the GPU firmware, which cannot be restarted, was gone and
+ * the next job timed out, and the display, pins, touch and serial lost their
+ * setup. Nothing here is ever switched off at runtime anyway.
+ */
+&ps_gfx {
+	apple,always-on;
+};
+
+&ps_disp0_busif {
+	apple,always-on;
+};
+
+&ps_disp0_fe {
+	apple,always-on;
+};
+
+&ps_disp0_be {
+	apple,always-on;
+};
+
+&ps_disp0_gp0 {
+	apple,always-on;
+};
+
+&ps_disp0_gp1 {
+	apple,always-on;
+};
+
+&ps_disp0_ppp {
+	apple,always-on;
+};
+
+&ps_disp0_hilo {
+	apple,always-on;
+};
+
+&ps_mipi_dsi {
+	apple,always-on;
+};
+
+&ps_gpio {
+	apple,always-on;
+};
+
+&ps_i2c3 {
+	apple,always-on;
+};
+
+&ps_spi1 {
+	apple,always-on;
+};
+
+&ps_uart0 {
+	apple,always-on;
+};

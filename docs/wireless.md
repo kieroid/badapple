@@ -31,6 +31,11 @@ fills in MAC addresses, antenna SKU and calibration.
   `LD_LIBRARY_PATH`, and a `udhcpc` script.
 - `CONFIG_BRCMDBG` with `brcmfmac.debug=0x108000` puts the firmware console in
   dmesg.
+- Suspend: the firmware never takes the D3 request. It stays in the mailbox
+  (`h2d 1`), with the config space mailbox and with doorbell 1, and the
+  whole suspend fails with -EIO. `linux-0021` leaves the BCM4377 running in
+  D0 through suspend instead (`PCI_DEV_FLAGS_NO_D3`). Firmware with
+  protocol 7 may want the request on the control ring; not tried.
 
 ## Bluetooth
 

@@ -47,7 +47,8 @@ where the data bit does not follow the pin.
 | start | `CTRL` = 0xd |
 
 `linux-0010` adds a polled mode for it, picked by `apple,t8020-spi`. No runtime
-PM: `spi1` does not power back up after a suspend.
+PM, and `spi1` does not power back up after a suspend, so its domain is
+always on.
 
 ## HBPP
 

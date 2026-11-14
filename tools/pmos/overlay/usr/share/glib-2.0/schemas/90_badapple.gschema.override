@@ -1,4 +1,3 @@
-# Resume from suspend leaves the backlight at 1, so do not suspend when idle
-[org.gnome.settings-daemon.plugins.power]
-sleep-inactive-battery-type='nothing'
-sleep-inactive-ac-type='nothing'
+# Suspend works (s2idle), so let phosh offer it in the power menu
+[sm.puri.phosh]
+enable-suspend=true
