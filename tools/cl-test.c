@@ -16,14 +16,13 @@
 #define NH 65536
 #define IW 64
 
-/* Reference conversions, exact for every half including denormals */
+/* Reference conversion: the CPU's own, exact for every half */
 static float half_to_float(unsigned short h)
 {
-	unsigned e = h >> 10 & 0x1f, m = h & 0x3ff;
-	float f = e == 0 ? m * 0x1p-24f : e == 31 ? (m ? __builtin_nanf("") : __builtin_inff())
-				: (1024 + m) * __builtin_ldexpf(1.0f, (int)e - 25);
+	_Float16 f;
 
-	return h & 0x8000 ? -f : f;
+	memcpy(&f, &h, sizeof(f));
+	return f;
 }
 
 static const char *src =
@@ -282,12 +281,9 @@ int main(void)
 		CL(clEnqueueNDRangeKernel(q, kf2h, 1, NULL, &global, &local, 0, NULL, NULL));
 		CL(clEnqueueReadBuffer(q, bh, CL_TRUE, 0, sizeof(h2), h2, 0, NULL, NULL));
 		for (bad = i = 0; i < NH; i++) {
-			/* round to nearest even, in units of 2^-24 */
-			unsigned q24 = (i >> 1) >> 10, rem = (i >> 1) & 1023;
-			unsigned short w = q24 + (rem > 512 || (rem == 512 && (q24 & 1)));
+			_Float16 w = f[i];
 
-			w |= i & 1 ? 0x8000 : 0;
-			bad += h2[i] != w;
+			bad += memcmp(&h2[i], &w, sizeof(w)) != 0;
 		}
 		check("float to half", bad);
 	}

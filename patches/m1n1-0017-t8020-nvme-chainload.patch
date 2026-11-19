@@ -56,7 +56,7 @@ index 1dd7c68..1f058ed 100644
          return ret;
  
 diff --git a/src/nvme.c b/src/nvme.c
-index e6e3aa0..1d2b602 100644
+index e6e3aa0..c6701b9 100644
 --- a/src/nvme.c
 +++ b/src/nvme.c
 @@ -3,10 +3,12 @@
@@ -151,20 +151,15 @@ index e6e3aa0..1d2b602 100644
  static void nvme_poll_syslog(void)
  {
      struct rtkit_message msg;
-@@ -235,8 +259,26 @@ static bool nvme_ctrl_shutdown(void)
+@@ -235,8 +259,21 @@ static bool nvme_ctrl_shutdown(void)
      return FIELD_GET(NVME_CSTS_SHST, read32(nvme_base + NVME_CSTS)) == NVME_CSTS_SHST_DONE;
  }
  
 +static void nvme_fill_tcb(struct apple_nvmmu_tcb *tcb, struct nvme_command *cmd)
 +{
 +    memset(tcb, 0, sizeof(*tcb));
-+    tcb->opcode = 0;
-+    if (!cmd->prp1)
-+        tcb->dma_flags = 0;
-+    else if (cmd->opcode & 1)
-+        tcb->dma_flags = NVMMU_TCB_DMA_TO_DEVICE;
-+    else
-+        tcb->dma_flags = NVMMU_TCB_DMA_FROM_DEVICE;
++    if (cmd->prp1)
++        tcb->dma_flags = cmd->opcode & 1 ? NVMMU_TCB_DMA_TO_DEVICE : NVMMU_TCB_DMA_FROM_DEVICE;
 +    tcb->slot_id = cmd->tag;
 +    tcb->len = cmd->cdw12;
 +    tcb->prp1 = cmd->prp1;
@@ -179,7 +174,7 @@ index e6e3aa0..1d2b602 100644
   * Returns: Expected tag in CQ
   */
  static u8 nvme_submit_command_t8015(struct nvme_queue *q, struct nvme_command *cmd)
-@@ -244,7 +286,7 @@ static u8 nvme_submit_command_t8015(struct nvme_queue *q, struct nvme_command *c
+@@ -244,7 +281,7 @@ static u8 nvme_submit_command_t8015(struct nvme_queue *q, struct nvme_command *c
      u8 tag = q->sq_tail;
      struct nvme_command *queue_cmd;
  
@@ -188,7 +183,7 @@ index e6e3aa0..1d2b602 100644
          queue_cmd = &q->cmds[tag];
      else
          queue_cmd = (void *)q->cmds + (tag * NVME_IOSQES_128);
-@@ -252,6 +294,10 @@ static u8 nvme_submit_command_t8015(struct nvme_queue *q, struct nvme_command *c
+@@ -252,6 +289,10 @@ static u8 nvme_submit_command_t8015(struct nvme_queue *q, struct nvme_command *c
      memcpy(queue_cmd, cmd, sizeof(*cmd));
  
      queue_cmd->tag = ++(q->sq_tail);
@@ -199,7 +194,7 @@ index e6e3aa0..1d2b602 100644
      if (q->sq_tail == nvme_queue_size)
          q->sq_tail = 0;
  
-@@ -281,19 +327,7 @@ static u8 nvme_submit_command_t8103(struct nvme_queue *q, struct nvme_command *c
+@@ -281,19 +322,7 @@ static u8 nvme_submit_command_t8103(struct nvme_queue *q, struct nvme_command *c
  
      tcb = &q->tcbs[tag];
      queue_cmd->tag = tag;
@@ -220,7 +215,7 @@ index e6e3aa0..1d2b602 100644
  
      /* make sure ANS3 can see the command and tcb before triggering it */
      dma_wmb();
-@@ -326,6 +360,7 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
+@@ -326,6 +355,7 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
  
          /* we need a DMA read barrier here since the CQ will be updated using DMA */
          dma_rmb();
@@ -228,7 +223,7 @@ index e6e3aa0..1d2b602 100644
          memcpy(&cqe, &q->cqes[q->cq_head], sizeof(cqe));
          if ((cqe.status & 1) != q->cq_phase)
              continue;
-@@ -338,7 +373,7 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
+@@ -338,7 +368,7 @@ static bool nvme_exec_command(struct nvme_queue *q, struct nvme_command *cmd, u6
              printf("nvme: invalid tag in CQ: expected %d but got %d\n", cq_tag, cqe.tag);
          }
  
@@ -237,7 +232,7 @@ index e6e3aa0..1d2b602 100644
              write32(nvmmu_base + NVMMU_TCB_INVAL, cqe.tag);
              if (read32(nvmmu_base + NVMMU_TCB_STAT))
                  printf("nvme: NVMMU invalidation for tag %d failed\n", cqe.tag);
-@@ -389,6 +424,9 @@ bool nvme_init(void)
+@@ -389,6 +419,9 @@ bool nvme_init(void)
      if (adt_is_compatible(adt, node, "iop-ans2,t8015"))
          // A11 has NVMe with normal submission queues and 16 tags.
          nvme_type = NVME_T8015;
@@ -247,7 +242,7 @@ index e6e3aa0..1d2b602 100644
      else if (adt_get_property(adt, node, "nvme-secure-bar"))
          // M4+ generations have the nvme-secure-bar property and 10+ regs.
          // They use reg[3] for NVMMU registers and reg[9] for NVMe registers,
-@@ -446,6 +484,18 @@ bool nvme_init(void)
+@@ -446,6 +479,18 @@ bool nvme_init(void)
      if (!nvme_rtkit)
          goto out_sart;
  
@@ -266,7 +261,7 @@ index e6e3aa0..1d2b602 100644
      if (!rtkit_boot(nvme_rtkit))
          goto out_rtkit;
  
-@@ -462,6 +512,11 @@ bool nvme_init(void)
+@@ -462,6 +507,11 @@ bool nvme_init(void)
          write32(nvmmu_base + NVMMU_NUM, nvme_queue_size - 1);
          write64_lo_hi(nvmmu_base + NVMMU_ASQ_BASE, (u64)adminq.tcbs);
          write64_lo_hi(nvmmu_base + NVMMU_IOSQ_BASE, (u64)ioq.tcbs);
@@ -278,7 +273,7 @@ index e6e3aa0..1d2b602 100644
      }
  
      /* setup admin queue */
-@@ -480,6 +535,17 @@ bool nvme_init(void)
+@@ -480,6 +530,17 @@ bool nvme_init(void)
      /* setup IO queue */
      struct nvme_command cmd;
  
@@ -296,7 +291,7 @@ index e6e3aa0..1d2b602 100644
      memset(&cmd, 0, sizeof(cmd));
      cmd.opcode = NVME_ADMIN_CMD_CREATE_CQ;
      cmd.prp1 = (u64)ioq.cqes;
-@@ -490,6 +556,9 @@ bool nvme_init(void)
+@@ -490,6 +551,9 @@ bool nvme_init(void)
          printf("nvme: create cq command failed\n");
          goto out_disable_ctrl;
      }
@@ -306,7 +301,7 @@ index e6e3aa0..1d2b602 100644
  
      memset(&cmd, 0, sizeof(cmd));
      cmd.opcode = NVME_ADMIN_CMD_CREATE_SQ;
-@@ -502,6 +571,8 @@ bool nvme_init(void)
+@@ -502,6 +566,8 @@ bool nvme_init(void)
          printf("nvme: create sq command failed\n");
          goto out_delete_cq;
      }
@@ -315,7 +310,7 @@ index e6e3aa0..1d2b602 100644
  
      if (nvme_type == NVME_T8132) {
          // Extra write required to set up the IO queues on M4+.
-@@ -662,5 +733,14 @@ bool nvme_read(u32 nsid, u64 lba, void *buffer)
+@@ -662,5 +728,14 @@ bool nvme_read(u32 nsid, u64 lba, void *buffer)
      cmd.cdw11 = lba >> 32;
      cmd.cdw12 = 0; // #blocks, 0-based -> 1 block a 4096 bytes
  
