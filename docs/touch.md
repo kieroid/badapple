@@ -29,8 +29,8 @@
 
 4. Release reset. The interrupt line goes low.
 
-The interrupt pin needs mode 7 (input, interrupt off). iBoot leaves mode 0,
-where the data bit does not follow the pin.
+The interrupt pin needs mode 7 (input, interrupt off). In iBoot's mode 0 the
+data bit does not follow the pin.
 
 ## SPI
 
@@ -46,15 +46,14 @@ where the data bit does not follow the pin.
 | always set | `CFG` bit 14 |
 | start | `CTRL` = 0xd |
 
-`linux-0010` adds a polled mode for it, picked by `apple,t8020-spi`. No runtime
-PM, and `spi1` does not power back up after a suspend, so its domain is
-always on.
+`linux-0010` adds a polled mode for it (`apple,t8020-spi`). No runtime PM,
+and `spi1` does not power back up after suspend, so its domain is always on.
 
 ## HBPP
 
 The bootloader. 32 bit fields go as two 16 bit halves, low half first, high
-byte first: 0x400b0fd4 is `0f d4 40 0b`. Each command is followed by `1a a1` in
-its own transfer.
+byte first: 0x400b0fd4 is `0f d4 40 0b`. Each command is followed by `1a a1`
+in its own transfer.
 
 | command | sent | reply |
 |---|---|---|
@@ -65,7 +64,7 @@ its own transfer.
 ## Firmware
 
 The im4p holds a plist of steps: `Binary` and `Property` write data,
-`ReadModifyWrite` and `Poll` touch registers. Default calibration is included.
+`ReadModifyWrite` and `Poll` touch registers, default calibration included.
 `tools/mtfw.py` turns it into 40 ops, 393 KB, at
 `/lib/firmware/apple/d331p-mtfw.bin`. Replay takes 2.6 s.
 

@@ -9,7 +9,7 @@ Nothing third party is vendored here. `make deps` clones the trees below into
 | Linux | HoolockLinux/linux | GPL-2.0 |
 | Hoolock docs, 16K config, IM4M templates, empty trustcache | HoolockLinux/docs | MIT |
 | Test initramfs | HoolockLinux/HoolockRD | see that repo |
-| Jig firmware | Trussh/usbliter8ra1n-patch | MIT |
+| Jig firmware | kiki/germin8 on forgejo.toe.quest, a Pico 2 W fork of usbliter8 | see that repo |
 | Mesa, cloned by `make rootfs` | mesa/mesa on freedesktop.org | MIT |
 
 ## Ours
@@ -17,8 +17,8 @@ Nothing third party is vendored here. `make deps` clones the trees below into
 - `tools/dfuboot.py`.
 - `tools/iboot-image4-patch.py`. It finds the callback by the `EKEY` literal,
   like hBootPatcher (MIT), but no code is copied from it.
-- `tools/mtfw.py`. Apple's touch firmware is converted at build time and never
-  leaves `build/`.
+- `tools/mtfw.py`, `tools/bcmfw.py`. Apple's firmware is converted or renamed
+  at build time and never leaves `build/`.
 
 The older Trussh/usbliter8 has no license file, so nothing is taken from it.
 The order `tools/iboot-boot.sh` sends images in comes from

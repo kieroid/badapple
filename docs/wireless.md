@@ -22,20 +22,18 @@ fills in MAC addresses, antenna SKU and calibration.
 
 ## Wifi
 
-- `linux-0014` leaves both DART protection bits off on 4K page DARTs. That
-  DART reads `NO_WRITE` as no read, which killed the firmware on its first
-  transmit.
+- `linux-0014` leaves both protection bits off on 4K page DARTs, which read
+  `NO_WRITE` as no read. That killed the firmware on its first transmit.
 - The sysfs firmware fallback is off, or the missing `regulatory.db` stalls
   boot for 60 s.
-- Connecting needs `iw` and `wpa_supplicant`, here from Alpine 3.21 with
-  `LD_LIBRARY_PATH`, and a `udhcpc` script.
+- pmOS connects with NetworkManager. The plain ramdisk needs `iw`,
+  `wpa_supplicant` and a `udhcpc` script brought in.
 - `CONFIG_BRCMDBG` with `brcmfmac.debug=0x108000` puts the firmware console in
   dmesg.
-- Suspend: the firmware never takes the D3 request. It stays in the mailbox
-  (`h2d 1`), with the config space mailbox and with doorbell 1, and the
-  whole suspend fails with -EIO. `linux-0021` leaves the BCM4377 running in
-  D0 through suspend instead (`PCI_DEV_FLAGS_NO_D3`). Firmware with
-  protocol 7 may want the request on the control ring; not tried.
+- Suspend: the firmware never takes the D3 request (`h2d 1`, through the
+  config space mailbox or doorbell 1), and suspend fails with -EIO.
+  `linux-0021` keeps the BCM4377 in D0 instead (`PCI_DEV_FLAGS_NO_D3`).
+  Protocol 7 firmware may want the request on the control ring; not tried.
 
 ## Bluetooth
 
@@ -47,5 +45,4 @@ fills in MAC addresses, antenna SKU and calibration.
 - wakes the chip before the bootstage read: write 1 to BAR0 `0x154`, wait
   25 us, up to four times
 
-Do not read the Bluetooth BARs after a failed probe. The read takes the phone
-down.
+Reading the Bluetooth BARs after a failed probe takes the phone down.

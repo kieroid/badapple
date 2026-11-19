@@ -18,13 +18,13 @@ needs 64 bit writes.
 | 7 | | 2436 MHz, boost |
 | 8 | | 2496 MHz, boost |
 
-The frequencies come from a live ADT. The IPSW's copies are zeroed. iBoot leaves
-both clusters at pstate 2.
+Frequencies come from the live ADT; the IPSW's are zeroed. iBoot leaves both
+clusters at pstate 2.
 
 ## Voltage
 
-iBoot leaves the CPU rails ignoring software, so anything above pstate 2 runs
-on pstate 2's voltage and hangs sooner or later.
+iBoot leaves the CPU rails ignoring software, so anything above pstate 2
+runs on pstate 2's voltage and hangs.
 
 | PMGR | what |
 |---|---|
@@ -34,14 +34,13 @@ on pstate 2's voltage and hangs sooner or later.
 | 0x23b0a0024 | E CPU rail |
 
 A code is 3.125 mV steps above 375 or 400 mV. Each pstate row (cluster +
-0x70000, 0x20 bytes per row) has its code in the top byte of the first word.
-m1n1 clears bits 14:8 and writes each rail's code back. The driver raises the
-voltage before raising the clock and lowers it after.
+0x70000, 0x20 bytes a row) has its code in the first word's top byte. m1n1
+clears bits 14:8 and writes each rail's code back. The driver raises the
+voltage before the clock and lowers it after.
 
 ## Pstate 1
 
-A switch to pstate 1 gets there, then `BUSY` never clears. Left out of the OPP
-tables.
+Switching to pstate 1 works, then `BUSY` never clears. Not in the OPP tables.
 
 ## Thermal
 
@@ -51,5 +50,5 @@ Two zones, `pcpu-thermal` and `ecpu-thermal`: passive at 85 C, critical at
 
 ## Boost
 
-Pstate 7 works when asked for by hand. 8 reads back as 7. It likely needs
-cpuidle that powers a core down. Neither is in the OPP tables.
+Pstate 7 works by hand, 8 reads back as 7. Likely needs cpuidle that powers
+a core down. Neither is in the OPP tables.

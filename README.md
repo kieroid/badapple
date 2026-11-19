@@ -1,22 +1,21 @@
 # Bad Apple
 
 Mainline Linux on the Apple A12 (T8020), tested on the iPhone XS Max.
+Tethered boot, root on the NVMe. Hardware notes and postmarketOS are in
+[docs](docs/README.md).
 
-The boot is tethered and reads nothing off the NAND, so the NAND can hold ext4.
-Hardware notes are in [docs](docs/README.md).
-
-Written with assistance from an LLM, including the reverse engineering of
-Apple firmware and binaries, so this is not clean-room work. Human reviewed,
-and tested on real hardware.
+Written with help from an LLM, including the reverse engineering of Apple
+firmware, so this is not clean-room work. Human reviewed and tested on real
+hardware.
 
 ## Boot chain
 
 ```text
 SecureROM, pwned by usbliter8
   -> patched iBSS
-  -> device tree and an empty trustcache
+  -> device tree, empty trustcache, coprocessor firmware
   -> m1n1, in place of a restore kernelcache
-  -> Linux, 16K pages, initramfs
+  -> Linux, 16K pages
 ```
 
 ## Dependencies
@@ -30,65 +29,37 @@ SecureROM, pwned by usbliter8
 | `git`, `curl`, `unzip` | `make deps`, `make initramfs` |
 | `ipsw` | the IPSW and img4 |
 | `irecovery` | recovery mode |
-| [usbliter8ra1n-patch](https://github.com/Trussh/usbliter8ra1n-patch) | pwned DFU |
+| [germin8](https://forgejo.toe.quest/kiki/germin8) on a Pico 2 W | pwned DFU, booting without a PC |
 
 And an iPhone11,6 IPSW.
 
 ## Build
 
 ```sh
-make deps     # clone the trees and apply patches/
+make deps     # clone the trees, apply patches/
 make images IPSW=/path/to/unpacked/ipsw IPSW_FILE=/path/to.ipsw
-make boot     # builds the rest and boots
+make boot     # build the rest and boot
 ```
 
-`make images` runs once. `IPSW_FILE` is the `.ipsw` itself, since the wifi
-firmware is in its root image.
+`make images` runs once. `IPSW_FILE` is the `.ipsw` itself, for the wifi
+firmware in its root image.
 
-For the GPU coprocessor, run `make ticket TICKET_IPSW=/path/to/signed.ipsw`
-with the phone in DFU before `make images`. It fetches a ticket for your phone,
-which iBoot needs to load coprocessor firmware.
+For the GPU, run `make ticket TICKET_IPSW=/path/to/signed.ipsw` with the phone
+in DFU before `make images`. iBoot loads coprocessor firmware only with a
+ticket for your phone.
 
 ## Run
 
-Pwn the phone, then run `make boot`. It shows up as `05ac:4142` with telnet
-on `172.16.42.1`. `tools/tsh.py "cmd"` runs one command. The first USB attach
-often fails and the phone retries, so give it a minute.
-
-## postmarketOS
-
-Phosh on the NVMe, with our kernel and Mesa. Needs `pmbootstrap` and sudo.
-
-```sh
-make rootfs && tools/pmos/build.sh
-make bootbin BOOTARGS="earlycon console=tty0 ignore_loglevel cma=64M hl_rd=nvme"
-```
-
-Then boot the plain ramdisk with `make boot`, serve the repo with
-`python3 -m http.server 8003 --bind 172.16.42.2`, and run:
-
-```sh
-tools/tsh.py "wget -qO- http://172.16.42.2:8003/tools/pmos/install.sh | sh"
-```
-
-It erases `nvme0n1p2` and puts `boot.bin` on the FAT partition. To boot pmOS,
-pwn the phone again and run:
-
-```sh
-tools/iboot-boot.sh build/iboot/kernelcache-chainload.img4
-```
-
-That kernelcache is m1n1 alone, about 420 KB. It boots the newest `.bin` on the FAT
-partition, which holds m1n1 and Linux. Hold volume down at boot for a menu of
-them: the volume buttons move, the side button boots.
-
-The user is `user`, password `147147`.
+Put the phone in DFU on the jig and hold BOOTSEL for a second to run only the
+exploit. Move the cable to the PC and run `make boot`. The phone shows up as
+`05ac:4142` with telnet on `172.16.42.1`; `tools/tsh.py "cmd"` runs one
+command. The first USB attach often fails and retries, so give it a minute.
 
 ## Status
 
-| Display | Touch | USB | Storage | SMP | cpufreq | Wifi | Bluetooth | Audio | Cellular | GPU |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :x: | :x: | :construction: |
+| Display | Touch | USB | Storage | SMP | cpufreq | Wifi | Bluetooth | GPU | Audio | Sensors | Camera | Cellular |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :construction: | :construction: | :x: | :x: | :x: |
 
 Full list in [docs](docs/README.md#status).
 

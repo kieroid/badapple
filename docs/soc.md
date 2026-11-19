@@ -45,13 +45,13 @@ Raw `reg` is an offset from the parent. `get_reg()` gives the real address.
 
 ## CPUs
 
-CPU `reg` is `MPIDR_EL1 & 0xffffff`: 0x0 to 0x3 (E), 0x10100 and 0x10101 (P).
-The ADT drops Aff2, and with its values m1n1 drops every CPU node.
+CPU `reg` is `MPIDR_EL1 & 0xffffff`: 0x0 to 0x3 (E), 0x10100 and 0x10101
+(P). The ADT drops Aff2, which makes m1n1 drop every CPU node.
 
 ## AIC
 
-- `ps_aic` needs `apple,always-on`. Otherwise genpd turns it off and no
-  interrupt arrives.
+- `ps_aic` needs `apple,always-on`, or genpd turns it off and no interrupt
+  arrives.
 - `AIC_WHOAMI` is 4 on the boot CPU. `linux-0003` maps it.
 - `TARGET_CPU` takes `BIT(AIC_WHOAMI)`.
 - 1024 interrupts. Reading 0x4200 raises an abort.
@@ -83,9 +83,9 @@ skipped.
 
 ## Suspend
 
-s2idle works: phosh's Suspend (`enable-suspend` in `sm.puri.phosh`), woken by
-the power button. genpd switches off at suspend every domain whose devices
-are all suspended, and a driver without PM callbacks counts as suspended. The
-GPU, display, GPIO, i2c3, touch and serial drivers have none and came back
-reset, the GPU firmware for good, so `t8020.dtsi` marks their domains always
-on. Wifi blocks suspend unless left in D0, see wireless.md.
+s2idle works from phosh's Suspend (`enable-suspend` in `sm.puri.phosh`),
+woken by the power button. genpd turns off every domain whose devices are
+suspended, and a driver without PM callbacks counts as suspended. The GPU,
+display, GPIO, i2c3, touch and serial drivers have none and came back reset
+(the GPU firmware for good), so their domains are always on. Wifi has to stay
+in D0, see wireless.md.

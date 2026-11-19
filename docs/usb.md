@@ -10,10 +10,9 @@
 
 ## The DART
 
-`usb-device` sits behind `dart-usb`, stream 0. iBSS leaves it in bypass, which
-does not reach DRAM at 0x800000000. Without a mapping the controller faults on
-its first DMA (`AHBErr`). m1n1 maps stream 0, and Linux has
-`iommus = <&dart_usb 0>`.
+`usb-device` is behind `dart-usb`, stream 0. iBSS leaves it in bypass, which
+does not reach DRAM at 0x800000000, so the first DMA faults (`AHBErr`). m1n1
+maps stream 0, and Linux has `iommus = <&dart_usb 0>`.
 
 ## Remap widget
 
@@ -28,14 +27,12 @@ Signal bits are 8 higher than on M1: cable connected is `BIT(16)`, host role
 ## Non-posted writes
 
 `bus@239000000` needs its own `nonposted-mmio`, or dwc2 drops every write. A
-plain `ioremap` here raised an SError that killed the E cores. Use
-`ioremap_np` everywhere on this SoC.
+plain `ioremap` raised an SError that killed the E cores. Use `ioremap_np`
+everywhere on this SoC.
 
 ## First attach
 
-Most boots the host resets twice and never assigns an address. Pulling the
-cable fixes it, so the gadget toggles `DCTL_SFTDISCON` every 3 s, up to 10
-times, until it has an address.
-
-Timing traps: move the cable before iBSS runs, do not poll the gadget, and
-anything busy in m1n1 looks like broken USB.
+The host often resets twice and never assigns an address. Replugging fixes
+it, so the gadget toggles `DCTL_SFTDISCON` every 3 s, up to 10 times, until
+it has one. Move the cable before iBSS runs, do not poll the gadget, and note
+that anything busy in m1n1 looks like broken USB.

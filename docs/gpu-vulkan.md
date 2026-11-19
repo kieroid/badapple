@@ -1,0 +1,73 @@
+# GPU Vulkan and tests
+
+## Honeykrisp
+
+`src/asahi/vulkan` runs vkcube under weston, with the GL driver's G11 paths.
+
+| what | G11 |
+|---|---|
+| descriptors | no bindless: a shader's textures and samplers get state slots at compile time, and each draw copies them from the bound sets. Samplers 1-14 are the API's, 0 txf, 15 txf-lod. No update-after-bind |
+| CDM stream link | not known, so compute streams are not merged; one stream past 64 KiB (about 20 dispatches) would need it |
+| copies | meta copy shaders store texel by texel |
+| WSI | linear modifiers only. weston's `bo geometry out of bounds` is harmless |
+| internal kernels | libagx kernels launch with no texture or sampler states; a count without the USC words broke every later compute job |
+| layers | not known; one render per layer (up to 256). The vertex shader moves other layers' primitives out of the clip volume, writing the position once at the end |
+| background loads | clamped to the image, since background programs run for the whole tile |
+| faults | any fault wedges G11 until reboot, so every buffer access is bounds checked and missing texture states get the null texture |
+| dynamic indexing | a chain of constant index accesses, at most 16. Samples reach states 0-15, stores up to 48 |
+| spilled targets | the shader reads the target's size from its descriptor through u0_u1 |
+| draws | indexed draws follow a restart token. Kernels that write draws fill exactly the G11 size |
+| LOD query | computed from derivatives, without the sampler's bias and clamps |
+| blending | as in GL: tilebuffer copy, else the texture unit and a new render |
+| layered writes | array, 3D or cube writes end the thread, so storage views get a 2D buffer-like PBE and the shader writes at the texel index (`lower_g11_layered_store`) |
+| twiddling | Y takes the low bit, long side's extra bits on top. Shaders follow ail's CPU tiling |
+| fetch above level 0 | a txl through txf-lod, which clamps level and layer; out of range reads the zero border |
+| barriers | `memory_barrier_2` and texture flush end the thread, so only `memory_barrier` and image barriers |
+| blits | one layer per render (`blit_per_layer`) |
+| border colours | none in hardware: clamp to border reads transparent black. For opaque borders the shader adds the colour times the weight of texels outside the image (`g11_lower_border`). Skipped past 32 samples; no anisotropy or depth compare |
+| preambles | none for shaders with texture instructions |
+| texture registers | samples, image writes and tile accesses reach r0-r31 only; the allocator moves operands there |
+| clip distances | output select 31:24 must be set even with only clip distances. Only the first plane works |
+| R9G9B9E5 copies | as R32_UINT |
+
+dEQP-VK, every 200th mustpass case (16112): 3916 pass, 28 fail, 10903 not
+supported, 40 internal errors, no GPU wedges.
+`textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment` times out
+and is skipped. Fails: more than 16 textures, some compressed texel views,
+offsets with mirrored repeat, extra clip planes, fp16 denormals, MSAA,
+compressed image to buffer copies. Vulkan 1.3; 1.4 needs subgroups.
+
+Missing: multisampling (1 sample advertised, not conformant), geometry,
+tessellation and transform feedback (they hang the TA), dual source blending,
+sparse residency, multiple viewports, custom border colours, more than 16
+texture reads per shader.
+
+## Running
+
+`make rootfs` cross-builds Mesa, `tools/cl-test.c` and `tools/gl-test.c` into
+an Alpine rootfs. `tools/rootfs-push.sh` copies it to a tmpfs on the phone.
+
+```sh
+make rootfs
+./tools/rootfs-push.sh
+build/venv/bin/python tools/tsh.py "chroot /mnt/a env RUSTICL_ENABLE=asahi cl-test"
+```
+
+`gl-test` draws a 300x200 renderbuffer with EGL surfaceless and checks it on
+the CPU. Run it detached, since `tsh.py` kills what it leaves running:
+
+```sh
+build/venv/bin/python tools/tsh.py "setsid chroot /mnt/a gl-test > /mnt/a/tmp/gl.txt 2>&1 < /dev/null &"
+```
+
+On screen, GBM on `/dev/dri/card1` (`apple-h11p`) goes through kmsro to the
+GPU. The display only scans contiguous memory, so scanout buffers are dumb
+buffers the GPU imports, linear. kmscube runs at about 470 fps:
+
+```sh
+build/venv/bin/python tools/tsh.py "chroot /mnt/a sh -c 'sleep 30 | kmscube -D /dev/dri/card1'"
+build/venv/bin/python tools/tsh.py "chroot /mnt/a vulkaninfo --summary"
+```
+
+Without the phone: build Mesa with `-Dtools=drm-shim` and run with
+`LD_PRELOAD=libasahi_noop_drm_shim.so ASAHI_MESA_DEBUG=trace`.
