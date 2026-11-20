@@ -30,14 +30,16 @@
 | clip distances | output select 31:24 must be set even with only clip distances. Only the first plane works |
 | R9G9B9E5 copies | as R32_UINT |
 | multisampling | 2x and 4x, as in GL: colour is a linear array of a layer per sample, depth and stencil keep ZLS's layout. The descriptor carries log2 samples in bits 191:190 (software), and a sample fetch reads layer * samples + sample. Colour copies are byte row kernels; depth and stencil copy as one wide texel per pixel. No sample shading, no multisampled storage images |
+| texture slots | samples reach states 0-15 only: the 4-bit field has no high bits (every free sample bit tried with 32 states bound, none reached state 16). Reads get slots first, stores the ones after |
+| compressed views | an uncompressed view of one compressed mip level leaves the mipmapped bit clear and describes one level, or the hardware reads another layout |
 | varying index | `st_vary` with a register index clears bit 22, for separately compiled vertex shaders |
 
-dEQP-VK, every 200th mustpass case (15486): 4214 pass, 27 fail, 11219 not
+dEQP-VK, every 200th mustpass case (15486): 4220 pass, 21 fail, 11220 not
 supported, 40 internal errors, no GPU wedges.
 `textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment` times out
-and is skipped. Fails: more than 16 textures, some compressed texel views,
-offsets with mirrored repeat, extra clip planes, fp16 denormals,
-compressed image to buffer copies. Every 20th multisampling case (2795):
+and is skipped. Fails: more than 16 textures, ASTC stores through views of
+mip levels past 0, null descriptors of 32-bit integer formats, fp16
+denormals, a racy memory model case. Every 20th multisampling case (2795):
 311 pass, no fails. Vulkan 1.3; 1.4 needs subgroups.
 
 Missing: sample shading, 8x and 16x samples, geometry,

@@ -5175,7 +5175,7 @@ index a28add8..eb06b65 100644
  hk_image_plane_base_address(const struct hk_image_plane *plane)
  {
 diff --git a/src/asahi/vulkan/hk_image_view.c b/src/asahi/vulkan/hk_image_view.c
-index 27e13e7..c8eea52 100644
+index 27e13e7..299c31a 100644
 --- a/src/asahi/vulkan/hk_image_view.c
 +++ b/src/asahi/vulkan/hk_image_view.c
 @@ -53,6 +53,15 @@ static enum agx_texture_dimension
@@ -5259,6 +5259,15 @@ index 27e13e7..c8eea52 100644
     agx_pack(out, TEXTURE, cfg) {
        cfg.dimension = translate_image_view_type(
           view->vk.view_type, view->vk.image->samples > 1, layers > 1, usage);
+@@ -324,7 +384,7 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
+       }
+ 
+       cfg.srgb = (desc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB);
+-      cfg.unk_mipmapped = layout->levels > 1;
++      cfg.unk_mipmapped = layout->levels > 1 && !(AGX_G11 && denom.x > 1);
+       cfg.srgb_2_channel = cfg.srgb && util_format_colormask(desc) == 0x3;
+ 
+       if (layout->compressed) {
 @@ -337,7 +397,7 @@ pack_texture(struct hk_image_view *view, unsigned view_plane,
                                     (layer * layout->compression_layer_stride_B);
        }
@@ -5381,8 +5390,13 @@ index 27e13e7..c8eea52 100644
               (hk_image_view_type_is_array(view->vk.view_type))) {
  
              cfg.depth_linear = layers;
-@@ -471,14 +586,24 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
-          cfg.levels = image->vk.mip_levels;
+@@ -468,17 +583,28 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+             cfg.layers = layers;
+          }
+ 
+-         cfg.levels = image->vk.mip_levels;
++         /* A G11 uncompressed view of a compressed level is one image */
++         cfg.levels = (AGX_G11 && denom.x > 1) ? 1 : image->vk.mip_levels;
  
           if (layout->tiling == AIL_TILING_LINEAR) {
 -            cfg.stride = ail_get_linear_stride_B(layout, level) - 4;
@@ -5408,7 +5422,7 @@ index 27e13e7..c8eea52 100644
        }
  
        if (layout->compressed && usage != HK_DESC_USAGE_EMRT) {
-@@ -516,6 +641,63 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
+@@ -516,6 +642,63 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
           }
        }
     };
@@ -5843,7 +5857,7 @@ index bbd98c0..e16b8d2 100644
     sampler->lod_bias_fp16 = _mesa_float_to_half(info->mipLodBias);
  
 diff --git a/src/asahi/vulkan/hk_shader.c b/src/asahi/vulkan/hk_shader.c
-index e12393a..074ea79 100644
+index e12393a..8458d29 100644
 --- a/src/asahi/vulkan/hk_shader.c
 +++ b/src/asahi/vulkan/hk_shader.c
 @@ -105,6 +105,28 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
@@ -6387,7 +6401,7 @@ index e12393a..074ea79 100644
  
     agx_preprocess_nir(nir);
  
-@@ -996,6 +1465,123 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
+@@ -996,6 +1465,133 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
                                        : VK_SUCCESS;
  }
  
@@ -6416,17 +6430,24 @@ index e12393a..074ea79 100644
 +   return (*n)++;
 +}
 +
++struct hk_g11_handles {
++   struct hk_shader_info *info;
++   bool stores;
++};
++
 +/*
 + * Give each descriptor the shader reads a texture or sampler state slot
 + * (hk_g11_bind_state fills them). The bindless handles stay for descriptor
-+ * reads such as size queries; G11 samples from the slot.
++ * reads such as size queries; G11 samples from the slot. Reads go first, in
++ * states 0-15, and image stores take the slots after them.
 + */
 +static bool
 +hk_g11_lower_handles(nir_builder *b, nir_instr *instr, void *data)
 +{
-+   struct hk_shader_info *info = data;
++   struct hk_g11_handles *ctx = data;
++   struct hk_shader_info *info = ctx->info;
 +
-+   if (instr->type == nir_instr_type_tex) {
++   if (instr->type == nir_instr_type_tex && !ctx->stores) {
 +      nir_tex_instr *tex = nir_instr_as_tex(instr);
 +      int s = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
 +      bool progress = false;
@@ -6490,6 +6511,9 @@ index e12393a..074ea79 100644
 +      return false;
 +
 +   bool store = intr->intrinsic == nir_intrinsic_bindless_image_store;
++   if (store != ctx->stores)
++      return false;
++
 +   int slot = hk_g11_slot(info->g11_tex, &info->g11_nr_tex,
 +                          store ? HK_G11_MAX_TEXTURES : HK_G11_MAX_READ_TEXTURES,
 +                          h);
@@ -6511,7 +6535,7 @@ index e12393a..074ea79 100644
  static bool
  lower_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  {
-@@ -1073,6 +1659,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1073,6 +1669,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                 struct hk_shader *shader, mesa_shader_stage sw_stage, bool hw,
                 nir_xfb_info *xfb_info, unsigned set_count)
  {
@@ -6519,7 +6543,7 @@ index e12393a..074ea79 100644
     unsigned nr_vbos = 0;
     bool kill_psiz = false;
  
-@@ -1158,6 +1745,18 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1158,6 +1755,21 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
  
     shader->info.set_count = set_count;
  
@@ -6527,8 +6551,11 @@ index e12393a..074ea79 100644
 +   /* Descriptor offsets must be constant to find the slot */
 +   NIR_PASS(_, nir, nir_opt_copy_prop);
 +   NIR_PASS(_, nir, nir_opt_constant_folding);
-+   NIR_PASS(_, nir, nir_shader_instructions_pass, hk_g11_lower_handles,
-+            nir_metadata_control_flow, &shader->info);
++   for (unsigned stores = 0; stores < 2; ++stores) {
++      struct hk_g11_handles ctx = {.info = &shader->info, .stores = stores};
++      NIR_PASS(_, nir, nir_shader_instructions_pass, hk_g11_lower_handles,
++               nir_metadata_control_flow, &ctx);
++   }
 +
 +   /* Spilled render targets follow the shader's textures */
 +   if (sw_stage == MESA_SHADER_FRAGMENT)
@@ -6538,7 +6565,7 @@ index e12393a..074ea79 100644
     /* XXX: rename */
     NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos);
     NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
-@@ -1178,7 +1777,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1178,7 +1790,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        .no_stop = nir->info.stage == MESA_SHADER_FRAGMENT,
        .has_scratch = !nir->info.internal,
        .promote_constants = true,
@@ -6548,7 +6575,7 @@ index e12393a..074ea79 100644
     };
  
     /* For now, sample shading is always dynamic. Indicate that. */
-@@ -1283,10 +1883,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
+@@ -1283,10 +1896,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
        hk_shader_destroy(dev, shader);
     }
  
@@ -6561,7 +6588,7 @@ index e12393a..074ea79 100644
  }
  
  static void dump_shader_ir(
-@@ -1952,6 +2552,18 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1952,6 +2565,18 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
        agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
     }
  
@@ -6580,7 +6607,7 @@ index e12393a..074ea79 100644
     if (s->b.uses_txf)
        agx_usc_push_packed(&b, SAMPLER, dev->dev.txf_sampler);
  
-@@ -1961,6 +2573,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1961,6 +2586,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
  
     if (fragment)
        agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, s->b.fragment_props);
