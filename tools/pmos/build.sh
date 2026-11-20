@@ -1,9 +1,23 @@
 #!/bin/bash
-# Build build/pmos/rootfs.tar for nvme0n1p2: postmarketOS phosh from
-# pmbootstrap, our Mesa from "make rootfs", the phone firmware from the
-# ramdisk cpios, and tools/pmos/overlay. Also disktools.tar, the mkfs tools
-# install.sh runs from the ramdisk. Needs sudo to read the root-owned chroot.
+# build.sh [plasma|phosh]: build build/pmos/rootfs.tar for nvme0n1p2:
+# postmarketOS with Plasma Mobile (default) or phosh from pmbootstrap, our
+# Mesa from "make rootfs", the phone firmware from the ramdisk cpios, and
+# tools/pmos/overlay. Also disktools.tar, the mkfs tools install.sh runs from
+# the ramdisk. Needs sudo to read the root-owned chroot.
 set -e
+UI=${1:-plasma}
+case $UI in
+plasma)
+	PMB_UI=plasma-mobile
+	# a terminal, a file manager and a browser for WebGL, not the full app set
+	INSTALL_ARGS="--no-recommends --add qmlkonsole,dolphin,firefox-esr,spectacle" ;;
+phosh)
+	PMB_UI=phosh
+	INSTALL_ARGS= ;;
+*)
+	echo "usage: $0 [plasma|phosh]" >&2
+	exit 1 ;;
+esac
 cd "$(dirname "$0")/../.."
 P=build/pmos
 C=$P/work/chroot_rootfs_qemu-aarch64
@@ -29,21 +43,26 @@ is_default_channel = False
 jobs = $(nproc)
 kernel = lts
 service_manager = openrc
-ui = phosh
+ui = $PMB_UI
 work = $PWD/$P/work
 CFG
+sed -i "s/^ui = .*/ui = $PMB_UI/" $P/pmbootstrap.cfg
 [ -d $P/work ] || yes "" | pmbootstrap -c $P/pmbootstrap.cfg init >/dev/null
-pmbootstrap -c $P/pmbootstrap.cfg -y install --no-image --password 147147
+pmbootstrap -c $P/pmbootstrap.cfg -y install --no-image --password 147147 $INSTALL_ARGS
 pmbootstrap -c $P/pmbootstrap.cfg shutdown
 
 rm -rf $O
-mkdir -p $O/usr/lib $O/usr/share $O/etc/OpenCL $O/etc/phosh $O/etc/apk/keys
+mkdir -p $O/usr/lib $O/usr/share $O/etc/OpenCL $O/etc/apk/keys
 cp -a tools/pmos/overlay/. $O/
 cp -a $R/usr/lib/dri $R/usr/lib/gbm $R/usr/lib/libgallium-*.so $R/usr/lib/libvulkan_asahi.so \
     $R/usr/lib/lib{EGL,gbm,GL,GLESv1_CM,GLESv2,RusticlOpenCL}.so* $O/usr/lib/
 cp -a $R/usr/share/vulkan $R/usr/share/drirc.d $O/usr/share/
 cp -a $R/etc/OpenCL/vendors $O/etc/OpenCL/
-{ cat $C/usr/share/phosh/phoc.ini; printf '\n[output:DSI-1]\nscale = 3\n'; } > $O/etc/phosh/phoc.ini
+# Plasma takes its scale from kwinoutputconfig.json, set on first start
+if [ $UI = phosh ]; then
+	mkdir -p $O/etc/phosh
+	{ cat $C/usr/share/phosh/phoc.ini; printf '\n[output:DSI-1]\nscale = 3\n'; } > $O/etc/phosh/phoc.ini
+fi
 # pmbootstrap leaves etc/apk/keys empty, and apk then refuses every package
 cp $C/usr/share/apk/keys/*.pub $C/usr/share/apk/keys/aarch64/*.pub $O/etc/apk/keys/
 # compile our gschema override in with the chroot's schemas

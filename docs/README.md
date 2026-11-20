@@ -23,10 +23,11 @@ Registers, gotchas, and things that turned out wrong.
 
 ## postmarketOS
 
-Phosh on the NVMe, with our kernel and Mesa. Needs `pmbootstrap` and sudo.
+Plasma Mobile or phosh on the NVMe, with our kernel and Mesa. Needs
+`pmbootstrap` and sudo. `build.sh` takes `plasma` (the default) or `phosh`.
 
 ```sh
-make rootfs && tools/pmos/build.sh
+make rootfs && tools/pmos/build.sh plasma
 make bootbin BOOTARGS="earlycon console=tty0 ignore_loglevel cma=64M hl_rd=nvme"
 ```
 
@@ -65,7 +66,7 @@ The user is `user`, password `147147`.
 | Boost, cpuidle | :x: |
 | PCIe, wifi, Bluetooth | :white_check_mark: |
 | GPU compute, OpenCL through Rusticl | :white_check_mark: |
-| GPU GLES 3.0 (dEQP-GLES3 44523 pass), kmscube, glmark2, weston, phosh | :white_check_mark: |
+| GPU GLES 3.0 (dEQP-GLES3 44523 pass), kmscube, glmark2, weston, phosh, Plasma Mobile | :white_check_mark: |
 | GPU Vulkan through Honeykrisp, vkcube under weston | :white_check_mark: |
 | GPU tilebuffer, Vulkan MSAA and descriptor indexing | :x: |
 | Audio DMA (SIO), MCA at 48 kHz | :white_check_mark: |

@@ -1,0 +1,38 @@
+[
+    {
+        "data": [
+            {
+                "connectorName": "DSI-1",
+                "mode": {
+                    "flags": 1,
+                    "height": 2688,
+                    "refreshRate": 60000,
+                    "width": 1242
+                },
+                "scale": 3,
+                "transform": "Normal"
+            }
+        ],
+        "name": "outputs"
+    },
+    {
+        "data": [
+            {
+                "lidClosed": false,
+                "outputs": [
+                    {
+                        "enabled": true,
+                        "outputIndex": 0,
+                        "position": {
+                            "x": 0,
+                            "y": 0
+                        },
+                        "priority": 1,
+                        "replicationSource": ""
+                    }
+                ]
+            }
+        ],
+        "name": "setups"
+    }
+]

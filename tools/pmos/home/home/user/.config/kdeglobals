@@ -1,0 +1,8 @@
+[General]
+font=Noto Sans,12,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+menuFont=Noto Sans,12,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+smallestReadableFont=Noto Sans,10,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+toolBarFont=Noto Sans,12,-1,5,400,0,0,0,0,0,0,0,0,0,0,1
+
+[WM]
+activeFont=Noto Sans,12,-1,5,400,0,0,0,0,0,0,0,0,0,0,1

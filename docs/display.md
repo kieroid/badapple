@@ -87,6 +87,11 @@ panels, so the phone runs a hand-built gmobile 0.7.2 with `apple,d331p.json`
 pixels a side at scale 3. The battery percentage is off (gschema override)
 and the clock is smaller (`tools/pmos/home`, user CSS) to fit.
 
+Plasma Mobile reads a device preset named after the DT compatible,
+`apple,d331p.conf` in `plasma-mobile-device-presets` (tools/pmos/overlay): a
+132 px (44 pt) status bar and 15 px side padding. It has no notch gap, so
+the battery percentage is off and the icons stay right of the notch.
+
 ## Debugging
 
 - Keep simpledrm on the console while testing.

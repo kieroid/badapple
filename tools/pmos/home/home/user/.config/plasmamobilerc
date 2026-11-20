@@ -1,0 +1,11 @@
+[General]
+# The percentage does not fit beside the notch
+showBatteryPercentage=false
+# 15 px status bar text, near iOS's 17 pt at scale 3
+statusBarScaleFactor=1.4
+
+# Same as the apple,d331p device preset, in case envmanager has not copied it
+[Panels][WhenOnTop]
+statusBarHeight=132
+statusBarLeftPadding=15
+statusBarRightPadding=15
