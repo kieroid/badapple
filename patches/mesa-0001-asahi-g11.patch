@@ -732,7 +732,7 @@ index 07bf42a..ed46c9f 100644
           value = nir_u2u16(&b, value);
  
 diff --git a/src/asahi/compiler/agx_nir_lower_texture.c b/src/asahi/compiler/agx_nir_lower_texture.c
-index 616d0b0..6098ec3 100644
+index 616d0b0..668f0b5 100644
 --- a/src/asahi/compiler/agx_nir_lower_texture.c
 +++ b/src/asahi/compiler/agx_nir_lower_texture.c
 @@ -8,6 +8,7 @@
@@ -973,13 +973,14 @@ index 616d0b0..6098ec3 100644
     nir_def *r =
        nir_bcsel(b, oob, nir_imm_int(b, 0xFFF0), nir_channel(b, coord, c));
  
-@@ -706,6 +849,59 @@ agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
+@@ -706,6 +849,60 @@ agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
     return progress;
  }
  
 +/*
 + * G11 has no LOD query: compute the LOD from coordinate derivatives. The
-+ * sampler's LOD bias and clamps are not applied.
++ * sampler's LOD bias is not applied; Vulkan applies its clamps and mip filter
++ * after this (g11_clamp_lod_query in hk_shader.c).
 + */
 +static bool
 +g11_lower_lod_query(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
@@ -1033,7 +1034,7 @@ index 616d0b0..6098ec3 100644
  bool
  agx_nir_lower_texture(nir_shader *s)
  {
-@@ -743,6 +939,10 @@ agx_nir_lower_texture(nir_shader *s)
+@@ -743,6 +940,10 @@ agx_nir_lower_texture(nir_shader *s)
      * 16-bit multisample indices) but before lowering queries (as the lowering
      * generates txs for array textures).
      */
@@ -1044,7 +1045,7 @@ index 616d0b0..6098ec3 100644
     NIR_PASS(progress, s, nir_shader_instructions_pass, lower_regular_texture,
              nir_metadata_none, NULL);
     NIR_PASS(progress, s, nir_shader_instructions_pass, lower_tex_crawl,
-@@ -773,6 +973,48 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
+@@ -773,6 +974,48 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
     return true;
  }
  
@@ -5922,7 +5923,7 @@ index bbd98c0..e16b8d2 100644
     sampler->lod_bias_fp16 = _mesa_float_to_half(info->mipLodBias);
  
 diff --git a/src/asahi/vulkan/hk_shader.c b/src/asahi/vulkan/hk_shader.c
-index e12393a..8458d29 100644
+index e12393a..82f06ff 100644
 --- a/src/asahi/vulkan/hk_shader.c
 +++ b/src/asahi/vulkan/hk_shader.c
 @@ -105,6 +105,28 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
@@ -6042,7 +6043,7 @@ index e12393a..8458d29 100644
  static nir_def *
  query_custom_border(nir_builder *b, nir_tex_instr *tex)
  {
-@@ -659,6 +748,242 @@ agx_nir_lower_custom_border(nir_shader *nir)
+@@ -659,6 +748,291 @@ agx_nir_lower_custom_border(nir_shader *nir)
     return nir_shader_tex_pass(nir, lower, nir_metadata_none, NULL);
  }
  
@@ -6065,6 +6066,55 @@ index e12393a..8458d29 100644
 +g11_bits(nir_builder *b, nir_def *x, unsigned offset, unsigned bits)
 +{
 +   return nir_iand_imm(b, nir_ushr_imm(b, x, offset), BITFIELD_MASK(bits));
++}
++
++/*
++ * The compiler computes G11 LOD queries from derivatives (agx_nir_lower_texture)
++ * and cannot see the sampler. Clamp the level it returns to the sampler's
++ * minLod and maxLod, held as u4.6 in bits 9:0 and 19:10 of the sampler word.
++ */
++static bool
++g11_clamp_lod_query(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
++{
++   if (tex->op != nir_texop_lod)
++      return false;
++
++   b->cursor = nir_after_instr(&tex->instr);
++   nir_def *w = nir_channel(
++      b,
++      nir_build_texture_query(b, tex, nir_texop_sampler_descriptor_amd, 4,
++                              nir_type_uint32, false, false),
++      0);
++   nir_def *min_lod = nir_fmul_imm(b, nir_u2f32(b, nir_iand_imm(b, w, 0x3ff)),
++                                   1.0 / 64);
++   nir_def *max_lod = nir_fmul_imm(
++      b, nir_u2f32(b, nir_iand_imm(b, nir_ushr_imm(b, w, 10), 0x3ff)), 1.0 / 64);
++   nir_def *last = nir_fadd_imm(
++      b,
++      nir_i2f32(b, nir_build_texture_query(b, tex, nir_texop_query_levels, 1,
++                                           nir_type_int32, false, false)),
++      -1.0);
++
++   nir_def *res = nir_f2f32(b, &tex->def);
++   nir_def *level = nir_fmin(
++      b, nir_fmax(b, nir_fmin(b, nir_channel(b, res, 0), max_lod), min_lod),
++      last);
++
++   /* The mip filter (bits 28:27) picks the level: none gives 0, nearest
++    * rounds as ceil(level + 0.5) - 1. Null descriptors query 0.
++    */
++   nir_def *mip = nir_iand_imm(b, nir_ushr_imm(b, w, 27), 3);
++   nir_def *rounded = nir_fmax(
++      b, nir_fadd_imm(b, nir_fceil(b, nir_fadd_imm(b, level, 0.5)), -1.0),
++      nir_imm_float(b, 0.0));
++   level = nir_bcsel(b, nir_ieq_imm(b, mip, 1), rounded, level);
++   level = nir_bcsel(b, nir_ior(b, nir_ieq_imm(b, mip, 0),
++                                nir_flt_imm(b, last, 0.0)),
++                     nir_imm_float(b, 0.0), level);
++   nir_def *out = nir_f2fN(b, nir_vector_insert_imm(b, res, level, 0),
++                           tex->def.bit_size);
++   nir_def_rewrite_uses_after(&tex->def, out);
++   return true;
 +}
 +
 +static bool
@@ -6285,7 +6335,7 @@ index e12393a..8458d29 100644
  static nir_def *
  query_min_lod(nir_builder *b, nir_tex_instr *tex, bool int_coords)
  {
-@@ -783,6 +1108,125 @@ should_lower_robust(const nir_intrinsic_instr *intr, const void *_)
+@@ -783,6 +1157,125 @@ should_lower_robust(const nir_intrinsic_instr *intr, const void *_)
            intr->intrinsic == nir_intrinsic_image_deref_atomic_swap;
  }
  
@@ -6411,7 +6461,7 @@ index e12393a..8458d29 100644
  static void
  hk_lower_nir(struct hk_device *dev, nir_shader *nir,
               const struct vk_pipeline_robustness_state *rs, bool is_multiview,
-@@ -794,6 +1238,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -794,6 +1287,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
        rs = &vk_robustness_disabled;
     }
  
@@ -6420,7 +6470,7 @@ index e12393a..8458d29 100644
     const nir_opt_access_options access_options = {
        .is_vulkan = true,
     };
-@@ -814,8 +1260,15 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -814,8 +1309,15 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     if (nir->info.stage == MESA_SHADER_VERTEX) {
        if (is_multiview)
           hk_lower_multiview(nir);
@@ -6436,11 +6486,14 @@ index e12393a..8458d29 100644
     if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
        NIR_PASS(_, nir, nir_lower_patch_vertices,
                 nir->info.tess.tcs_vertices_out, NULL);
-@@ -855,6 +1308,20 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -855,6 +1357,23 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
        NIR_PASS(_, nir, agx_nir_lower_custom_border);
     }
  
 +#if AGX_G11
++   NIR_PASS(_, nir, nir_shader_tex_pass, g11_clamp_lod_query,
++            nir_metadata_control_flow, NULL);
++
 +   if (g11_border_samples(nir) <= 32)
 +      NIR_PASS(_, nir, nir_shader_tex_pass, g11_lower_border,
 +               nir_metadata_none, NULL);
@@ -6457,7 +6510,7 @@ index e12393a..8458d29 100644
     NIR_PASS(_, nir, hk_nir_lower_descriptors, rs, set_layout_count,
              set_layouts);
     NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
-@@ -928,6 +1395,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -928,6 +1447,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
  
     NIR_PASS(_, nir, agx_nir_lower_texture);
     NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
@@ -6466,7 +6519,7 @@ index e12393a..8458d29 100644
  
     agx_preprocess_nir(nir);
  
-@@ -996,6 +1465,133 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
+@@ -996,6 +1517,133 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
                                        : VK_SUCCESS;
  }
  
@@ -6600,7 +6653,7 @@ index e12393a..8458d29 100644
  static bool
  lower_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  {
-@@ -1073,6 +1669,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1073,6 +1721,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                 struct hk_shader *shader, mesa_shader_stage sw_stage, bool hw,
                 nir_xfb_info *xfb_info, unsigned set_count)
  {
@@ -6608,7 +6661,7 @@ index e12393a..8458d29 100644
     unsigned nr_vbos = 0;
     bool kill_psiz = false;
  
-@@ -1158,6 +1755,21 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1158,6 +1807,21 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
  
     shader->info.set_count = set_count;
  
@@ -6630,7 +6683,7 @@ index e12393a..8458d29 100644
     /* XXX: rename */
     NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos);
     NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
-@@ -1178,7 +1790,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1178,7 +1842,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        .no_stop = nir->info.stage == MESA_SHADER_FRAGMENT,
        .has_scratch = !nir->info.internal,
        .promote_constants = true,
@@ -6640,7 +6693,7 @@ index e12393a..8458d29 100644
     };
  
     /* For now, sample shading is always dynamic. Indicate that. */
-@@ -1283,10 +1896,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
+@@ -1283,10 +1948,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
        hk_shader_destroy(dev, shader);
     }
  
@@ -6653,7 +6706,7 @@ index e12393a..8458d29 100644
  }
  
  static void dump_shader_ir(
-@@ -1952,6 +2565,18 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1952,6 +2617,18 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
        agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
     }
  
@@ -6672,7 +6725,7 @@ index e12393a..8458d29 100644
     if (s->b.uses_txf)
        agx_usc_push_packed(&b, SAMPLER, dev->dev.txf_sampler);
  
-@@ -1961,6 +2586,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1961,6 +2638,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
  
     if (fragment)
        agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, s->b.fragment_props);

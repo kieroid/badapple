@@ -32,6 +32,7 @@
 | multisampling | 2x and 4x, as in GL: colour is a linear array of a layer per sample, depth and stencil keep ZLS's layout. The descriptor carries log2 samples in bits 191:190 (software), and a sample fetch reads layer * samples + sample. Colour copies are byte row kernels; depth and stencil copy as one wide texel per pixel. No sample shading, no multisampled storage images |
 | texture slots | samples reach states 0-15 only: the 4-bit field has no high bits (every free sample bit tried with 32 states bound, none reached state 16). Reads get slots first, stores the ones after |
 | compressed views | an uncompressed view of one compressed mip level leaves the mipmapped bit clear and describes one level, or the hardware reads another layout |
+| LOD query | computed from derivatives (G11 has none). hk then clamps the level to the sampler's minLod and maxLod and rounds it for the nearest mip filter, read from the sampler word. All 190 `texturequerylod` cases pass. GL's query skips the clamps |
 | sparse | binding only. Resident and aliased sparse images are refused in the format query: dEQP made them anyway when the format query allowed it, and their reads wedged the GPU. The kernel takes 256 bind ops a call, so Mesa splits bigger binds |
 | varying index | `st_vary` with a register index clears bit 22, for separately compiled vertex shaders |
 
@@ -47,8 +48,10 @@ Texture sweep (every 16th `texture` case, every 5th `texture_functions` and
 `texture_gather` case, robustness2 sampled images): no change from the early
 kill fix, and GLES3 texture functions pass 1678 of 1679. Older bugs it found:
 
-- `texture_functions` offsets with the `mirrored` wrap, and
-  `texturequerylod` `clamp_min` and `clamp_max`, fail.
+- `texture_functions` cases with the `mirrored` wrap fail. That is
+  mirror-clamp-to-edge, which G11 does not have and hk does not advertise
+  (`samplerMirrorClampToEdge`), but dEQP uses it without checking. The wrap
+  field acts as 2 bits on G11: 4 to 7 repeat 0 to 3.
 - Some `clamp` and `texture_gather` cases take over 5 minutes to compile.
 
 All 9872 `texture.swizzle` cases: 2056 pass, the rest not supported. Every
