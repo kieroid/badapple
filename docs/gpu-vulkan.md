@@ -33,14 +33,15 @@
 | texture slots | samples reach states 0-15 only: the 4-bit field has no high bits (every free sample bit tried with 32 states bound, none reached state 16). Reads get slots first, stores the ones after |
 | compressed views | an uncompressed view of one compressed mip level leaves the mipmapped bit clear and describes one level, or the hardware reads another layout |
 | LOD query | computed from derivatives (G11 has none). hk then clamps the level to the sampler's minLod and maxLod and rounds it for the nearest mip filter, read from the sampler word. All 190 `texturequerylod` cases pass. GL's query skips the clamps |
+| image store then load | a load of a texel the same invocation just stored can read the old value when neighbouring texels belong to other workgroups: stale texture cache lines. Mesa's `image_barrier` fences, `0xf596`, waits and the G13 load cache bits (43 to 47) do not help, and G11 has no `flush_memory_to_texture`. The 13 ASTC `texel_view_compatible` `image_store` fails are this |
 | sparse | binding only. Resident and aliased sparse images are refused in the format query: dEQP made them anyway when the format query allowed it, and their reads wedged the GPU. The kernel takes 256 bind ops a call, so Mesa splits bigger binds |
 | varying index | `st_vary` with a register index clears bit 22, for separately compiled vertex shaders |
 
 dEQP-VK, every 200th mustpass case (15486): 4220 pass, 21 fail, 11220 not
 supported, 40 internal errors, no GPU wedges.
 `textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment` times out
-and is skipped. Fails: more than 16 textures, ASTC stores through views of
-mip levels past 0, fp16 denormals, a racy memory model case. Every 20th
+and is skipped. Fails: more than 16 textures, a load after a store to the
+same texel (below), fp16 denormals, a racy memory model case. Every 20th
 multisampling case (2795): 311 pass, no fails. Vulkan 1.3; 1.4 needs
 subgroups.
 
