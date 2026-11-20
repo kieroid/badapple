@@ -29,15 +29,18 @@
 | texture registers | samples, image writes and tile accesses reach r0-r31 only; the allocator moves operands there |
 | clip distances | output select 31:24 must be set even with only clip distances. Only the first plane works |
 | R9G9B9E5 copies | as R32_UINT |
+| multisampling | 2x and 4x, as in GL: colour is a linear array of a layer per sample, depth and stencil keep ZLS's layout. The descriptor carries log2 samples in bits 191:190 (software), and a sample fetch reads layer * samples + sample. Colour copies are byte row kernels; depth and stencil copy as one wide texel per pixel. No sample shading, no multisampled storage images |
+| varying index | `st_vary` with a register index clears bit 22, for separately compiled vertex shaders |
 
-dEQP-VK, every 200th mustpass case (16112): 3916 pass, 28 fail, 10903 not
+dEQP-VK, every 200th mustpass case (15486): 4214 pass, 27 fail, 11219 not
 supported, 40 internal errors, no GPU wedges.
 `textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment` times out
 and is skipped. Fails: more than 16 textures, some compressed texel views,
-offsets with mirrored repeat, extra clip planes, fp16 denormals, MSAA,
-compressed image to buffer copies. Vulkan 1.3; 1.4 needs subgroups.
+offsets with mirrored repeat, extra clip planes, fp16 denormals,
+compressed image to buffer copies. Every 20th multisampling case (2795):
+311 pass, no fails. Vulkan 1.3; 1.4 needs subgroups.
 
-Missing: multisampling (1 sample advertised, not conformant), geometry,
+Missing: sample shading, 8x and 16x samples, geometry,
 tessellation and transform feedback (they hang the TA), dual source blending,
 sparse residency, multiple viewports, custom border colours, more than 16
 texture reads per shader.

@@ -75,6 +75,8 @@ and overlap within one draw is still wrong.
 - Multisampled textures: how a sample is picked is not known. A multisampled
   colour buffer is a linear 2D array, a layer per sample, written as one tall
   image at y + sample * height, and the fragment shader loops over samples.
+  Fetches read layer * samples + sample, samples from descriptor bits
+  191:190 (software, past the linear layer stride).
   Depth and stencil keep ZLS's layout and are read as a format with a channel
   per sample.
 
