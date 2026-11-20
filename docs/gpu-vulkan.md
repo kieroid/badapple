@@ -26,7 +26,7 @@
 | blits | one layer per render (`blit_per_layer`) |
 | border colours | none in hardware: clamp to border reads transparent black. For opaque borders the shader adds the colour times the weight of texels outside the image (`g11_lower_border`). Skipped past 32 samples; no anisotropy or depth compare |
 | preambles | none for shaders with texture instructions |
-| texture registers | samples, image writes and tile accesses reach r0-r31 only; the allocator moves operands there |
+| texture registers | samples, image writes and tile accesses reach r0-r31 only; the allocator moves operands there. A sample may not take the registers of a source it kills (early kill) when they sit above r31: a `textureGrad` result went to its high gradient registers and was lost |
 | clip distances | output select 31:24 must be set even with only clip distances. Only the first plane works |
 | R9G9B9E5 copies | as R32_UINT |
 | multisampling | 2x and 4x, as in GL: colour is a linear array of a layer per sample, depth and stencil keep ZLS's layout. The descriptor carries log2 samples in bits 191:190 (software), and a sample fetch reads layer * samples + sample. Colour copies are byte row kernels; depth and stencil copy as one wide texel per pixel. No sample shading, no multisampled storage images |
@@ -38,9 +38,22 @@ dEQP-VK, every 200th mustpass case (15486): 4220 pass, 21 fail, 11220 not
 supported, 40 internal errors, no GPU wedges.
 `textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment` times out
 and is skipped. Fails: more than 16 textures, ASTC stores through views of
-mip levels past 0, null descriptors of 32-bit integer formats, fp16
-denormals, a racy memory model case. Every 20th multisampling case (2795):
-311 pass, no fails. Vulkan 1.3; 1.4 needs subgroups.
+mip levels past 0, fp16 denormals, a racy memory model case. Every 20th
+multisampling case (2795): 311 pass, no fails. Vulkan 1.3; 1.4 needs
+subgroups.
+
+Texture sweep (every 16th `texture` case, every 5th `texture_functions` and
+`texture_gather` case, robustness2 sampled images): no change from the early
+kill fix, and GLES3 texture functions pass 1678 of 1679. Older bugs it found:
+
+- `texture.swizzle` with packed formats (a4r4g4b4, a2r10g10b10) fails and
+  wedges the GPU (MMU read fault, requester 16).
+- `texture_functions` offsets with the `mirrored` wrap, and
+  `texturequerylod` `clamp_min` and `clamp_max`, fail.
+- Some `clamp` and `texture_gather` cases take over 5 minutes to compile.
+
+GLES dEQP needs `EGL_PLATFORM=surfaceless`: Mesa is built with X11 too, so
+EGL tries X11 first and fails without a display.
 
 Missing: sample shading, 8x and 16x samples, geometry,
 tessellation and transform feedback (they hang the TA), dual source blending,

@@ -1473,11 +1473,11 @@ index 6236c3c..117db5c 100644
                         (I->zs << 29);
  
 diff --git a/src/asahi/compiler/agx_register_allocate.c b/src/asahi/compiler/agx_register_allocate.c
-index 87a0335..9dd9549 100644
+index 87a0335..882cdd5 100644
 --- a/src/asahi/compiler/agx_register_allocate.c
 +++ b/src/asahi/compiler/agx_register_allocate.c
-@@ -1042,6 +1042,193 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
-    }
+@@ -1014,6 +1014,35 @@ kill_source(struct ra_ctx *rctx, const agx_instr *I, unsigned s)
+    BITSET_CLEAR_COUNT(rctx->used_regs[cls], reg, count);
  }
  
 +/*
@@ -1509,6 +1509,24 @@ index 87a0335..9dd9549 100644
 +   }
 +}
 +
+ static void
+ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
+                        unsigned first_source, unsigned last_source,
+@@ -1026,8 +1055,10 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
+     * destination to it. That way we never shuffle killed sources.
+     *
+     * To ensure that, the region must be aligned and cover the destination.
++    * A G11 low destination can't take a region past r31 (g11_low_dest).
+     */
+    if (region_base == region_end ||
++       (g11_low_operand(I, -1) && dest_end > G11_LOW_REGS) ||
+        (rctx->ssa_to_reg[I->src[first_source].value] & (dest_size - 1)) ||
+        ((region_end < dest_end) &&
+         BITSET_TEST_RANGE(rctx->used_regs[RA_GPR], region_end, dest_end)))
+@@ -1042,6 +1073,164 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
+    }
+ }
+ 
 +/*
 + * Move whatever lives in [base, base + n) to free registers elsewhere,
 + * recording the copies. Fails, changing nothing, if there is no room.
@@ -1670,7 +1688,7 @@ index 87a0335..9dd9549 100644
  /** Assign registers to SSA values in a block. */
  
  static void
-@@ -1123,6 +1310,11 @@ agx_ra_assign_local(struct ra_ctx *rctx)
+@@ -1123,6 +1312,11 @@ agx_ra_assign_local(struct ra_ctx *rctx)
           continue;
        }
  
@@ -1682,7 +1700,7 @@ index 87a0335..9dd9549 100644
        /* Search for regions of contiguous killed sources to early-kill. */
        rctx->early_killed = false;
  
-@@ -1155,7 +1347,22 @@ agx_ra_assign_local(struct ra_ctx *rctx)
+@@ -1155,7 +1349,22 @@ agx_ra_assign_local(struct ra_ctx *rctx)
           if (I->op == AGX_OPCODE_PHI && I->dest[d].has_reg)
              continue;
  
@@ -1706,7 +1724,7 @@ index 87a0335..9dd9549 100644
        }
  
        /* Free late-killed sources */
-@@ -1451,8 +1658,11 @@ agx_ra(agx_context *ctx)
+@@ -1451,8 +1660,11 @@ agx_ra(agx_context *ctx)
     enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
     BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
     unsigned max_ncomps = 1;
@@ -1718,7 +1736,7 @@ index 87a0335..9dd9549 100644
        /* Record collects/phis so we can coalesce when assigning */
        if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
            I->op == AGX_OPCODE_EXPORT || I->op == AGX_OPCODE_SPLIT) {
-@@ -1497,6 +1707,15 @@ agx_ra(agx_context *ctx)
+@@ -1497,6 +1709,15 @@ agx_ra(agx_context *ctx)
  
     max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
  
