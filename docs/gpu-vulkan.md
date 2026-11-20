@@ -32,6 +32,7 @@
 | multisampling | 2x and 4x, as in GL: colour is a linear array of a layer per sample, depth and stencil keep ZLS's layout. The descriptor carries log2 samples in bits 191:190 (software), and a sample fetch reads layer * samples + sample. Colour copies are byte row kernels; depth and stencil copy as one wide texel per pixel. No sample shading, no multisampled storage images |
 | texture slots | samples reach states 0-15 only: the 4-bit field has no high bits (every free sample bit tried with 32 states bound, none reached state 16). Reads get slots first, stores the ones after |
 | compressed views | an uncompressed view of one compressed mip level leaves the mipmapped bit clear and describes one level, or the hardware reads another layout |
+| sparse | binding only. Resident and aliased sparse images are refused in the format query: dEQP made them anyway when the format query allowed it, and their reads wedged the GPU. The kernel takes 256 bind ops a call, so Mesa splits bigger binds |
 | varying index | `st_vary` with a register index clears bit 22, for separately compiled vertex shaders |
 
 dEQP-VK, every 200th mustpass case (15486): 4220 pass, 21 fail, 11220 not
@@ -46,11 +47,12 @@ Texture sweep (every 16th `texture` case, every 5th `texture_functions` and
 `texture_gather` case, robustness2 sampled images): no change from the early
 kill fix, and GLES3 texture functions pass 1678 of 1679. Older bugs it found:
 
-- `texture.swizzle` with packed formats (a4r4g4b4, a2r10g10b10) fails and
-  wedges the GPU (MMU read fault, requester 16).
 - `texture_functions` offsets with the `mirrored` wrap, and
   `texturequerylod` `clamp_min` and `clamp_max`, fail.
 - Some `clamp` and `texture_gather` cases take over 5 minutes to compile.
+
+All 9872 `texture.swizzle` cases: 2056 pass, the rest not supported. Every
+10th `sparse_resources` case (1940): 186 pass, no fails.
 
 GLES dEQP needs `EGL_PLATFORM=surfaceless`: Mesa is built with X11 too, so
 EGL tries X11 first and fails without a display.
