@@ -38,15 +38,17 @@
 | gathers | none in hardware. Each gather is four samples at texel centres, so the sampler still wraps, borders and compares; linear filtering at a centre returns the texel. Cube texels off the face go to the next face's edge texel. Every 5th `texture_gather` graphics case: 146 pass, no fails |
 | min LOD | no LOD modes with a minimum. `textureClamp` samples at max(LOD, min) with the LOD from derivatives, gradients go through `nir_lower_tex`. Every 3rd `*clamp*` case: 756 pass, 2 fail (`mirrored`) |
 | LOD 0 | an LOD of constant 0 is not automatic LOD in fragment shaders: G11 takes that from derivatives |
+| coherent memory | plain loads and stores stay in the core's cache: no barrier makes them visible to another core, no load or store cache bit helps, and the big barriers G13 uses end the thread. Atomics are coherent, so coherent 32 and 64-bit buffer accesses and coherent R32 integer image accesses become atomics (`g11_coherent_atomics`, `g11_coherent_image_atomic`). Other image formats stay plain. SPIR-V texel availability (`devicecoherent`) leaves its barrier before the store and after the load, where `nir_lower_memory_model` drops it, so the G11 pass runs first and reads those barriers. Every 10th `message_passing` case: 81 pass, no fails (35 failed before) |
 | varying index | `st_vary` with a register index clears bit 22, for separately compiled vertex shaders |
 
 dEQP-VK, every 200th mustpass case (15486): 4220 pass, 21 fail, 11220 not
 supported, 40 internal errors, no GPU wedges.
 `textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment` times out
 and is skipped. Fails: more than 16 textures, a load after a store to the
-same texel (below), fp16 denormals, a racy memory model case. Every 20th
-multisampling case (2795): 311 pass, no fails. Vulkan 1.3; 1.4 needs
-subgroups.
+same texel (below), fp16 denormals, memory model cases. The last two are
+fixed: see `half denormals` in gpu-shaders.md and `coherent memory` above.
+Every 20th multisampling case (2795): 311 pass, no fails. Vulkan 1.3; 1.4
+needs subgroups.
 
 Texture sweep (every 16th `texture` case, every 5th `texture_functions` and
 `texture_gather` case, robustness2 sampled images): no change from the early

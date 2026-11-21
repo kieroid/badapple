@@ -81,7 +81,7 @@ driver at G11: OpenCL through Rusticl, GLES through EGL. `AGX_G11` is in
 | sqrt | no srsqrt: x * rsqrt(x), 0 and inf passed through |
 | rounding | floor only; ceil, trunc and roundeven built from it |
 | SIMD groups | none, so no subgroups |
-| half denormals | flushed in every f16 source, compares and constants too |
+| half denormals | flushed in f16 arithmetic sources, compares and constants, but min, max and clamp pass them through. Vulkan gets neither denorm preserve nor flush-to-zero for f16 |
 | threadgroup atomics | the device atomic with address space 2 in bits 29:28 |
 | thread index in threadgroup | built from position and size |
 | stack | G13's stack instructions kill the thread |
