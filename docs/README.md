@@ -17,7 +17,7 @@ Registers, gotchas, and things that turned out wrong.
 | [gpu-shaders.md](gpu-shaders.md) | compute, ISA, Mesa state, images |
 | [gpu-graphics.md](gpu-graphics.md) | graphics state, tilebuffer, tiling heap |
 | [gpu-vulkan.md](gpu-vulkan.md) | Honeykrisp, running the tests |
-| [audio.md](audio.md) | SIO, MCA, codec, earpiece amp (in progress) |
+| [audio.md](audio.md) | SIO, MCA, codec, earpiece amp |
 | [aop.md](aop.md) | always-on coprocessor, sensors (in progress) |
 | [debugging.md](debugging.md) | tips and corrections |
 
@@ -70,7 +70,7 @@ The user is `user`, password `147147`.
 | GPU Vulkan through Honeykrisp, vkcube under weston | :white_check_mark: |
 | GPU tilebuffer, Vulkan MSAA and descriptor indexing | :x: |
 | Audio DMA (SIO), MCA at 48 kHz | :white_check_mark: |
-| Earpiece sound | :x: |
+| Earpiece sound | :white_check_mark: |
 | AOP sensors, proximity | :x: |
 | Camera, cellular | :x: |
 
@@ -84,7 +84,7 @@ The user is `user`, password `147147`.
 6. GPU render targets live in memory (tilebuffer stores unknown), so blending
    and framebuffer reads start new passes. Vulkan has constant descriptor
    indices only and no MSAA.
-7. The earpiece is silent: the codec's DSP needs a second MCLK that only the
-   AOP drives. See [audio.md](audio.md).
+7. The earpiece plays the left channel only, with no volume control, and its
+   chips stay on. The bottom speaker is behind the AOP. See [audio.md](audio.md).
 8. The AOP firmware loads, but the AP cannot reach its DART yet. See
    [aop.md](aop.md).

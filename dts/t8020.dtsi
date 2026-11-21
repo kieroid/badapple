@@ -34,6 +34,18 @@
 	};
 
 	/*
+	 * The NCOs' reference. 900 MHz is T8103's; nothing in the ADT or the
+	 * iOS kexts gives T8020's. A wrong value shifts the pitch and the
+	 * rate the DMA drains at, which is how to check it.
+	 */
+	nco_clkref: clock-ref-nco {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <900000000>;
+		clock-output-names = "nco_ref";
+	};
+
+	/*
 	 * The SPI blocks' input clock. The ADT gives it as clock-ids 362,
 	 * which does not resolve to anything in the pmgr clock list, so this
 	 * is M1's rate for the same block at the same address. If the real
@@ -699,6 +711,42 @@
 		};
 
 		/*
+		 * The always-on processor. iBoot loads its firmware when sent
+		 * aop.img4 but leaves the CPU stopped. ADT interrupts are
+		 * 190, 189, 192, 191, the same descending pairs as ANS.
+		 */
+		aop_mbox: mbox@24a408000 {
+			compatible = "apple,t8020-asc-mailbox",
+				     "apple,t8015-asc-mailbox";
+			reg = <0x2 0x4a408000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 189 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 190 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 191 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 192 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+					  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+		};
+
+		dart_aop: iommu@24ac00000 {
+			compatible = "apple,t8020-dart", "apple,t8103-dart";
+			reg = <0x2 0x4ac00000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 204 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+		};
+
+		aop: aop@24a400000 {
+			compatible = "apple,t8020-aop";
+			reg = <0x2 0x4a400000 0x0 0x4000>,
+			      <0x2 0x4ac00000 0x0 0x4000>;
+			reg-names = "asc", "dart";
+			mboxes = <&aop_mbox>;
+			iommus = <&dart_aop 0>;
+		};
+
+		/*
 		 * The GPU's coprocessor. iBoot loads its firmware when sent one,
 		 * and only then does m1n1 enable these two, so a boot without it
 		 * is unchanged. agx-g11 boots the firmware and runs test kernels.
@@ -733,6 +781,54 @@
 			reg-names = "asc", "sgx", "fender";
 			mboxes = <&gfx_asc_mbox>;
 			power-domains = <&ps_gfx>;
+			status = "disabled";
+		};
+
+		/*
+		 * SIO, the coprocessor that does audio DMA here. iBoot loads its
+		 * firmware when it is sent one, and only then does m1n1 enable
+		 * these three nodes, so a boot without it is unchanged.
+		 *
+		 * Same addresses as T8112. The ADT lists the mailbox interrupts
+		 * as 430, 429, 432, 431, the same descending pairs as ANS.
+		 * Stream 0 is SIO itself, from mapper-sio. No resets: ps_sio
+		 * also feeds the I2C buses.
+		 */
+		sio_dart: iommu@235004000 {
+			compatible = "apple,t8020-dart", "apple,t8103-dart";
+			reg = <0x2 0x35004000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 427 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			power-domains = <&ps_sio_cpu>;
+			status = "disabled";
+		};
+
+		sio_mbox: mbox@236408000 {
+			compatible = "apple,t8020-asc-mailbox",
+				     "apple,t8015-asc-mailbox";
+			reg = <0x2 0x36408000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 429 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 430 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 431 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 432 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+					  "recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+			power-domains = <&ps_sio_cpu>;
+			status = "disabled";
+		};
+
+		sio: sio@236400000 {
+			compatible = "apple,t8020-sio", "apple,sio";
+			reg = <0x2 0x36400000 0x0 0x8000>;
+			dma-channels = <128>;
+			/* channel, then datashape flags, fifo and trigger */
+			#dma-cells = <4>;
+			mboxes = <&sio_mbox>;
+			iommus = <&sio_dart 0>;
+			power-domains = <&ps_sio_cpu>;
 			status = "disabled";
 		};
 
@@ -878,6 +974,56 @@
 		};
 
 		/*
+		 * The earpiece speaker's amp, a CS35L27 at 0x40, sits on this
+		 * bus. The pins come up muxed already, as on i2c3.
+		 */
+		i2c2: i2c@235018000 {
+			compatible = "apple,t8020-i2c", "apple,i2c";
+			reg = <0x2 0x35018000 0x0 0x1000>;
+			clocks = <&clkref>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 410 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_i2c2>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+
+		/* Five channels 0x4000 apart, as on T8103. */
+		nco: clock-controller@23b044000 {
+			compatible = "apple,t8020-nco", "apple,nco";
+			reg = <0x2 0x3b044000 0x0 0x14000>;
+			clocks = <&nco_clkref>;
+			#clock-cells = <1>;
+		};
+
+		/*
+		 * The audio serial ports. The ADT puts the six clusters 0x800
+		 * apart from 0x238400000 and their DMA adapters 0x8000 apart from
+		 * 0x238300000. A port's registers sit in its cluster, so all six
+		 * are described even though only cluster 2 runs a stream. There
+		 * are five NCOs, so clusters 3 to 5, which only lend ports, reuse
+		 * the last ones.
+		 *
+		 * SIO does the DMA. 0x30 is mca2a's TX and 0x33 mca2b's RX, which
+		 * mca.c captures through. The other cells are flags, fifo and
+		 * trigger from each channel's dma-channels entry in the ADT.
+		 */
+		mca: mca@238400000 {
+			compatible = "apple,t8020-mca", "apple,mca";
+			reg = <0x2 0x38400000 0x0 0x3000>,
+			      <0x2 0x38300000 0x0 0x30000>;
+			clocks = <&nco 0>, <&nco 1>, <&nco 2>, <&nco 3>,
+				 <&nco 4>, <&nco 4>;
+			power-domains = <&ps_audio>, <&ps_mca0>, <&ps_mca1>,
+					<&ps_mca2>, <&ps_mca3>, <&ps_mca4>,
+					<&ps_mca5>;
+			dmas = <&sio 0x30 0x20 0xcc 0xac>,
+			       <&sio 0x33 0x20 0xcc 0xac>;
+			dma-names = "tx2a", "rx2b";
+			#sound-dai-cells = <1>;
+		};
+
+		/*
 		 * The display PMU, Acorn, sits on this bus, and the touch
 		 * controller's power comes from it. iBoot already talks to it,
 		 * so the pins are muxed and there is no pinctrl here.
@@ -911,6 +1057,19 @@
 			clocks = <&clk_spi>;
 			power-domains = <&ps_spi1>;
 			cs-gpios = <&pinctrl_ap 67 1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi3: spi@23510c000 {
+			compatible = "apple,t8020-spi";
+			reg = <0x2 0x3510c000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 398 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_spi>;
+			power-domains = <&ps_spi3>;
+			cs-gpios = <&pinctrl_ap 51 1>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";

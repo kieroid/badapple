@@ -30,6 +30,8 @@
 		 * not enough, it has to be an alias.
 		 */
 		ausbphy0 = &ausbphy0;
+		/* m1n1 finds SIO by this alias. */
+		sio = &sio;
 		/* m1n1 enables it when iBoot preloaded its firmware. */
 		gfxasc = &gfx_asc;
 		/* m1n1 fills MAC addresses, antenna SKU and calibration through these. */
@@ -77,6 +79,20 @@
 		ranges;
 
 		/* To be filled by loader */
+	};
+
+	/*
+	 * The earpiece speaker: MCA cluster 2 into the codec's ASP3 on pin0,
+	 * the codec on to the amp. The machine driver sets up both chips.
+	 * Resets: AOP GPIO 20 (codec function-reset), AP GPIO 136 (amp).
+	 */
+	sound {
+		compatible = "apple,d331p-audio";
+		apple,mca = <&mca>;
+		apple,codec = <&codec>;
+		apple,amp = <&amp>;
+		codec-reset-gpios = <&pinctrl_aop 20 1>;
+		amp-reset-gpios = <&pinctrl_ap 136 1>;
 	};
 };
 
@@ -169,4 +185,48 @@
 		brcm,board-type = "apple,geniek";
 		local-bd-address = [00 00 00 00 00 00];
 	};
+};
+
+/* The CS42L75 codec, spi3/audio-codec in the ADT. */
+&spi3 {
+	status = "okay";
+
+	codec: codec@0 {
+		compatible = "cirrus,cs42l75";
+		reg = <0>;
+		spi-max-frequency = <1000000>;
+	};
+};
+
+/*
+ * 12 MHz MCLKs that run from boot: pin0 for the codec, which needs it for
+ * SPI, pin2 for the amp's PLL.
+ */
+&mca {
+	apple,mclk-out = <0 0 12000000>, <2 2 12000000>;
+};
+
+/* The earpiece amp. */
+&i2c2 {
+	amp: amp@40 {
+		compatible = "cirrus,cs35l27";
+		reg = <0x40>;
+	};
+};
+
+/*
+ * SIO firmware touches the audio, SPI and UART shims from its interrupt path,
+ * not only the one in use, and faults when one is off (found by dr1408 for
+ * Project Cascadia's iPad 8). Keep them on while SIO runs.
+ */
+&ps_audio {
+	apple,always-on;
+};
+
+&ps_spi_p {
+	apple,always-on;
+};
+
+&ps_uart_p {
+	apple,always-on;
 };

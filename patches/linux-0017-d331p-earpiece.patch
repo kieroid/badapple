@@ -1,0 +1,379 @@
+diff --git a/sound/soc/apple/Makefile b/sound/soc/apple/Makefile
+index 252ba5fc1..057b1d531 100644
+--- a/sound/soc/apple/Makefile
++++ b/sound/soc/apple/Makefile
+@@ -2,3 +2,5 @@
+ snd-soc-apple-mca-y	:= mca.o
+ 
+ obj-$(CONFIG_SND_SOC_APPLE_MCA)	+= snd-soc-apple-mca.o
++snd-soc-d331p-y		:= d331p.o
++obj-$(CONFIG_SND_SOC_APPLE_MCA)	+= snd-soc-d331p.o
+diff --git a/sound/soc/apple/d331p.c b/sound/soc/apple/d331p.c
+new file mode 100644
+index 000000000..49ff0e408
+--- /dev/null
++++ b/sound/soc/apple/d331p.c
+@@ -0,0 +1,363 @@
++// SPDX-License-Identifier: GPL-2.0-only OR MIT
++/*
++ * Machine driver for the iPhone XS Max (D331p) earpiece speaker
++ *
++ * One front end, MCA cluster 2, on MCA port 0, which the ADT routes as "tx.4"
++ * to "pin0", the bus of the CS42L75 codec's ASP3. The codec passes ASP3 RX
++ * slot 12 to its ASP1, where the CS35L27 amp listens. Neither chip has a
++ * driver yet, so this one sets both up at probe with iOS's register values
++ * and leaves them running.
++ *
++ * Copyright (c) 2026 kiki <kieran@lavato.net>
++ */
++
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/of_dma.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/spi/spi.h>
++#include <linux/unaligned.h>
++#include <sound/soc.h>
++
++/*
++ * Asahi's macaudio format, except that the cs42l75 codec's ASP1 drives BCLK
++ * and FSYNC on pin0 (its tdmC function in iOS), so MCA is a clock consumer.
++ */
++#define D331P_DAI_FMT (SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBP_CFP | \
++		       SND_SOC_DAIFMT_GATED | SND_SOC_DAIFMT_IB_IF)
++
++SND_SOC_DAILINK_DEFS(fe,
++	DAILINK_COMP_ARRAY(COMP_CPU("mca-pcm-2")),
++	DAILINK_COMP_ARRAY(COMP_DUMMY()),
++	DAILINK_COMP_ARRAY(COMP_EMPTY()));
++
++SND_SOC_DAILINK_DEFS(be,
++	DAILINK_COMP_ARRAY(COMP_CPU("mca-i2s-0")),
++	DAILINK_COMP_ARRAY(COMP_DUMMY()));
++
++/*
++ * The codec's ASP frames (iOS default 0xf9 + 1) are 250 BCLKs at 12 MHz, with
++ * 16 bit slots from their start. iOS plays in slots 12 and 13; only slot 12
++ * reaches the earpiece. Bring-up: slots and tx_mask pick the layout per
++ * stream, so it can change without reloading the card.
++ */
++static int slots = 15;
++module_param(slots, int, 0644);
++static uint tx_mask = 0x3000;
++module_param(tx_mask, uint, 0644);
++static uint rx_mask = 0x3000;
++module_param(rx_mask, uint, 0644);
++
++static int d331p_fe_hw_params(struct snd_pcm_substream *substream,
++			      struct snd_pcm_hw_params *params)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	struct snd_soc_dai *cpu = snd_soc_rtd_to_cpu(rtd, 0);
++	int ret;
++
++	ret = snd_soc_dai_set_tdm_slot(cpu, tx_mask, rx_mask, slots, 16);
++	if (ret)
++		return ret;
++	return snd_soc_dai_set_bclk_ratio(cpu, 250);
++}
++
++static const struct snd_soc_ops d331p_fe_ops = {
++	.hw_params = d331p_fe_hw_params,
++};
++
++static struct snd_soc_dai_link d331p_links[] = {
++	{
++		.name = "Earpiece",
++		.stream_name = "Earpiece",
++		.dynamic = 1,
++		.dpcm_merged_rate = 1,
++		.dpcm_merged_chan = 1,
++		.dpcm_merged_format = 1,
++		.dai_fmt = D331P_DAI_FMT,
++		.ops = &d331p_fe_ops,
++		SND_SOC_DAILINK_REG(fe),
++	},
++	{
++		.name = "Earpiece amp",
++		.no_pcm = 1,
++		.dai_fmt = D331P_DAI_FMT,
++		SND_SOC_DAILINK_REG(be),
++	},
++};
++
++static const struct snd_soc_dapm_route d331p_routes[] = {
++	{ "I2S0 TX", NULL, "PCM2 TX" },
++	{ "PCM2 RX", NULL, "I2S0 RX" },
++};
++
++/* Reply pairs to 0x90 status polls: ready once one has bits 0x90 set. */
++static bool d331p_spi_ready(const u8 *rx)
++{
++	for (int i = 0; i < 10; i++)
++		if ((rx[2 * i + 1] & 0x90) == 0x90)
++			return true;
++	return false;
++}
++
++static void d331p_spi_polls(u8 *tx)
++{
++	for (int i = 0; i < 20; i += 2) {
++		tx[i] = 0x90;
++		tx[i + 1] = 0;
++	}
++}
++
++/*
++ * One CS42L75 write in Apple's SPIv2 framing (AppleCSSPIv2Audio
++ * _writeDataBlock): address and count, status polls until ready, then a
++ * byte (0xb5) or a little endian word (0xb2), chip select held throughout.
++ */
++static int d331p_codec_write(struct spi_device *spi, u8 *tx, u8 *rx,
++			     u32 reg, u32 val, bool word)
++{
++	struct spi_transfer t = { .tx_buf = tx, .rx_buf = rx, .cs_change = 1 };
++	unsigned int nb = word ? 4 : 1;
++	const u8 *st = rx + 7;
++	int ret, tries = 0;
++
++	tx[0] = 0x80;
++	tx[1] = reg;
++	tx[2] = reg >> 8;
++	tx[3] = reg >> 16;
++	tx[4] = 0x81;
++	tx[5] = 1;
++	tx[6] = 0;
++	d331p_spi_polls(tx + 7);
++	t.len = 27;
++	ret = spi_sync_transfer(spi, &t, 1);
++	while (!ret && !d331p_spi_ready(st)) {
++		if (tries++ == 5)
++			return -ETIMEDOUT;
++		d331p_spi_polls(tx);
++		t.len = 20;
++		ret = spi_sync_transfer(spi, &t, 1);
++		st = rx;
++	}
++	if (ret)
++		return ret;
++
++	tx[0] = word ? 0xb2 : 0xb5;
++	put_unaligned_le32(val, tx + 1);
++	d331p_spi_polls(tx + 1 + nb);
++	t.len = nb + 21;
++	t.cs_change = 0;
++	ret = spi_sync_transfer(spi, &t, 1);
++	if (!ret && !d331p_spi_ready(rx + 1 + nb))
++		ret = -EIO;
++	return ret;
++}
++
++/* After reset, 0x5 = 0 and the 0x20000 clock word select MCLK on pin0. */
++static const u32 d331p_codec_regs[][2] = {
++	{ 0x10000, 0x1e },	/* PDN_ALL off, PCM bus on */
++	{ 0x20005, 0x38 },	/* ASP1, the amp bus: master, 250 bit frame */
++	{ 0x20006, 0x82 },
++	{ 0x20011, 0x38 },	/* ASP3, the AP bus: the same */
++	{ 0x20012, 0x82 },
++	{ 0x410014, 4 },	/* ASP1 and ASP3 data pins */
++	{ 0x430014, 4 },
++	{ 0x10009, 0x33 },
++	{ 0x460008, 192 },	/* ASP3 RX ch8 at bit 192 (slot 12), 16 bit */
++	{ 0x460012, 5 },
++	{ 0x410000, 16 },	/* ASP1 TX ch0 at bit 16, the amp's slot */
++	{ 0x41000a, 5 },
++	{ 0x320000, 0x3a },	/* ASP1 TX ch0 source: ASP3 RX ch8 */
++};
++
++struct d331p_amp_reg {
++	u32 reg, mask, val;
++};
++
++/* iOS _configureAllAmps for the earpiece, minus its PAC firmware. */
++static const struct d331p_amp_reg d331p_amp_regs[] = {
++	{ 0x3000, ~0U, 0x655 },		/* PLL from MCLK, 12 MHz */
++	{ 0x3004, 0x1f, 3 },		/* 48 kHz */
++	{ 0x2008, ~0U, 0x53000d0d },	/* default power blocks + PCM path */
++	{ 0x3800, 0x130, 0x110 },	/* boost, PCM mode */
++	{ 0x4404, 0x20000, 0x20000 },	/* noise gate */
++	{ 0x1c08, ~0U, 0 },		/* PDM port off */
++	{ 0x5c00, ~0U, 0 },		/* PCM input */
++	{ 0x5000, 0x1177ff, 0x1007fd },
++	{ 0x5800, 0x1f1f, 0x030f },	/* gain */
++	{ 0x7208, 0x751, 0x440 },	/* ASP format */
++	{ 0x720c, 3, 3 },
++	{ 0x7258, 0x77, 0x22 },		/* RX 16 bit */
++	{ 0x7230, ~0U, 0x10 },		/* RX1 at bit 16 */
++	{ 0x7200, ~0U, 0x10000 },	/* RX1 on */
++	{ 0x7000, ~0U, 8 },		/* DAC from RX1 */
++	{ 0x5c04, ~0U, 0 },		/* unmute */
++	{ 0x2000, ~0U, 1 },		/* GLOBAL_EN */
++};
++
++static const struct regmap_config d331p_amp_regmap = {
++	.reg_bits = 32,
++	.val_bits = 32,
++	.reg_stride = 4,
++};
++
++static int d331p_reset(struct device *dev, const char *name)
++{
++	struct gpio_desc *gpio = devm_gpiod_get(dev, name, GPIOD_OUT_HIGH);
++
++	if (IS_ERR(gpio))
++		return dev_err_probe(dev, PTR_ERR(gpio), "no %s gpio\n", name);
++	msleep(5);
++	gpiod_set_value_cansleep(gpio, 0);
++	return 0;
++}
++
++static int d331p_amp_init(struct device *dev, struct i2c_client *client)
++{
++	struct regmap *map;
++	unsigned int id = 0;
++	int ret, i;
++
++	ret = d331p_reset(dev, "amp-reset");
++	if (ret)
++		return ret;
++	msleep(50);
++	map = regmap_init_i2c(client, &d331p_amp_regmap);
++	if (IS_ERR(map))
++		return PTR_ERR(map);
++	ret = regmap_read(map, 0, &id);
++	if (!ret && id != 0x35a270)
++		ret = -ENODEV;
++	for (i = 0; i < ARRAY_SIZE(d331p_amp_regs) && !ret; i++)
++		ret = regmap_write_bits(map, d331p_amp_regs[i].reg,
++					d331p_amp_regs[i].mask, d331p_amp_regs[i].val);
++	regmap_exit(map);
++	if (ret)
++		dev_err(dev, "amp id %#x, setup failed: %d\n", id, ret);
++	return ret;
++}
++
++static int d331p_codec_init(struct device *dev, struct spi_device *spi)
++{
++	u8 *tx = devm_kzalloc(dev, 32, GFP_KERNEL);
++	u8 *rx = devm_kzalloc(dev, 32, GFP_KERNEL);
++	int ret, i;
++
++	if (!tx || !rx)
++		return -ENOMEM;
++	ret = d331p_reset(dev, "codec-reset");
++	if (ret)
++		return ret;
++	msleep(20);
++	ret = d331p_codec_write(spi, tx, rx, 0x5, 0, false);
++	msleep(10);
++	if (!ret)
++		ret = d331p_codec_write(spi, tx, rx, 0x20000, 0x10, true);
++	for (i = 0; i < ARRAY_SIZE(d331p_codec_regs) && !ret; i++)
++		ret = d331p_codec_write(spi, tx, rx, d331p_codec_regs[i][0],
++					d331p_codec_regs[i][1], false);
++	return ret;
++}
++
++/* The amp and codec, found through the sound node's phandles. */
++static int d331p_hw_init(struct device *dev)
++{
++	struct device_node *np;
++	struct i2c_client *amp;
++	struct device *codec;
++	int ret;
++
++	np = of_parse_phandle(dev->of_node, "apple,amp", 0);
++	amp = np ? of_find_i2c_device_by_node(np) : NULL;
++	of_node_put(np);
++	np = of_parse_phandle(dev->of_node, "apple,codec", 0);
++	codec = np ? bus_find_device_by_of_node(&spi_bus_type, np) : NULL;
++	of_node_put(np);
++	if (!amp || !codec) {
++		ret = dev_err_probe(dev, -EPROBE_DEFER, "no amp or codec yet\n");
++		goto out;
++	}
++
++	ret = d331p_amp_init(dev, amp);
++	if (ret)
++		goto out;
++	ret = d331p_codec_init(dev, to_spi_device(codec));
++	if (ret)
++		dev_err(dev, "codec setup failed: %d\n", ret);
++out:
++	if (amp)
++		put_device(&amp->dev);
++	put_device(codec);
++	return ret;
++}
++
++static int d331p_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct snd_soc_card *card;
++	struct device_node *mca;
++	struct dma_chan *chan;
++	int ret;
++
++	card = devm_kzalloc(dev, sizeof(*card), GFP_KERNEL);
++	if (!card)
++		return -ENOMEM;
++
++	mca = of_parse_phandle(dev->of_node, "apple,mca", 0);
++	if (!mca)
++		return dev_err_probe(dev, -EINVAL, "missing apple,mca\n");
++
++	/*
++	 * SIO only provides the DMA channels once its firmware runs, seconds
++	 * later. A card that binds before that never retries, so wait here.
++	 */
++	chan = of_dma_request_slave_channel(mca, "tx2a");
++	if (IS_ERR(chan)) {
++		of_node_put(mca);
++		return dev_err_probe(dev, PTR_ERR(chan), "no SIO DMA yet\n");
++	}
++	dma_release_channel(chan);
++
++	ret = d331p_hw_init(dev);
++	if (ret) {
++		of_node_put(mca);
++		return ret;
++	}
++
++	/* The node reference is kept for the card's lifetime. */
++	fe_cpus[0].of_node = mca;
++	fe_platforms[0].of_node = mca;
++	be_cpus[0].of_node = mca;
++
++	card->dev = dev;
++	card->name = "D331p";
++	card->owner = THIS_MODULE;
++	card->dai_link = d331p_links;
++	card->num_links = ARRAY_SIZE(d331p_links);
++	card->dapm_routes = d331p_routes;
++	card->num_dapm_routes = ARRAY_SIZE(d331p_routes);
++
++	return devm_snd_soc_register_card(dev, card);
++}
++
++static const struct of_device_id d331p_of_match[] = {
++	{ .compatible = "apple,d331p-audio" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, d331p_of_match);
++
++static struct platform_driver d331p_driver = {
++	.driver = {
++		.name = "snd-soc-d331p",
++		.of_match_table = d331p_of_match,
++	},
++	.probe = d331p_probe,
++};
++module_platform_driver(d331p_driver);
++
++MODULE_AUTHOR("kiki <kieran@lavato.net>");
++MODULE_DESCRIPTION("iPhone XS Max earpiece speaker machine driver");
++MODULE_LICENSE("Dual MIT/GPL");

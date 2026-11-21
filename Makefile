@@ -158,8 +158,14 @@ $(IMAGE): FORCE
 	    --enable CONFIG_WLAN_VENDOR_BROADCOM \
 	    --enable CONFIG_BRCMFMAC --enable CONFIG_BRCMFMAC_PCIE \
 	    --enable CONFIG_BT_HCIBCM4377 \
+	    --enable CONFIG_DMADEVICES --enable CONFIG_APPLE_SIO \
+	    --enable CONFIG_SOUND --enable CONFIG_SND --enable CONFIG_SND_SOC \
+	    --enable CONFIG_SND_SOC_APPLE_MCA --enable CONFIG_COMMON_CLK_APPLE_NCO \
+	    --enable CONFIG_SND_SOC_SPDIF \
+	    --enable CONFIG_I2C_CHARDEV \
 	    --disable CONFIG_FW_LOADER_USER_HELPER \
 	    --enable CONFIG_DRM_APPLE_H11P \
+	    --enable CONFIG_SPI_SPIDEV \
 	    --enable CONFIG_INPUT_TOUCHSCREEN \
 	    --enable CONFIG_TOUCHSCREEN_APPLE_MT_SPI \
 	    --enable CONFIG_DRM_AGX $(KCONFIG_EXTRA)
