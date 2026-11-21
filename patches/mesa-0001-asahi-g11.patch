@@ -1,5 +1,5 @@
 diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
-index e131bcf..e29ba3c 100644
+index e131bcf..c3e18b1 100644
 --- a/src/asahi/compiler/agx_compile.c
 +++ b/src/asahi/compiler/agx_compile.c
 @@ -21,6 +21,7 @@
@@ -154,7 +154,7 @@ index e131bcf..e29ba3c 100644
 -                       nir_src_as_uint(instr->src[i].src) == 0;
 +                       nir_src_as_uint(instr->src[i].src) == 0 &&
 +                       !(AGX_G11 && b->shader->stage == MESA_SHADER_FRAGMENT &&
-+                         instr->src[i].src_type == nir_tex_src_lod);
++                         instr->op == nir_texop_txl);
           break;
  
        case nir_tex_src_lod_bias_min_agx:
@@ -733,7 +733,7 @@ index c037150..a7dc21d 100644
 +bool agx_nir_lower_g11_layered_image_store(struct nir_shader *s);
  bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 diff --git a/src/asahi/compiler/agx_nir_lower_address.c b/src/asahi/compiler/agx_nir_lower_address.c
-index d59860f..152cede 100644
+index d59860f..36a26b5 100644
 --- a/src/asahi/compiler/agx_nir_lower_address.c
 +++ b/src/asahi/compiler/agx_nir_lower_address.c
 @@ -5,6 +5,7 @@
@@ -759,7 +759,7 @@ index d59860f..152cede 100644
 +{
 +   bool store = intr->intrinsic == nir_intrinsic_store_global;
 +   if ((!store && intr->intrinsic != nir_intrinsic_load_global) ||
-+       !(nir_intrinsic_access(intr) & (ACCESS_COHERENT | ACCESS_VOLATILE)))
++       !(nir_intrinsic_access(intr) & ACCESS_COHERENT))
 +      return false;
 +
 +   nir_def *value = store ? intr->src[0].ssa : &intr->def;
@@ -819,7 +819,7 @@ index 07bf42a..ed46c9f 100644
           value = nir_u2u16(&b, value);
  
 diff --git a/src/asahi/compiler/agx_nir_lower_texture.c b/src/asahi/compiler/agx_nir_lower_texture.c
-index 616d0b0..aff1672 100644
+index 616d0b0..54d0811 100644
 --- a/src/asahi/compiler/agx_nir_lower_texture.c
 +++ b/src/asahi/compiler/agx_nir_lower_texture.c
 @@ -8,6 +8,7 @@
@@ -876,7 +876,7 @@ index 616d0b0..aff1672 100644
 +   }
 +
 +   enum pipe_format format = nir_intrinsic_format(intr);
-+   if (!(access & (ACCESS_COHERENT | ACCESS_VOLATILE)) ||
++   if (!(access & ACCESS_COHERENT) ||
 +       (format != PIPE_FORMAT_R32_UINT && format != PIPE_FORMAT_R32_SINT))
 +      return false;
 +
@@ -6349,7 +6349,7 @@ index bbd98c0..e16b8d2 100644
     sampler->lod_bias_fp16 = _mesa_float_to_half(info->mipLodBias);
  
 diff --git a/src/asahi/vulkan/hk_shader.c b/src/asahi/vulkan/hk_shader.c
-index e12393a..12f3f11 100644
+index e12393a..3da975f 100644
 --- a/src/asahi/vulkan/hk_shader.c
 +++ b/src/asahi/vulkan/hk_shader.c
 @@ -105,6 +105,28 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
@@ -6400,7 +6400,31 @@ index e12393a..12f3f11 100644
     return (!feats || feats->customBorderColors) ? HK_FEAT_CUSTOM_BORDER : 0;
  }
  
-@@ -573,6 +600,68 @@ hk_lower_multiview(nir_shader *nir)
+@@ -406,6 +433,23 @@ lower_load_global_bounded(nir_builder *b, nir_intrinsic_instr *intr)
+       access |= ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER;
+    }
+ 
++   /* G11 turns coherent loads into atomics (agx_nir_lower_address.c), which
++    * must not write the read-only zero page: out of bounds reads 0 instead.
++    */
++   if (AGX_G11 && (access & ACCESS_COHERENT)) {
++      nir_def *zero = nir_imm_zero(b, intr->def.num_components,
++                                   intr->def.bit_size);
++      nir_push_if(b, valid);
++      nir_def *in = nir_load_global(
++         b, intr->def.num_components, intr->def.bit_size,
++         nir_iadd(b, intr->src[0].ssa, nir_u2u64(b, intr->src[1].ssa)),
++         .align_mul = nir_intrinsic_align_mul(intr),
++         .align_offset = nir_intrinsic_align_offset(intr), .access = access);
++      nir_pop_if(b, NULL);
++      nir_def_replace(&intr->def, nir_if_phi(b, in, zero));
++      return;
++   }
++
+    nir_def *val = nir_load_global(
+       b, intr->def.num_components, intr->def.bit_size,
+       nir_iadd(b, base, nir_u2u64(b, offset)),
+@@ -573,6 +617,68 @@ hk_lower_multiview(nir_shader *nir)
     b.shader->info.outputs_written |= VARYING_BIT_LAYER;
  }
  
@@ -6469,7 +6493,7 @@ index e12393a..12f3f11 100644
  static nir_def *
  query_custom_border(nir_builder *b, nir_tex_instr *tex)
  {
-@@ -659,6 +748,291 @@ agx_nir_lower_custom_border(nir_shader *nir)
+@@ -659,6 +765,291 @@ agx_nir_lower_custom_border(nir_shader *nir)
     return nir_shader_tex_pass(nir, lower, nir_metadata_none, NULL);
  }
  
@@ -6761,7 +6785,7 @@ index e12393a..12f3f11 100644
  static nir_def *
  query_min_lod(nir_builder *b, nir_tex_instr *tex, bool int_coords)
  {
-@@ -783,6 +1157,125 @@ should_lower_robust(const nir_intrinsic_instr *intr, const void *_)
+@@ -783,6 +1174,125 @@ should_lower_robust(const nir_intrinsic_instr *intr, const void *_)
            intr->intrinsic == nir_intrinsic_image_deref_atomic_swap;
  }
  
@@ -6887,7 +6911,7 @@ index e12393a..12f3f11 100644
  static void
  hk_lower_nir(struct hk_device *dev, nir_shader *nir,
               const struct vk_pipeline_robustness_state *rs, bool is_multiview,
-@@ -794,6 +1287,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -794,6 +1304,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
        rs = &vk_robustness_disabled;
     }
  
@@ -6896,7 +6920,7 @@ index e12393a..12f3f11 100644
     const nir_opt_access_options access_options = {
        .is_vulkan = true,
     };
-@@ -814,8 +1309,15 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -814,8 +1326,15 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     if (nir->info.stage == MESA_SHADER_VERTEX) {
        if (is_multiview)
           hk_lower_multiview(nir);
@@ -6912,7 +6936,7 @@ index e12393a..12f3f11 100644
     if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
        NIR_PASS(_, nir, nir_lower_patch_vertices,
                 nir->info.tess.tcs_vertices_out, NULL);
-@@ -834,6 +1336,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -834,6 +1353,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
  
     // NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
  
@@ -6923,7 +6947,7 @@ index e12393a..12f3f11 100644
     /* Turn cache flushes into image coherency bits while we still have derefs */
     NIR_PASS(_, nir, nir_lower_memory_model);
  
-@@ -855,6 +1361,23 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -855,6 +1378,23 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
        NIR_PASS(_, nir, agx_nir_lower_custom_border);
     }
  
@@ -6947,7 +6971,7 @@ index e12393a..12f3f11 100644
     NIR_PASS(_, nir, hk_nir_lower_descriptors, rs, set_layout_count,
              set_layouts);
     NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
-@@ -928,6 +1451,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
+@@ -928,6 +1468,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
  
     NIR_PASS(_, nir, agx_nir_lower_texture);
     NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
@@ -6956,7 +6980,7 @@ index e12393a..12f3f11 100644
  
     agx_preprocess_nir(nir);
  
-@@ -996,6 +1521,133 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
+@@ -996,6 +1538,133 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
                                        : VK_SUCCESS;
  }
  
@@ -7090,7 +7114,7 @@ index e12393a..12f3f11 100644
  static bool
  lower_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  {
-@@ -1073,6 +1725,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1073,6 +1742,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                 struct hk_shader *shader, mesa_shader_stage sw_stage, bool hw,
                 nir_xfb_info *xfb_info, unsigned set_count)
  {
@@ -7098,7 +7122,7 @@ index e12393a..12f3f11 100644
     unsigned nr_vbos = 0;
     bool kill_psiz = false;
  
-@@ -1158,6 +1811,21 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1158,6 +1828,21 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
  
     shader->info.set_count = set_count;
  
@@ -7120,7 +7144,7 @@ index e12393a..12f3f11 100644
     /* XXX: rename */
     NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos);
     NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
-@@ -1178,7 +1846,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
+@@ -1178,7 +1863,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        .no_stop = nir->info.stage == MESA_SHADER_FRAGMENT,
        .has_scratch = !nir->info.internal,
        .promote_constants = true,
@@ -7130,7 +7154,7 @@ index e12393a..12f3f11 100644
     };
  
     /* For now, sample shading is always dynamic. Indicate that. */
-@@ -1283,10 +1952,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
+@@ -1283,10 +1969,10 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
        hk_shader_destroy(dev, shader);
     }
  
@@ -7143,7 +7167,7 @@ index e12393a..12f3f11 100644
  }
  
  static void dump_shader_ir(
-@@ -1952,6 +2621,18 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1952,6 +2638,18 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
        agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
     }
  
@@ -7162,7 +7186,7 @@ index e12393a..12f3f11 100644
     if (s->b.uses_txf)
        agx_usc_push_packed(&b, SAMPLER, dev->dev.txf_sampler);
  
-@@ -1961,6 +2642,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
+@@ -1961,6 +2659,7 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
  
     if (fragment)
        agx_usc_push_packed(&b, FRAGMENT_PROPERTIES, s->b.fragment_props);

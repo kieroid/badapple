@@ -37,16 +37,17 @@
 | sparse | binding only. Resident and aliased sparse images are refused in the format query: dEQP made them anyway when the format query allowed it, and their reads wedged the GPU. The kernel takes 256 bind ops a call, so Mesa splits bigger binds |
 | gathers | none in hardware. Each gather is four samples at texel centres, so the sampler still wraps, borders and compares; linear filtering at a centre returns the texel. Cube texels off the face go to the next face's edge texel. Every 5th `texture_gather` graphics case: 146 pass, no fails |
 | min LOD | no LOD modes with a minimum. `textureClamp` samples at max(LOD, min) with the LOD from derivatives, gradients go through `nir_lower_tex`. Every 3rd `*clamp*` case: 756 pass, 2 fail (`mirrored`) |
-| LOD 0 | an LOD of constant 0 is not automatic LOD in fragment shaders: G11 takes that from derivatives |
-| coherent memory | plain loads and stores stay in the core's cache: no barrier makes them visible to another core, no load or store cache bit helps, and the big barriers G13 uses end the thread. Atomics are coherent, so coherent 32 and 64-bit buffer accesses and coherent R32 integer image accesses become atomics (`g11_coherent_atomics`, `g11_coherent_image_atomic`). Other image formats stay plain. SPIR-V texel availability (`devicecoherent`) leaves its barrier before the store and after the load, where `nir_lower_memory_model` drops it, so the G11 pass runs first and reads those barriers. Every 10th `message_passing` case: 81 pass, no fails (35 failed before) |
+| LOD 0 | a `txl` with constant LOD 0 is not encoded as automatic LOD in fragment shaders: G11 takes that from derivatives. Texel fetches keep it, they broke otherwise |
+| coherent memory | plain loads and stores stay in the core's cache: no barrier makes them visible to another core, no load or store cache bit helps, and the big barriers G13 uses end the thread. Atomics are coherent, so coherent 32 and 64-bit buffer accesses (out of bounds loads skip the atomic, which would write the read-only zero page) and coherent R32 integer image accesses become atomics (`g11_coherent_atomics`, `g11_coherent_image_atomic`). Other image formats stay plain. SPIR-V texel availability (`devicecoherent`) leaves its barrier before the store and after the load, where `nir_lower_memory_model` drops it, so the G11 pass runs first and reads those barriers. Every 10th `message_passing` case: 81 pass, no fails (35 failed before) |
 | varying index | `st_vary` with a register index clears bit 22, for separately compiled vertex shaders |
 
-dEQP-VK, every 200th mustpass case (15486): 4220 pass, 21 fail, 11220 not
-supported, 40 internal errors, no GPU wedges.
-`textureoffsetclamp.clamp_to_border.sampler3d_bias_float_fragment` times out
-and is skipped. Fails: more than 16 textures, a load after a store to the
-same texel (below), fp16 denormals, memory model cases. The last two are
-fixed: see `half denormals` in gpu-shaders.md and `coherent memory` above.
+dEQP-VK, every 200th mustpass case (15441): 4199 pass, 16 fail, 11181 not
+supported, 40 internal errors (ASTC and EAC blits), 5 resource errors, no
+hangs or GPU wedges. Fails: 12 `descriptorset_random` (more than 16
+textures), 2 `mutable_descriptor`, 1 clip distance (only the first plane
+works), 1 multiview query. The earlier run's fp16 denormal, memory model and
+null descriptor fails and its one hang are gone. A resource error (a missing
+amber file) aborts the dEQP process, so the cases after one were rerun alone.
 Every 20th multisampling case (2795): 311 pass, no fails. Vulkan 1.3; 1.4
 needs subgroups.
 
