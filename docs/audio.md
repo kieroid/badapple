@@ -1,8 +1,8 @@
 # Audio
 
-The earpiece plays: `aplay -D hw:0,0`, 48 kHz, 16 bit stereo. Only the left
-channel reaches it, both chips stay on from boot and there is no volume
-control yet. Patches `linux-0015` to `linux-0017`.
+The earpiece plays, mono at 48 kHz, through PulseAudio or `aplay -D hw:0,0`.
+Volume is PulseAudio's software volume. The codec runs from boot, the amp
+only while a stream is open. Patches `linux-0015` to `linux-0017`.
 
 | piece | where |
 |---|---|
@@ -36,9 +36,12 @@ Cluster registers as on M1, 0x800 apart. The selector fields, from iOS
 
 The earpiece bus is pin 0, clocked by the codec. As iOS sets up `mca2a`
 (`syncGen-config` "syn0 pin0"), cluster 0's clock generator takes pin 0's bit
-clock, its sync generator runs from that, and cluster 2's TX syncs to it.
-Asahi's consumer setup (sync from `BIT(port)`) never moves the DMA. Changing
-any of this while a stream runs hard-hangs the phone.
+clock, its sync generator follows pin 0 (source 7), and cluster 2's TX syncs
+to it. With the sync generator on the clock generator (source 1) instead, the
+DMA runs but each stream's frame starts at a random phase to the codec's, so
+a given slot only sometimes lands where the codec reads it. Asahi's consumer
+setup (sync from `BIT(port)`) never moves the DMA. Changing any of this while
+a stream runs hard-hangs the phone.
 
 MCLK pins: a port drives its MCLK from PMGR MCK n, which follows NCO n. NCO
 enable is bit 31. The codec's MCLK1 is pin 0, the amp's MCLK pin 2, both at

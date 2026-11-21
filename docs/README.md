@@ -84,7 +84,7 @@ The user is `user`, password `147147`.
 6. GPU render targets live in memory (tilebuffer stores unknown), so blending
    and framebuffer reads start new passes. Vulkan has constant descriptor
    indices only and no MSAA.
-7. The earpiece plays the left channel only, with no volume control, and its
-   chips stay on. The bottom speaker is behind the AOP. See [audio.md](audio.md).
+7. The earpiece is mono with software volume only. The bottom speaker is
+   behind the AOP. See [audio.md](audio.md).
 8. The AOP firmware loads, but the AP cannot reach its DART yet. See
    [aop.md](aop.md).

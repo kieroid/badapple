@@ -10,10 +10,10 @@ index 252ba5fc1..057b1d531 100644
 +obj-$(CONFIG_SND_SOC_APPLE_MCA)	+= snd-soc-d331p.o
 diff --git a/sound/soc/apple/d331p.c b/sound/soc/apple/d331p.c
 new file mode 100644
-index 000000000..49ff0e408
+index 000000000..c049acf4a
 --- /dev/null
 +++ b/sound/soc/apple/d331p.c
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,408 @@
 +// SPDX-License-Identifier: GPL-2.0-only OR MIT
 +/*
 + * Machine driver for the iPhone XS Max (D331p) earpiece speaker
@@ -21,8 +21,9 @@ index 000000000..49ff0e408
 + * One front end, MCA cluster 2, on MCA port 0, which the ADT routes as "tx.4"
 + * to "pin0", the bus of the CS42L75 codec's ASP3. The codec passes ASP3 RX
 + * slot 12 to its ASP1, where the CS35L27 amp listens. Neither chip has a
-+ * driver yet, so this one sets both up at probe with iOS's register values
-+ * and leaves them running.
++ * driver yet, so this one sets both up at probe with iOS's register values.
++ * The codec then runs all the time, as the bus clock master; the amp is on
++ * while a stream is open.
 + *
 + * Copyright (c) 2026 kiki <kieran@lavato.net>
 + */
@@ -57,15 +58,16 @@ index 000000000..49ff0e408
 +
 +/*
 + * The codec's ASP frames (iOS default 0xf9 + 1) are 250 BCLKs at 12 MHz, with
-+ * 16 bit slots from their start. iOS plays in slots 12 and 13; only slot 12
-+ * reaches the earpiece. Bring-up: slots and tx_mask pick the layout per
-+ * stream, so it can change without reloading the card.
++ * 16 bit slots from their start. iOS plays stereo in slots 12 and 13, but
++ * only slot 12 reaches the earpiece, so the stream is mono there. Bring-up:
++ * slots and tx_mask pick the layout per stream, so it can change without
++ * reloading the card.
 + */
 +static int slots = 15;
 +module_param(slots, int, 0644);
-+static uint tx_mask = 0x3000;
++static uint tx_mask = 0x1000;
 +module_param(tx_mask, uint, 0644);
-+static uint rx_mask = 0x3000;
++static uint rx_mask = 0x1000;
 +module_param(rx_mask, uint, 0644);
 +
 +static int d331p_fe_hw_params(struct snd_pcm_substream *substream,
@@ -81,7 +83,32 @@ index 000000000..49ff0e408
 +	return snd_soc_dai_set_bclk_ratio(cpu, 250);
 +}
 +
++/*
++ * The codec clocks the bus at 48 kHz whatever the stream asks for. Also the
++ * amp's GLOBAL_EN; card drvdata is its regmap.
++ */
++static int d331p_fe_startup(struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++	int ret;
++
++	ret = snd_pcm_hw_constraint_single(substream->runtime,
++					   SNDRV_PCM_HW_PARAM_RATE, 48000);
++	if (ret < 0)
++		return ret;
++	return regmap_write(snd_soc_card_get_drvdata(rtd->card), 0x2000, 1);
++}
++
++static void d331p_fe_shutdown(struct snd_pcm_substream *substream)
++{
++	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
++
++	regmap_write(snd_soc_card_get_drvdata(rtd->card), 0x2000, 0);
++}
++
 +static const struct snd_soc_ops d331p_fe_ops = {
++	.startup = d331p_fe_startup,
++	.shutdown = d331p_fe_shutdown,
 +	.hw_params = d331p_fe_hw_params,
 +};
 +
@@ -193,7 +220,10 @@ index 000000000..49ff0e408
 +	u32 reg, mask, val;
 +};
 +
-+/* iOS _configureAllAmps for the earpiece, minus its PAC firmware. */
++/*
++ * iOS _configureAllAmps for the earpiece, minus its PAC firmware. GLOBAL_EN
++ * (0x2000) follows the stream, see d331p_fe_startup.
++ */
 +static const struct d331p_amp_reg d331p_amp_regs[] = {
 +	{ 0x3000, ~0U, 0x655 },		/* PLL from MCLK, 12 MHz */
 +	{ 0x3004, 0x1f, 3 },		/* 48 kHz */
@@ -211,7 +241,6 @@ index 000000000..49ff0e408
 +	{ 0x7200, ~0U, 0x10000 },	/* RX1 on */
 +	{ 0x7000, ~0U, 8 },		/* DAC from RX1 */
 +	{ 0x5c04, ~0U, 0 },		/* unmute */
-+	{ 0x2000, ~0U, 1 },		/* GLOBAL_EN */
 +};
 +
 +static const struct regmap_config d331p_amp_regmap = {
@@ -231,9 +260,8 @@ index 000000000..49ff0e408
 +	return 0;
 +}
 +
-+static int d331p_amp_init(struct device *dev, struct i2c_client *client)
++static int d331p_amp_init(struct device *dev, struct regmap *map)
 +{
-+	struct regmap *map;
 +	unsigned int id = 0;
 +	int ret, i;
 +
@@ -241,16 +269,12 @@ index 000000000..49ff0e408
 +	if (ret)
 +		return ret;
 +	msleep(50);
-+	map = regmap_init_i2c(client, &d331p_amp_regmap);
-+	if (IS_ERR(map))
-+		return PTR_ERR(map);
 +	ret = regmap_read(map, 0, &id);
 +	if (!ret && id != 0x35a270)
 +		ret = -ENODEV;
 +	for (i = 0; i < ARRAY_SIZE(d331p_amp_regs) && !ret; i++)
 +		ret = regmap_write_bits(map, d331p_amp_regs[i].reg,
 +					d331p_amp_regs[i].mask, d331p_amp_regs[i].val);
-+	regmap_exit(map);
 +	if (ret)
 +		dev_err(dev, "amp id %#x, setup failed: %d\n", id, ret);
 +	return ret;
@@ -278,35 +302,54 @@ index 000000000..49ff0e408
 +	return ret;
 +}
 +
-+/* The amp and codec, found through the sound node's phandles. */
-+static int d331p_hw_init(struct device *dev)
++static void d331p_amp_put(void *data)
++{
++	struct regmap *map = data;
++	struct device *dev = regmap_get_device(map);
++
++	regmap_exit(map);
++	put_device(dev);
++}
++
++/*
++ * The amp and codec, found through the sound node's phandles. The amp's
++ * regmap stays for d331p_fe_startup/shutdown; the codec is done after this.
++ */
++static int d331p_hw_init(struct device *dev, struct regmap **amp_map)
 +{
 +	struct device_node *np;
 +	struct i2c_client *amp;
 +	struct device *codec;
++	struct regmap *map;
 +	int ret;
 +
-+	np = of_parse_phandle(dev->of_node, "apple,amp", 0);
-+	amp = np ? of_find_i2c_device_by_node(np) : NULL;
-+	of_node_put(np);
 +	np = of_parse_phandle(dev->of_node, "apple,codec", 0);
 +	codec = np ? bus_find_device_by_of_node(&spi_bus_type, np) : NULL;
 +	of_node_put(np);
++	np = of_parse_phandle(dev->of_node, "apple,amp", 0);
++	amp = np ? of_find_i2c_device_by_node(np) : NULL;
++	of_node_put(np);
 +	if (!amp || !codec) {
-+		ret = dev_err_probe(dev, -EPROBE_DEFER, "no amp or codec yet\n");
-+		goto out;
++		if (amp)
++			put_device(&amp->dev);
++		put_device(codec);
++		return dev_err_probe(dev, -EPROBE_DEFER, "no amp or codec yet\n");
 +	}
 +
-+	ret = d331p_amp_init(dev, amp);
-+	if (ret)
-+		goto out;
-+	ret = d331p_codec_init(dev, to_spi_device(codec));
-+	if (ret)
-+		dev_err(dev, "codec setup failed: %d\n", ret);
-+out:
-+	if (amp)
++	map = regmap_init_i2c(amp, &d331p_amp_regmap);
++	if (IS_ERR(map)) {
 +		put_device(&amp->dev);
++		ret = PTR_ERR(map);
++	} else {
++		ret = devm_add_action_or_reset(dev, d331p_amp_put, map);
++	}
++	if (!ret)
++		ret = d331p_amp_init(dev, map);
++	if (!ret)
++		ret = d331p_codec_init(dev, to_spi_device(codec));
 +	put_device(codec);
++	if (!ret)
++		*amp_map = map;
 +	return ret;
 +}
 +
@@ -315,6 +358,7 @@ index 000000000..49ff0e408
 +	struct device *dev = &pdev->dev;
 +	struct snd_soc_card *card;
 +	struct device_node *mca;
++	struct regmap *amp_map;
 +	struct dma_chan *chan;
 +	int ret;
 +
@@ -337,7 +381,7 @@ index 000000000..49ff0e408
 +	}
 +	dma_release_channel(chan);
 +
-+	ret = d331p_hw_init(dev);
++	ret = d331p_hw_init(dev, &amp_map);
 +	if (ret) {
 +		of_node_put(mca);
 +		return ret;
@@ -349,6 +393,7 @@ index 000000000..49ff0e408
 +	be_cpus[0].of_node = mca;
 +
 +	card->dev = dev;
++	snd_soc_card_set_drvdata(card, amp_map);
 +	card->name = "D331p";
 +	card->owner = THIS_MODULE;
 +	card->dai_link = d331p_links;
