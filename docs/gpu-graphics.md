@@ -64,6 +64,14 @@ Other targets blend through the txf sampler, which does not see earlier
 writes in the same pass, so a draw that reads them starts a new pass. Slow,
 and overlap within one draw is still wrong.
 
+Samples and image writes reach texture and sampler states 0 to 15. Render
+targets are always spilled, so their texture and PBE descriptors follow the
+shader's textures. GLES3's 16 textures plus a render target need 18: such a
+draw is dropped with a warning, since a wrapped state index read or wrote
+through another descriptor and wedged the GPU. A shader using API sampler 15
+gets samplers 0 to 15 for API samplers 0 to 15 and no txf sampler, so vertex
+shaders and draws without colour targets can use all 16.
+
 ## Depth, stencil, mipmaps, MSAA
 
 - ZLS control and depth/stencil registers are G13's. Z16 clear depth wants
