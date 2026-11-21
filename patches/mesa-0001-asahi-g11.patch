@@ -1,5 +1,5 @@
 diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
-index e131bcf..a6cd71a 100644
+index e131bcf..e29ba3c 100644
 --- a/src/asahi/compiler/agx_compile.c
 +++ b/src/asahi/compiler/agx_compile.c
 @@ -21,6 +21,7 @@
@@ -145,7 +145,20 @@ index e131bcf..a6cd71a 100644
        agx_image_barrier_3(b);
        return NULL;
     }
-@@ -2260,18 +2312,31 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+@@ -2243,8 +2295,11 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+       case nir_tex_src_lod:
+       case nir_tex_src_bias:
+          lod = index;
++         /* G11 fragment shaders take automatic LOD from derivatives */
+          lod_is_zero = nir_src_is_const(instr->src[i].src) &&
+-                       nir_src_as_uint(instr->src[i].src) == 0;
++                       nir_src_as_uint(instr->src[i].src) == 0 &&
++                       !(AGX_G11 && b->shader->stage == MESA_SHADER_FRAGMENT &&
++                         instr->src[i].src_type == nir_tex_src_lod);
+          break;
+ 
+       case nir_tex_src_lod_bias_min_agx:
+@@ -2260,18 +2315,31 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
        case nir_tex_src_texture_offset:
           texture = index;
           break;
@@ -180,7 +193,7 @@ index e131bcf..a6cd71a 100644
           texture =
              agx_translate_bindless_handle(b, &instr->src[i].src, &bindless);
           break;
-@@ -2352,6 +2417,20 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+@@ -2352,6 +2420,20 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
     else if (!agx_is_null(compare))
        compare_offset = compare;
  
@@ -201,7 +214,7 @@ index e131bcf..a6cd71a 100644
     agx_index tmp = agx_vec_temp(b->shader, dst.size, instr->is_sparse ? 8 : 4);
     agx_instr *I = agx_texture_sample_to(
        b, tmp, coords, lod, bindless, texture, sampler, compare_offset,
-@@ -2359,6 +2438,18 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
+@@ -2359,6 +2441,18 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
        !agx_is_null(packed_offset), !agx_is_null(compare),
        instr->op == nir_texop_lod, agx_gather_for_nir(instr), instr->is_sparse);
  
@@ -220,7 +233,7 @@ index e131bcf..a6cd71a 100644
     if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
        I->op = AGX_OPCODE_TEXTURE_LOAD;
        b->shader->out->uses_txf = true;
-@@ -2853,6 +2944,205 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
+@@ -2853,6 +2947,205 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
     return false;
  }
  
@@ -426,7 +439,7 @@ index e131bcf..a6cd71a 100644
  static void
  agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
                   uint8_t *ts_count, uint8_t *ss_count)
-@@ -2900,7 +3190,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2900,7 +3193,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
        .lower_subgroup_masks = true,
     };
  
@@ -437,7 +450,7 @@ index e131bcf..a6cd71a 100644
  
     /* Lower addressing modes. The sooner we do this, the sooner we get rid of
      * amul/aadd instructions and can let nir_opt_algebraic do its job. But we
-@@ -2968,7 +3260,23 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -2968,7 +3263,23 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
     /* Force preamble generation for internal shaders since hk's meta copies
      * depend on it for correctness with imgwblk intrinsics.
      */
@@ -462,7 +475,7 @@ index e131bcf..a6cd71a 100644
         (!(agx_compiler_debug & AGX_DBG_NOPREAMBLE) || nir->info.internal)) {
        unsigned sizes[] = {
           *preamble_size,
-@@ -3034,6 +3342,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
+@@ -3034,6 +3345,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
      * do it after fusing constant shifts. Constant folding will clean up.
      */
     NIR_PASS(_, nir, agx_nir_lower_algebraic_late);
@@ -473,7 +486,7 @@ index e131bcf..a6cd71a 100644
     NIR_PASS(_, nir, agx_nir_fuse_selects);
     NIR_PASS(_, nir, nir_opt_constant_folding);
     NIR_PASS(_, nir, nir_opt_combine_barriers, NULL, NULL);
-@@ -3412,7 +3724,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3412,7 +3727,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     AGX_PASS(ctx, agx_ra);
     agx_lower_64bit_postra(ctx);
  
@@ -483,7 +496,7 @@ index e131bcf..a6cd71a 100644
        /* Apple always allocate 40 more bytes in the entrypoint and align to 4. */
        uint64_t stack_size = align(DIV_ROUND_UP(ctx->scratch_size_B, 4) + 10, 4);
  
-@@ -3502,7 +3815,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3502,7 +3818,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
      */
     bool dump_shaders = agx_should_dump(nir, AGX_DBG_SHADERS);
  #ifndef NDEBUG
@@ -493,7 +506,7 @@ index e131bcf..a6cd71a 100644
  #else
     bool selftest = false;
  #endif
-@@ -3512,7 +3826,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
+@@ -3512,7 +3829,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
        bool errors =
           agx2_disassemble(binary->data + offset, binary->size - offset, fp);
  
@@ -502,7 +515,7 @@ index e131bcf..a6cd71a 100644
           /* In a self-test, disassemble again to get something the user can look
            * at to figure out what went wrong.
            */
-@@ -3592,9 +3906,16 @@ agx_preprocess_nir(nir_shader *nir)
+@@ -3592,9 +3909,16 @@ agx_preprocess_nir(nir_shader *nir)
  
     NIR_PASS(_, nir, nir_lower_vars_to_ssa);
  
@@ -734,7 +747,7 @@ index 07bf42a..ed46c9f 100644
           value = nir_u2u16(&b, value);
  
 diff --git a/src/asahi/compiler/agx_nir_lower_texture.c b/src/asahi/compiler/agx_nir_lower_texture.c
-index 616d0b0..ce5e93b 100644
+index 616d0b0..cbdf72b 100644
 --- a/src/asahi/compiler/agx_nir_lower_texture.c
 +++ b/src/asahi/compiler/agx_nir_lower_texture.c
 @@ -8,6 +8,7 @@
@@ -1022,7 +1035,7 @@ index 616d0b0..ce5e93b 100644
     nir_def *r =
        nir_bcsel(b, oob, nir_imm_int(b, 0xFFF0), nir_channel(b, coord, c));
  
-@@ -706,10 +881,65 @@ agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
+@@ -706,10 +881,229 @@ agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
     return progress;
  }
  
@@ -1080,6 +1093,170 @@ index 616d0b0..ce5e93b 100644
 +   return true;
 +}
 +
++/*
++ * G11 has no gather: sample each of the four texels at its centre. The sampler
++ * still applies the wrap mode, the border and the depth compare, and linear
++ * filtering at a texel centre returns that texel. Cube gathers move the
++ * direction across the face, so edge texels come from the next face.
++ *
++ * ponytail: no rectangle gathers (GL only), cube corners are whatever the
++ * direction lands on
++ */
++static bool
++g11_lower_gather(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
++{
++   if (tex->op != nir_texop_tg4)
++      return false;
++
++   b->cursor = nir_before_instr(&tex->instr);
++   bool cube = tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE;
++   int c = nir_tex_instr_src_index(tex, nir_tex_src_coord);
++   nir_def *coord = nir_f2f32(b, tex->src[c].src.ssa);
++   nir_def *offset = nir_steal_tex_src(tex, nir_tex_src_offset);
++   nir_def *size = nir_i2f32(
++      b, nir_trim_vector(b,
++                         nir_build_texture_query(b, tex, nir_texop_txs,
++                                                 2 + tex->is_array,
++                                                 nir_type_int32, false, true),
++                         2));
++
++   /* Face coordinates in [0, 1] (Vulkan 16.5.4), m is the major axis */
++   nir_def *x = nir_channel(b, coord, 0), *y = nir_channel(b, coord, 1);
++   nir_def *uv = nir_vec2(b, x, y);
++   nir_def *z = NULL, *m = NULL, *isx = NULL, *isy = NULL;
++   if (cube) {
++      z = nir_channel(b, coord, 2);
++      nir_def *ax = nir_fabs(b, x), *ay = nir_fabs(b, y), *az = nir_fabs(b, z);
++      isx = nir_iand(b, nir_fge(b, ax, ay), nir_fge(b, ax, az));
++      isy = nir_iand(b, nir_inot(b, isx), nir_fge(b, ay, az));
++      m = nir_bcsel(b, isx, ax, nir_bcsel(b, isy, ay, az));
++      nir_def *sc =
++         nir_bcsel(b, isx, nir_fneg(b, nir_fmul(b, nir_fsign(b, x), z)),
++                   nir_bcsel(b, isy, x, nir_fmul(b, nir_fsign(b, z), x)));
++      nir_def *tc = nir_bcsel(b, isy, nir_fmul(b, nir_fsign(b, y), z),
++                              nir_fneg(b, y));
++      uv = nir_fmul_imm(
++         b, nir_fadd_imm(b, nir_fdiv(b, nir_vec2(b, sc, tc), m), 1.0), 0.5);
++   }
++
++   nir_def *t = nir_fadd_imm(b, nir_fmul(b, uv, size), -0.5);
++   if (offset)
++      t = nir_fadd(b, t, nir_i2f32(b, offset));
++   nir_def *i0 = nir_fadd_imm(b, nir_ffloor(b, t), 0.5);
++   nir_def *centre[2] = {nir_fdiv(b, i0, size),
++                         nir_fdiv(b, nir_fadd_imm(b, i0, 1.0), size)};
++
++   /* Gather order: (i0, j1), (i1, j1), (i1, j0), (i0, j0) */
++   static const unsigned ij[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
++   nir_def *out[4];
++   for (unsigned k = 0; k < 4; ++k) {
++      nir_def *s = nir_channel(b, centre[ij[k][0]], 0);
++      nir_def *u = nir_channel(b, centre[ij[k][1]], 1);
++      nir_def *p;
++      if (cube) {
++         /* A texel off the face is the next face's edge texel: put it at
++          * k = size / (size - 1), which projects to that texel's centre
++          */
++         s = nir_fadd_imm(b, nir_fmul_imm(b, s, 2.0), -1.0);
++         u = nir_fadd_imm(b, nir_fmul_imm(b, u, 2.0), -1.0);
++         nir_def *out_s = nir_fgt_imm(b, nir_fabs(b, s), 1.0);
++         nir_def *out_u = nir_fgt_imm(b, nir_fabs(b, u), 1.0);
++         nir_def *w = nir_channel(b, size, 0);
++         nir_def *k = nir_fdiv(b, w, nir_fmax_imm(b, nir_fadd_imm(b, w, -1.0), 1.0));
++         nir_def *s2 = nir_bcsel(b, out_s, nir_fmul(b, nir_fsign(b, s), k),
++                                 nir_bcsel(b, out_u, nir_fmul(b, s, k), s));
++         u = nir_bcsel(b, out_u, nir_fmul(b, nir_fsign(b, u), k),
++                       nir_bcsel(b, out_s, nir_fmul(b, u, k), u));
++         s = nir_fmul(b, s2, m);
++         u = nir_fmul(b, u, m);
++         p = nir_vec3(
++            b,
++            nir_bcsel(b, isx, x,
++                      nir_bcsel(b, isy, s, nir_fmul(b, nir_fsign(b, z), s))),
++            nir_bcsel(b, isy, y, nir_fneg(b, u)),
++            nir_bcsel(b, isx, nir_fneg(b, nir_fmul(b, nir_fsign(b, x), s)),
++                      nir_bcsel(b, isy, nir_fmul(b, nir_fsign(b, y), u), z)));
++      } else {
++         p = nir_vec2(b, s, u);
++      }
++
++      if (tex->is_array) {
++         p = nir_vector_insert_imm(
++            b, nir_pad_vector(b, p, p->num_components + 1),
++            nir_channel(b, coord, tex->coord_components - 1),
++            p->num_components);
++      }
++      p = nir_f2fN(b, p, tex->src[c].src.ssa->bit_size);
++
++      nir_def *zero = nir_imm_float(b, 0.0);
++
++      /* Clones get their uses on insertion, so edit them after */
++      nir_tex_instr *smp =
++         nir_instr_as_tex(nir_instr_clone(b->shader, &tex->instr));
++      smp->op = nir_texop_txl;
++      smp->def.num_components = tex->is_shadow ? 1 : 4;
++      smp->is_new_style_shadow = true;
++      smp->component = 0;
++      nir_builder_instr_insert(b, &smp->instr);
++      nir_src_rewrite(&smp->src[c].src, p);
++      nir_tex_instr_add_src(smp, nir_tex_src_lod, zero);
++      out[k] = nir_channel(b, &smp->def, tex->is_shadow ? 0 : tex->component);
++   }
++
++   nir_def_replace(&tex->def, nir_vec(b, out, 4));
++   return true;
++}
++
++/*
++ * G11 has no LOD modes with a minimum. Compute the LOD from derivatives
++ * (gradients go through nir_lower_tex) and sample at max(LOD, min_lod).
++ */
++static bool
++g11_lower_min_lod(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
++{
++   if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb) ||
++       nir_tex_instr_src_index(tex, nir_tex_src_min_lod) < 0)
++      return false;
++
++   b->cursor = nir_before_instr(&tex->instr);
++
++   /* LOD queries take no layer */
++   unsigned n = tex->coord_components - tex->is_array;
++   nir_def *coord =
++      nir_trim_vector(b, nir_get_tex_src(tex, nir_tex_src_coord), n);
++
++   /* Clones get their uses on insertion, so edit them after */
++   nir_tex_instr *q = nir_instr_as_tex(nir_instr_clone(b->shader, &tex->instr));
++   q->op = nir_texop_lod;
++   q->is_shadow = false;
++   q->dest_type = nir_type_float32;
++   q->coord_components = n;
++   q->def.num_components = 2;
++   q->def.bit_size = 32;
++   nir_builder_instr_insert(b, &q->instr);
++   for (int i = q->num_srcs - 1; i >= 0; --i) {
++      nir_tex_src_type t = q->src[i].src_type;
++      if (t == nir_tex_src_coord)
++         nir_src_rewrite(&q->src[i].src, coord);
++      else if (t != nir_tex_src_texture_handle &&
++               t != nir_tex_src_sampler_handle &&
++               t != nir_tex_src_texture_offset &&
++               t != nir_tex_src_sampler_offset)
++         nir_tex_instr_remove_src(q, i);
++   }
++
++   nir_def *lod = nir_channel(b, &q->def, 1);
++   nir_def *bias = nir_steal_tex_src(tex, nir_tex_src_bias);
++   if (bias)
++      lod = nir_fadd(b, lod, nir_f2f32(b, bias));
++   lod = nir_fmax(b, lod,
++                  nir_f2f32(b, nir_steal_tex_src(tex, nir_tex_src_min_lod)));
++
++   tex->op = nir_texop_txl;
++   nir_tex_instr_add_src(tex, nir_tex_src_lod, lod);
++   return true;
++}
++
  bool
  agx_nir_lower_texture(nir_shader *s)
  {
@@ -1088,7 +1265,23 @@ index 616d0b0..ce5e93b 100644
  
     nir_tex_src_type_constraints tex_constraints = {
        [nir_tex_src_lod] = {true, 16},
-@@ -743,8 +973,12 @@ agx_nir_lower_texture(nir_shader *s)
+@@ -728,6 +1122,15 @@ agx_nir_lower_texture(nir_shader *s)
+ 
+    NIR_PASS(progress, s, nir_lower_image_atomics_to_global, NULL, NULL);
+ 
++   if (AGX_G11) {
++      nir_lower_tex_options txd_clamp = {.lower_txd_clamp = true};
++      NIR_PASS(progress, s, nir_lower_tex, &txd_clamp);
++      NIR_PASS(progress, s, nir_shader_tex_pass, g11_lower_min_lod,
++               nir_metadata_control_flow, NULL);
++      NIR_PASS(progress, s, nir_shader_tex_pass, g11_lower_gather,
++               nir_metadata_control_flow, NULL);
++   }
++
+    NIR_PASS(progress, s, nir_shader_intrinsics_pass, legalize_image_lod,
+             nir_metadata_control_flow, NULL);
+    NIR_PASS(progress, s, nir_shader_intrinsics_pass, lower_images,
+@@ -743,8 +1146,12 @@ agx_nir_lower_texture(nir_shader *s)
      * 16-bit multisample indices) but before lowering queries (as the lowering
      * generates txs for array textures).
      */
@@ -1102,7 +1295,7 @@ index 616d0b0..ce5e93b 100644
     NIR_PASS(progress, s, nir_shader_instructions_pass, lower_tex_crawl,
              nir_metadata_control_flow, NULL);
  
-@@ -773,6 +1007,48 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
+@@ -773,6 +1180,48 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
     return true;
  }
  

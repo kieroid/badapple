@@ -35,6 +35,9 @@
 | LOD query | computed from derivatives (G11 has none). hk then clamps the level to the sampler's minLod and maxLod and rounds it for the nearest mip filter, read from the sampler word. All 190 `texturequerylod` cases pass. GL's query skips the clamps |
 | image store then load | a load of a texel the same invocation just stored can read the old value when neighbouring texels belong to other workgroups: stale texture cache lines. Mesa's `image_barrier` fences, `0xf596`, waits and the G13 load cache bits (43 to 47) do not help, and G11 has no `flush_memory_to_texture`. The 13 ASTC `texel_view_compatible` `image_store` fails are this |
 | sparse | binding only. Resident and aliased sparse images are refused in the format query: dEQP made them anyway when the format query allowed it, and their reads wedged the GPU. The kernel takes 256 bind ops a call, so Mesa splits bigger binds |
+| gathers | none in hardware. Each gather is four samples at texel centres, so the sampler still wraps, borders and compares; linear filtering at a centre returns the texel. Cube texels off the face go to the next face's edge texel. Every 5th `texture_gather` graphics case: 146 pass, no fails |
+| min LOD | no LOD modes with a minimum. `textureClamp` samples at max(LOD, min) with the LOD from derivatives, gradients go through `nir_lower_tex`. Every 3rd `*clamp*` case: 756 pass, 2 fail (`mirrored`) |
+| LOD 0 | an LOD of constant 0 is not automatic LOD in fragment shaders: G11 takes that from derivatives |
 | varying index | `st_vary` with a register index clears bit 22, for separately compiled vertex shaders |
 
 dEQP-VK, every 200th mustpass case (15486): 4220 pass, 21 fail, 11220 not
@@ -53,7 +56,10 @@ kill fix, and GLES3 texture functions pass 1678 of 1679. Older bugs it found:
   mirror-clamp-to-edge, which G11 does not have and hk does not advertise
   (`samplerMirrorClampToEdge`), but dEQP uses it without checking. The wrap
   field acts as 2 bits on G11: 4 to 7 repeat 0 to 3.
-- Some `clamp` and `texture_gather` cases take over 5 minutes to compile.
+- Every `texture_gather` case and the `*clamp*` cases aborted in the
+  instruction packer (no gather, no min LOD modes on G11). The case runner
+  logged the abort as a hang, so they looked like slow compiles. Fixed, see
+  the table.
 
 All 9872 `texture.swizzle` cases: 2056 pass, the rest not supported. Every
 10th `sparse_resources` case (1940): 186 pass, no fails.
