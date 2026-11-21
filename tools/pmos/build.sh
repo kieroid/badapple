@@ -65,6 +65,8 @@ if [ $UI = phosh ]; then
 fi
 # pmbootstrap leaves etc/apk/keys empty, and apk then refuses every package
 cp $C/usr/share/apk/keys/*.pub $C/usr/share/apk/keys/aarch64/*.pub $O/etc/apk/keys/
+# the qemu-aarch64 stand-in runs a getty on ttyAMA0, which the phone lacks
+sed "/ttyAMA0/d" $C/etc/inittab > $O/etc/inittab
 # compile our gschema override in with the chroot's schemas
 S=$(mktemp -d)
 cp $C/usr/share/glib-2.0/schemas/* $O/usr/share/glib-2.0/schemas/* $S/
